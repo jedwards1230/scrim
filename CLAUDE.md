@@ -64,6 +64,17 @@ dispatches to `internal/cli` (once that package exists).
 2. Export only the types and functions used by other packages.
 3. Write a `<name>_test.go` alongside — table-driven tests preferred.
 
+## Test Isolation
+
+Never point a manual test, script, or e2e run at the real `~/.scrim` (or the
+default port `7777`) on a dev machine -- that's a developer's actual running
+daemon and live canvases. A `scrim stop` (or `--dir ~/.scrim`) run against it
+kills real work, not a fixture. Always use an isolated `--dir`/`SCRIM_DIR`
+(e.g. a fresh `t.TempDir()` in Go tests, or a `mktemp -d` in shell) and a
+non-default `SCRIM_PORT` (a high, unlikely-to-collide port) for anything that
+starts a daemon -- `scripts/e2e.sh` and every test in this repo already follow
+this; match it in anything new.
+
 ## Build Variables
 
 Version info (`Version`, `Commit`, `Date`) is injected into `internal/version`
