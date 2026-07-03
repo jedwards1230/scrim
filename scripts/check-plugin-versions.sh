@@ -60,7 +60,11 @@ get_plugin_version() {
     local ref="$2"
     local plugin_json="plugins/${plugin_name}/.claude-plugin/plugin.json"
 
-    git show "${ref}:${plugin_json}" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || echo ""
+    # jq errors are intentionally NOT silenced here: a missing file (git show
+    # fails, nothing on stdin) and malformed JSON (jq fails, prints its own
+    # parse error) must stay distinguishable, since a caller treating both as
+    # "empty" would misreport a real JSON syntax error as "file not found".
+    git show "${ref}:${plugin_json}" 2>/dev/null | jq -r '.version // empty'
 }
 
 # Get version from marketplace.json entry at a specific git ref
@@ -70,7 +74,7 @@ get_marketplace_version() {
     local ref="$2"
 
     git show "${ref}:${MARKETPLACE_FILE}" 2>/dev/null | \
-        jq -r --arg name "$plugin_name" '.plugins[] | select(.name == $name) | .version // empty' 2>/dev/null || echo ""
+        jq -r --arg name "$plugin_name" '.plugins[] | select(.name == $name) | .version // empty'
 }
 
 # Get metadata.version from marketplace.json at a specific git ref
@@ -78,7 +82,7 @@ get_marketplace_version() {
 get_metadata_version() {
     local ref="$1"
 
-    git show "${ref}:${MARKETPLACE_FILE}" 2>/dev/null | jq -r '.metadata.version // empty' 2>/dev/null || echo ""
+    git show "${ref}:${MARKETPLACE_FILE}" 2>/dev/null | jq -r '.metadata.version // empty'
 }
 
 # Get list of changed plugins from git diff
@@ -86,7 +90,13 @@ get_metadata_version() {
 get_changed_plugins() {
     local base_ref="$1"
 
-    git diff --name-only "${base_ref}"...HEAD -- 'plugins/' 2>/dev/null | \
+    # Two-dot (A..B), not three-dot (A...B): base_ref is a literal commit SHA
+    # (github.event.pull_request.base.sha in the caller workflow), not a
+    # branch ref, so a direct diff against that exact snapshot is what's
+    # wanted -- three-dot recomputes a merge-base first, which can pick up
+    # unrelated commits from main if the PR branch was rebased and the
+    # ancestry between base_ref and HEAD isn't a straight line anymore.
+    git diff --name-only "${base_ref}"..HEAD -- 'plugins/' 2>/dev/null | \
         grep -E '^plugins/[^/]+/' | \
         sed 's|^plugins/\([^/]*\)/.*|\1|' | \
         sort -u || true
@@ -97,7 +107,8 @@ get_changed_plugins() {
 marketplace_changed() {
     local base_ref="$1"
 
-    git diff --name-only "${base_ref}"...HEAD -- "${MARKETPLACE_FILE}" 2>/dev/null | grep -q . && return 0 || return 1
+    # Two-dot, not three-dot -- see the comment in get_changed_plugins above.
+    git diff --name-only "${base_ref}"..HEAD -- "${MARKETPLACE_FILE}" 2>/dev/null | grep -q . && return 0 || return 1
 }
 
 # Check if a plugin is new (doesn't exist in base ref)
@@ -277,8 +288,18 @@ write_summary() {
             echo ""
             echo "| Plugin | Status | Details |"
             echo "|--------|--------|---------|"
+            # Substring extraction instead of `IFS='|' read`: a result string
+            # is "name|status|details", but details is free-form (an error
+            # message) and can itself contain a literal "|" -- IFS-splitting
+            # on every "|" would misparse that into the wrong fields. Peeling
+            # off exactly the first two fields and treating everything after
+            # the second "|" as the (possibly pipe-containing) details keeps
+            # this correct regardless of what's in details.
             for result in "${PLUGIN_RESULTS[@]}"; do
-                IFS='|' read -r name status details <<< "$result"
+                name="${result%%|*}"
+                rest="${result#*|}"
+                status="${rest%%|*}"
+                details="${rest#*|}"
                 if [[ "$status" == "pass" ]]; then
                     echo "| \`${name}\` | :white_check_mark: Pass | ${details} |"
                 else
@@ -290,7 +311,8 @@ write_summary() {
             if [[ -n "$METADATA_RESULT" ]]; then
                 echo "### Marketplace Metadata"
                 echo ""
-                IFS='|' read -r status details <<< "$METADATA_RESULT"
+                status="${METADATA_RESULT%%|*}"
+                details="${METADATA_RESULT#*|}"
                 if [[ "$status" == "pass" ]]; then
                     echo ":white_check_mark: \`.claude-plugin/marketplace.json\` **metadata.version**: ${details}"
                 else
@@ -357,10 +379,14 @@ main() {
         echo ""
         echo "Changed plugins: $(echo "$changed_plugins" | tr '\n' ' ')"
 
-        # Validate each changed plugin
-        for plugin in $changed_plugins; do
+        # Validate each changed plugin. A `read` loop over the newline-
+        # delimited list, not `for plugin in $changed_plugins`, since the
+        # latter word-splits and glob-expands the unquoted expansion -- a
+        # plugin directory name containing a space or a glob character would
+        # silently break iteration.
+        while IFS= read -r plugin; do
             validate_plugin "$plugin" "$base_ref" || true
-        done
+        done <<< "$changed_plugins"
 
         # Check metadata version bump
         check_metadata_version "$base_ref" || true
