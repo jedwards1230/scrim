@@ -161,6 +161,11 @@ func metaPath(metaDir, id string) string {
 	return filepath.Join(metaDir, id+".json")
 }
 
+// writeMeta writes metadata atomically: it writes to a temp file in metaDir
+// and renames it into place, mirroring state.Save's pattern, so a concurrent
+// reader (readMeta, called from the dashboard/favicon/status handlers) can
+// only ever observe the file fully written or not yet renamed -- never a
+// partial write that fails to unmarshal and silently degrades to defaults.
 func writeMeta(metaDir, id string, m meta) error {
 	if err := os.MkdirAll(metaDir, 0o755); err != nil { //nolint:gosec // metadata dir is user-owned working state, not sensitive
 		return fmt.Errorf("creating metadata dir: %w", err)
@@ -169,8 +174,26 @@ func writeMeta(metaDir, id string, m meta) error {
 	if err != nil {
 		return fmt.Errorf("encoding canvas metadata: %w", err)
 	}
-	if err := os.WriteFile(metaPath(metaDir, id), data, 0o644); err != nil { //nolint:gosec // metadata is not sensitive
-		return fmt.Errorf("writing canvas metadata: %w", err)
+
+	tmp, err := os.CreateTemp(metaDir, "."+id+"-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp metadata file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once renamed; cleans up on any early return
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close() //nolint:errcheck // best-effort close on error path
+		return fmt.Errorf("writing temp metadata file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp metadata file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil { //nolint:gosec // metadata is not sensitive
+		return fmt.Errorf("setting metadata file permissions: %w", err)
+	}
+	if err := os.Rename(tmpPath, metaPath(metaDir, id)); err != nil {
+		return fmt.Errorf("renaming metadata file into place: %w", err)
 	}
 	return nil
 }

@@ -1,8 +1,12 @@
 package canvas
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -234,6 +238,99 @@ func TestDeleteMissingMetadataIsNotAnError(t *testing.T) {
 	}
 	if err := Delete(canvasesDir, metaDir, "report"); err != nil {
 		t.Errorf("Delete() of a canvas with no metadata file error = %v, want nil", err)
+	}
+}
+
+// TestWriteMetaLeavesExistingFileUntouchedOnFailure guards writeMeta's
+// atomicity fix: if the final rename fails, whatever already existed at the
+// destination path must be left completely untouched -- not corrupted, not
+// partially overwritten -- and no stray temp file left behind in metaDir.
+func TestWriteMetaLeavesExistingFileUntouchedOnFailure(t *testing.T) {
+	metaDir := t.TempDir()
+	const id = "report"
+
+	// Force the final os.Rename to fail: a directory can never be replaced
+	// by renaming a regular file over it (POSIX and Windows both refuse
+	// this), so this deterministically exercises the rename-failure path
+	// without needing permission tricks.
+	if err := os.Mkdir(metaPath(metaDir, id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeMeta(metaDir, id, meta{Title: "should not be written"}); err == nil {
+		t.Fatal("writeMeta() with a directory occupying the destination path should error")
+	}
+
+	fi, err := os.Stat(metaPath(metaDir, id))
+	if err != nil {
+		t.Fatalf("stat metadata path after failed writeMeta(): %v", err)
+	}
+	if !fi.IsDir() {
+		t.Error("writeMeta() failure left the destination path replaced instead of untouched")
+	}
+
+	entries, err := os.ReadDir(metaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantName := filepath.Base(metaPath(metaDir, id))
+	for _, e := range entries {
+		if e.Name() != wantName {
+			t.Errorf("writeMeta() left a stray temp file behind after failure: %q", e.Name())
+		}
+	}
+}
+
+// TestWriteMetaAtomicUnderConcurrentReads guards the actual failure mode
+// the review comment described: a reader (readMeta, via the dashboard or
+// favicon handlers) hitting a torn, partially-written metadata file mid
+// write. It runs writes and reads concurrently against the same id --
+// under `go test -race` this also proves the write path itself introduces
+// no data race -- and asserts a reader never observes content that fails
+// to unmarshal, which is what a non-atomic write would eventually produce
+// under enough concurrent iterations. This holds deterministically here
+// because writeMeta always builds the new content in a separate temp file
+// and only exposes it at metaPath via a single os.Rename: a concurrent
+// os.ReadFile of metaPath can only ever observe the complete previous
+// file, the complete new file, or "not found" (before the first write) --
+// never a partial one.
+func TestWriteMetaAtomicUnderConcurrentReads(t *testing.T) {
+	metaDir := t.TempDir()
+	const id = "concurrent"
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			m := meta{Title: fmt.Sprintf("title-%d", i)}
+			if err := writeMeta(metaDir, id, m); err != nil {
+				t.Errorf("writeMeta() error = %v", err)
+				return
+			}
+		}
+	}()
+
+	var corrupted int32
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			data, err := os.ReadFile(metaPath(metaDir, id)) //nolint:gosec // metaDir/id are test-controlled constants
+			if err != nil {
+				continue // not written yet -- fine, not what this test guards against
+			}
+			var m meta
+			if jsonErr := json.Unmarshal(data, &m); jsonErr != nil {
+				atomic.AddInt32(&corrupted, 1)
+			}
+		}
+	}()
+
+	wg.Wait()
+	if corrupted != 0 {
+		t.Errorf("readMeta observed %d corrupted (partially-written) metadata file(s) during concurrent writes", corrupted)
 	}
 }
 
