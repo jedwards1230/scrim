@@ -79,10 +79,14 @@ func (h *hub) canvasClientCount(id string) int {
 // closeAll signals every currently- and future-registered SSE handler to
 // return promptly, so a graceful http.Server.Shutdown isn't left waiting on
 // a client that keeps its connection open indefinitely (e.g. a browser tab
-// left open on a canvas). Safe to call more than once and concurrently with
-// register/unregister; handlers already selecting on done pick it up
-// immediately, and any handler that calls register afterward gets a channel
-// that's already closed.
+// left open on a canvas). It closes the single shared h.closed channel
+// (returned by done), not each client's own per-connection reload channel --
+// every SSE handler already selects on h.closed alongside its own reload
+// channel and request context, so closing the one shared channel is
+// sufficient to unblock all of them at once. Safe to call more than once and
+// concurrently with register/unregister; handlers already selecting on done
+// pick it up immediately, and any handler that calls register afterward
+// finds done already closed.
 func (h *hub) closeAll() {
 	h.closeOnce.Do(func() { close(h.closed) })
 }

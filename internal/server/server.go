@@ -136,6 +136,16 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
+	// Whichever case unblocked the select above, every open SSE connection
+	// must be told to return before http.Server.Shutdown below waits on
+	// in-flight handlers -- otherwise a browser tab left open on a canvas
+	// blocks shutdown for up to the timeout, exactly like issue #11. The
+	// stopCh path already calls this via initiateShutdown, but ctx.Done()
+	// (an OS signal via signal.NotifyContext in cli/serve.go) and the
+	// serveErrCh path do not, so it's called unconditionally here;
+	// hub.closeAll is sync.Once-guarded, so a repeat call is a no-op.
+	s.hub.closeAll()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
