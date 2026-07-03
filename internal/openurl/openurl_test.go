@@ -29,11 +29,11 @@ func TestCommandFor(t *testing.T) {
 			wantArgs: []string{"http://127.0.0.1:7777/"},
 		},
 		{
-			name:     "windows uses cmd start with an empty title arg",
+			name:     "windows uses rundll32's FileProtocolHandler, not cmd /c start",
 			goos:     "windows",
 			rawURL:   "http://127.0.0.1:7777/?t=a&b=c",
-			wantName: "cmd",
-			wantArgs: []string{"/c", "start", "", "http://127.0.0.1:7777/?t=a&b=c"},
+			wantName: "rundll32",
+			wantArgs: []string{"url.dll,FileProtocolHandler", "http://127.0.0.1:7777/?t=a&b=c"},
 		},
 		{
 			name:    "unsupported platform errors instead of guessing",

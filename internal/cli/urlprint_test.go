@@ -119,7 +119,7 @@ func TestPrintURLLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printURLLines(&buf, tt.host, tt.rawURL)
+			printURLLines(&buf, urlLines(tt.host, tt.rawURL))
 			out := buf.String()
 			for _, want := range tt.wantContains {
 				if !strings.Contains(out, want) {

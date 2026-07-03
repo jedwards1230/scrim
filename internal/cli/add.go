@@ -39,6 +39,6 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	outln(stdout, info.Dir)
-	printURLLines(stdout, st.Host, info.URL)
+	printURLLines(stdout, urlLines(st.Host, info.URL))
 	return 0
 }

@@ -20,13 +20,19 @@ func commandFor(goos, rawURL string) (name string, args []string, err error) {
 	case "linux":
 		return "xdg-open", []string{rawURL}, nil
 	case "windows":
-		// "start" is a cmd.exe builtin, not its own executable, so it must be
-		// invoked via "cmd /c". "start"'s first argument is treated as the
-		// new window's title when present -- passing an empty string there
-		// keeps rawURL (which may contain "&" or other characters cmd.exe
-		// would otherwise try to interpret) from being misread as that
-		// title instead of the thing to open.
-		return "cmd", []string{"/c", "start", "", rawURL}, nil
+		// Deliberately not "cmd /c start <url>": Windows has no true argv --
+		// exec.Command builds one command-line string that CreateProcess
+		// hands to the child, quoted for a CommandLineToArgvW-style parser.
+		// cmd.exe's "/c" tail does NOT go through that parser -- it does its
+		// own bespoke scan for redirection/chaining metacharacters ("&",
+		// "&&", "|", ">", "<", ...) independent of how the parent quoted the
+		// argument. So a rawURL containing "&" could still be reinterpreted
+		// by cmd.exe as a command separator, regardless of argv quoting.
+		// rundll32 sidesteps this entirely: it's a normal Win32 program, so
+		// rawURL arrives as a single argv element with no shell in between
+		// to reparse it, and url.dll's FileProtocolHandler opens it in the
+		// default browser the same way "start" would have.
+		return "rundll32", []string{"url.dll,FileProtocolHandler", rawURL}, nil
 	default:
 		return "", nil, fmt.Errorf("don't know how to open a browser on %s", goos)
 	}

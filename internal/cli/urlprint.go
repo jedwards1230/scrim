@@ -24,12 +24,12 @@ func baseURLFor(st *state.State, path string) string {
 	return u
 }
 
-// printURLLines writes the line(s) for a served URL to w: just rawURL when
-// the daemon isn't advertising over mDNS (bound to loopback only), or both
-// the scrim.local URL and the plain host:port URL — as a fallback, since
-// mDNS can be blocked on some networks — when it is.
-func printURLLines(w io.Writer, host, rawURL string) {
-	for _, line := range urlLines(host, rawURL) {
+// printURLLines writes each of lines to w, one per line. Callers compute
+// lines via urlLines first -- keeping the two separate lets a caller that
+// also needs the lines itself (e.g. to pick the primary one for
+// openBrowser) reuse the same slice instead of recomputing it.
+func printURLLines(w io.Writer, lines []string) {
+	for _, line := range lines {
 		outln(w, line)
 	}
 }

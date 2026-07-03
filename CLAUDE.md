@@ -23,7 +23,7 @@ Key packages under `internal/`:
 | `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop, version-skew restart |
 | `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper, capability-token auth middleware, mDNS advertisement |
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
-| `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`cmd /c start`) |
+| `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
 
 Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS

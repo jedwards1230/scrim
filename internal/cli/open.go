@@ -37,8 +37,9 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 
 	if len(pos) == 0 {
 		url := baseURLFor(st, "/")
-		printURLLines(stdout, st.Host, url)
-		openBrowser(url, stderr)
+		lines := urlLines(st.Host, url)
+		printURLLines(stdout, lines)
+		openBrowser(primaryURL(lines, url), stderr)
 		return 0
 	}
 
@@ -56,13 +57,27 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, c := range canvases {
 		if c.ID == id {
-			printURLLines(stdout, st.Host, c.URL)
-			openBrowser(c.URL, stderr)
+			lines := urlLines(st.Host, c.URL)
+			printURLLines(stdout, lines)
+			openBrowser(primaryURL(lines, c.URL), stderr)
 			return 0
 		}
 	}
 	outf(stderr, "error: canvas %q not found\n", id)
 	return 1
+}
+
+// primaryURL returns the URL that was printed as the first line -- i.e. the
+// one the browser should actually be pointed at. When mDNS is active,
+// lines[0] is the scrim.local URL, which works even when the daemon is
+// bound to an address like 0.0.0.0 or :: that isn't itself navigable; the
+// raw fallback is only used defensively, in case lines somehow came back
+// empty (urlLines never actually returns an empty slice).
+func primaryURL(lines []string, fallback string) string {
+	if len(lines) > 0 {
+		return lines[0]
+	}
+	return fallback
 }
 
 // openBrowser launches url in the platform's default browser, printing a

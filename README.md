@@ -64,7 +64,10 @@ and the plain `ip:port` fallback, since mDNS can be blocked on some networks.
 ## Browser auto-open
 
 `scrim open [<id>]` launches the resolved URL in your platform's default
-browser (`open` on macOS, `xdg-open` on Linux, `cmd /c start` on Windows).
+browser (`open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler`
+on Windows). When mDNS is active, the URL handed to the browser is the same
+`scrim.local` one printed first — not the plain `ip:port` fallback — so it
+still works when the daemon is bound to an unaddressable host like `0.0.0.0`.
 The URL is always printed to stdout too — if auto-open isn't supported or
 fails (e.g. no browser installed, headless environment), `open` prints a
 one-line notice on stderr and still exits `0`.
