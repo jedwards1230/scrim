@@ -32,13 +32,50 @@ func renderMarkdown(source []byte) ([]byte, error) {
 }
 
 // looksLikeCompleteHTMLDocument reports whether content already contains a
-// "<!doctype" or "<html" tag (case-insensitive), meaning it's a
-// deliberately-authored complete HTML document. Such documents pass through
-// untouched (aside from reload-script injection) rather than being wrapped
-// in scrim's default skeleton -- see wrapInSkeleton.
+// "<!doctype" or "<html" tag (case-insensitive) at a proper tag boundary,
+// meaning it's a deliberately-authored complete HTML document. Such
+// documents pass through untouched (aside from reload-script injection)
+// rather than being wrapped in scrim's default skeleton -- see
+// wrapInSkeleton.
 func looksLikeCompleteHTMLDocument(content []byte) bool {
 	lower := bytes.ToLower(content)
-	return bytes.Contains(lower, []byte("<!doctype")) || bytes.Contains(lower, []byte("<html"))
+	return hasBoundedTagPrefix(lower, []byte("<!doctype")) || hasBoundedTagPrefix(lower, []byte("<html"))
+}
+
+// hasBoundedTagPrefix reports whether lower contains prefix immediately
+// followed by a tag boundary -- whitespace, '>', '/', or the end of
+// content -- rather than another character. A bare substring match would
+// false-positive on a custom element or longer tag/declaration name that
+// merely starts with the same characters, e.g. "<html-widget>" or
+// "<htmlx>" both contain "<html" but are not an "<html>" tag; the same
+// reasoning applies to a hypothetical "<!doctype-ish>" for consistency.
+func hasBoundedTagPrefix(lower, prefix []byte) bool {
+	search := lower
+	offset := 0
+	for {
+		i := bytes.Index(search, prefix)
+		if i == -1 {
+			return false
+		}
+		end := i + len(prefix)
+		if end >= len(search) || isTagBoundaryByte(search[end]) {
+			return true
+		}
+		offset += i + 1
+		search = lower[offset:]
+	}
+}
+
+// isTagBoundaryByte reports whether b can legally follow a tag/declaration
+// name in HTML: whitespace, the end of an opening tag ('>'), or the start
+// of a self-closing slash ('/').
+func isTagBoundaryByte(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\f', '\v', '>', '/':
+		return true
+	default:
+		return false
+	}
 }
 
 // wrapInSkeleton embeds fragment (an HTML fragment, or goldmark-rendered

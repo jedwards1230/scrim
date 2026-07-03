@@ -124,19 +124,13 @@ func TestHandleCanvasCompleteDocumentNotWrapped(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	body := readBody(t, resp)
-	if strings.Contains(body, "scrim:skeleton") {
-		t.Errorf("complete document should not be wrapped in skeleton: %s", body)
-	}
-	if strings.Count(body, `name="viewport"`) != 0 {
-		t.Errorf("complete document should not gain a viewport meta tag from the skeleton: %s", body)
-	}
-	// Byte-equivalent modulo the reload-script injection: the original
-	// document's bytes should still be present verbatim (the script is
-	// inserted before </body>, not overwriting anything).
-	if !strings.Contains(body, "<title>t</title>") || !strings.Contains(body, "<h1>Complete</h1>") {
-		t.Errorf("complete document content altered: %s", body)
-	}
-	if !strings.Contains(body, "/c/complete/__events") {
-		t.Errorf("response missing injected SSE script: %s", body)
+
+	// A complete document must be byte-identical to what the pre-existing
+	// (pre-skeleton-wrapping) reload-script injection alone would produce
+	// from the raw file -- no skeleton wrapping, no goldmark involvement,
+	// nothing else touching it.
+	want := string(injectReloadScript([]byte(doc), "complete"))
+	if body != want {
+		t.Errorf("complete document body = %q, want exactly injectReloadScript(original, id) = %q", body, want)
 	}
 }
