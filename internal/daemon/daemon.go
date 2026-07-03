@@ -220,6 +220,13 @@ func spawnAndWait(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("opening daemon log: %w", err)
 	}
+	// The create-mode above is already umask-safe (0o600 has no group/other
+	// bits for umask to touch), but chmod explicitly anyway so the intended
+	// permission doesn't depend on umask semantics at all -- belt-and-suspenders
+	// for the privacy-hardening goal this file is about.
+	if err := os.Chmod(cfg.LogFilePath(), 0o600); err != nil {
+		return fmt.Errorf("tightening daemon log permissions: %w", err)
+	}
 	defer logFile.Close() //nolint:errcheck // the child inherits its own fd copy; our copy's close error isn't actionable
 
 	args := []string{
