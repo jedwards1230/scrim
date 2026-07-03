@@ -20,27 +20,34 @@ installation — a release binary from
 github.com/jedwards1230/scrim@latest` if they have Go tooling.
 Don't try to install it yourself; surface the command and let the user decide.
 
-## The critical rule: `link`, never `open` — and always tell the user
+## The critical rules: `link`, never `open` — and always tell the user
 
-**Always use `scrim link <id>` to get a canvas's URL. Never use `scrim
-open`.** `link` only ever prints the URL — no flag or environment variable
-can make it launch a browser, which is exactly why it's the safe, correct
-choice for an agent. `open` prints the same URL but can *also* launch the
-user's actual browser (opt-in only, via `--browser` or
-`SCRIM_OPEN_BROWSER=1`) — that opt-in exists for a human at their own
-keyboard to ask for a one-off launch, or to set as their own default. There is
-no legitimate reason for an agent to ever pass `--browser` or set
-`SCRIM_OPEN_BROWSER=1`; doing so would pop a browser tab open on the user's
-machine unprompted, which is a surprise, not a convenience.
+These are two absolute mandates, not judgment calls:
 
-After every `scrim add` (and again after any major update to a canvas),
-**surface the printed URL back to the user in your own reply** — don't assume
-they remember it from a previous turn, and don't let "I already have it
-open in a headless browser" substitute for telling them. Verifying a canvas
-with your own tooling (see "Closing the loop" below) is a completely separate
-step from surfacing the URL — you're never "looking through the user's
-browser" on their behalf, you're independently confirming the canvas works
-with your own tools, and the user still needs the URL to look for themselves.
+**1. An agent must always use `scrim link <id>` to get a canvas's URL. An
+agent must never use `scrim open`, and must never pass `--browser` or set
+`SCRIM_OPEN_BROWSER=1` under any circumstance.**
+
+Why: `link` only ever prints the URL — no flag or environment variable can
+make it launch a browser, which is what makes it safe. `open` prints the same
+URL but *can also* launch the user's actual browser, gated behind `--browser`
+or `SCRIM_OPEN_BROWSER=1` — that opt-in exists for a human at their own
+keyboard, never for an agent. There is no equivalence between the two verbs
+for an agent's purposes: reaching for `open` without the flag is not "the
+same as `link`," it's the wrong verb. Popping a browser tab open on the
+user's machine unprompted is a surprise, not a convenience.
+
+**2. After every `scrim add` (and again after any major update to a canvas),
+an agent must surface the printed URL back to the user in its own reply.**
+
+Why: don't assume they remember it from a previous turn.
+
+Note: verifying a canvas with your own tooling (see "Closing the loop" below)
+is a completely separate step from surfacing the URL, not a substitute for
+it — you're never "looking through the user's browser" on their behalf,
+you're independently confirming the canvas works with your own tools, and
+the user still needs the URL to look for themselves even after you've
+verified it renders.
 
 ## Workflow
 
@@ -54,9 +61,9 @@ with your own tools, and the user still needs the URL to look for themselves.
    task/session rather than reusing one generic ID across unrelated work —
    reusing an ID overwrites/confuses that canvas's gallery entry and
    snapshot history. **Keep a canvas's `--icon` stable** across later
-   `add`/re-registration calls for the same ID — the gallery card and the
-   generated favicon key off it, so changing it on every update looks like
-   URL/identity churn to a human glancing at the dashboard.
+   `add`/re-registration calls for the same ID — changing it causes the
+   gallery card to shift unexpectedly and generates a new favicon, making it
+   look like a different canvas to a human glancing at the dashboard.
 3. Write/Edit plain `.html`/`.css`/`.js` files (or `index.md`) directly into
    that printed directory (`index.html` or `index.md` is the entry point). No
    build step, no framework — the daemon serves the files and injects a
@@ -99,12 +106,17 @@ scrim serve             Run the daemon in the foreground (containers/systemd;
                         not for normal use)
 ```
 
-Every verb that needs the daemon running (`add`, `list`, `link`, `open`,
-etc.) self-starts it as needed and idles it down after `--idle-timeout` of
-inactivity. `status` and `stop` never self-start it — they only report on or
-act against an already-running daemon, printing "no daemon running" instead
-if there isn't one. `snap`/`snaps`/`revert` (like `path`/`rm`'s fallback
-path) are pure filesystem operations and never self-start the daemon either.
+## Daemon self-start behavior
+
+- **Self-starts the daemon if needed**: `add`, `list`, `link`, `open`.
+- **Never self-starts** (filesystem-only, or report-only against whatever's
+  already running): `path`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`.
+
+This matters if you're chaining verbs: `snap`/`status`/etc. won't start the
+daemon on their own, so if it isn't already running (or crashes mid-script),
+the next `add`/`list`/`link`/`open` call is what starts a fresh one — not the
+filesystem-only or report-only verbs. `status`/`stop` print "no daemon
+running" instead of starting one if there isn't one to act on.
 
 ## Fragments, markdown, and full documents
 
