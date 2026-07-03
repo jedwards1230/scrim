@@ -77,8 +77,21 @@ func resolveServablePath(canvasRoot, subpath string) (string, error) {
 		return "", err
 	}
 	if fi.IsDir() {
-		indexPath := filepath.Join(target, "index.html")
-		if _, err := os.Stat(indexPath); err != nil {
+		// Route the synthesized index.html path back through
+		// resolveStaticPath rather than a raw filepath.Join+os.Stat: the
+		// directory itself was already validated against a symlink escape,
+		// but a symlink named index.html *inside* an otherwise-legitimate
+		// directory (e.g. pointing at /etc/passwd) is a separate escape
+		// that only resolving+checking the final file path catches.
+		indexPath, err := resolveStaticPath(canvasRoot, path.Join(subpath, "index.html"))
+		if err != nil {
+			return "", err
+		}
+		indexFi, err := os.Stat(indexPath)
+		if err != nil {
+			return "", os.ErrNotExist
+		}
+		if indexFi.IsDir() {
 			return "", os.ErrNotExist
 		}
 		return indexPath, nil
