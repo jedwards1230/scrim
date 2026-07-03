@@ -135,6 +135,16 @@ func (c Config) LogFilePath() string { return filepath.Join(c.Dir, "daemon.log")
 // CanvasesDir is the directory canvases live under.
 func (c Config) CanvasesDir() string { return filepath.Join(c.Dir, "canvases") }
 
+// MetaDir is the directory external per-canvas metadata (title,
+// description, custom icon) is stored under, keyed by canvas ID. It is
+// deliberately outside CanvasesDir(): anything under the canvases dir is
+// servable/watchable by the daemon, and metadata must be neither.
+func (c Config) MetaDir() string { return filepath.Join(c.Dir, "meta") }
+
+// VersionsDir is the directory canvas snapshots (see `scrim snap`) are
+// stored under, keyed by canvas ID.
+func (c Config) VersionsDir() string { return filepath.Join(c.Dir, "versions") }
+
 // BaseURL is the daemon's HTTP base URL.
 func (c Config) BaseURL() string {
 	return "http://" + net.JoinHostPort(c.Host, strconv.Itoa(c.Port))

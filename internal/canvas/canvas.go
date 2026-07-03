@@ -1,6 +1,9 @@
 // Package canvas manages canvas directories on disk: validating IDs,
 // creating/listing/deleting canvases, and reading/writing per-canvas
-// metadata (currently just an optional title).
+// metadata (title, description, and icon). Metadata is deliberately stored
+// external to the canvas directory itself -- see MetaFileName's doc comment
+// on canvas.Create -- keyed by canvas ID under a separate metadata
+// directory the caller provides (config.Config.MetaDir).
 package canvas
 
 import (
@@ -14,10 +17,6 @@ import (
 	"sort"
 	"time"
 )
-
-// MetaFileName is the per-canvas metadata sidecar file. It is deliberately
-// dotfile-prefixed so the server's static file handler never serves it.
-const MetaFileName = ".scrim.json"
 
 // idPattern restricts canvas IDs to a safe, portable charset: no path
 // separators, no "..", no leading dot. This is what keeps IDs safe to use
@@ -39,8 +38,18 @@ func ValidateID(id string) error {
 
 // Info describes one canvas.
 type Info struct {
-	ID      string
-	Title   string
+	ID          string
+	Title       string
+	Description string
+	// Icon is the canvas's emoji glyph: either an explicit value given at
+	// creation time, or a deterministic default derived from ID (see
+	// DefaultIcon) when none was given.
+	Icon string
+	// Color is a deterministic accent color derived from ID (see
+	// DefaultColor), used as the icon's swatch background. It is always
+	// derived -- there is no way to override it -- so the same ID keeps the
+	// same color across restarts regardless of any custom Icon.
+	Color   string
 	Dir     string
 	ModTime time.Time
 }
@@ -51,9 +60,14 @@ func Dir(canvasesDir, id string) string {
 	return filepath.Join(canvasesDir, id)
 }
 
-// Create makes a new canvas directory (idempotent — an existing directory is
-// fine) and records its title, if given. It returns the canvas's directory.
-func Create(canvasesDir, id, title string) (string, error) {
+// Create makes a new canvas directory (idempotent -- an existing directory
+// is fine) and records its title/description/icon, if any are given, in an
+// external metadata file under metaDir (keyed by id, not a sidecar file
+// inside the canvas directory). This is a deliberate v0.2 behavior change
+// from the v0.1 ".scrim.json" sidecar: anything under canvasesDir is
+// servable and filesystem-watched, and metadata must be neither. It returns
+// the canvas's directory.
+func Create(canvasesDir, metaDir, id, title, description, icon string) (string, error) {
 	if err := ValidateID(id); err != nil {
 		return "", err
 	}
@@ -61,22 +75,27 @@ func Create(canvasesDir, id, title string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // canvas dirs are user-owned working files, not sensitive
 		return "", fmt.Errorf("creating canvas dir %s: %w", id, err)
 	}
-	if title != "" {
-		if err := writeMeta(dir, meta{Title: title}); err != nil {
+	if title != "" || description != "" || icon != "" {
+		m := meta{Title: title, Description: description, Icon: icon}
+		if err := writeMeta(metaDir, id, m); err != nil {
 			return "", err
 		}
 	}
 	return dir, nil
 }
 
-// Delete removes a canvas directory and everything under it.
-func Delete(canvasesDir, id string) error {
+// Delete removes a canvas directory and everything under it, along with its
+// external metadata file, if any.
+func Delete(canvasesDir, metaDir, id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
 	dir := Dir(canvasesDir, id)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("removing canvas %s: %w", id, err)
+	}
+	if err := os.Remove(metaPath(metaDir, id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing canvas metadata %s: %w", id, err)
 	}
 	return nil
 }
@@ -91,7 +110,7 @@ func Exists(canvasesDir, id string) bool {
 }
 
 // Get returns Info for a single canvas.
-func Get(canvasesDir, id string) (Info, error) {
+func Get(canvasesDir, metaDir, id string) (Info, error) {
 	if err := ValidateID(id); err != nil {
 		return Info{}, err
 	}
@@ -103,12 +122,12 @@ func Get(canvasesDir, id string) (Info, error) {
 	if !fi.IsDir() {
 		return Info{}, fmt.Errorf("canvas %s: not a directory", id)
 	}
-	return readInfo(dir, id)
+	return readInfo(canvasesDir, metaDir, id), nil
 }
 
 // List returns Info for every canvas under canvasesDir, sorted by ID. A
 // missing canvasesDir is treated as "no canvases" rather than an error.
-func List(canvasesDir string) ([]Info, error) {
+func List(canvasesDir, metaDir string) ([]Info, error) {
 	entries, err := os.ReadDir(canvasesDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -122,33 +141,42 @@ func List(canvasesDir string) ([]Info, error) {
 		if !e.IsDir() || ValidateID(e.Name()) != nil {
 			continue
 		}
-		info, err := readInfo(filepath.Join(canvasesDir, e.Name()), e.Name())
-		if err != nil {
-			continue // skip unreadable canvas rather than failing the whole list
-		}
-		infos = append(infos, info)
+		infos = append(infos, readInfo(canvasesDir, metaDir, e.Name()))
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].ID < infos[j].ID })
 	return infos, nil
 }
 
 type meta struct {
-	Title string `json:"title"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	// Icon is only populated here when explicitly given (e.g. `scrim add
+	// --icon`); an empty Icon means Info.Icon falls back to DefaultIcon(id).
+	Icon string `json:"icon,omitempty"`
 }
 
-func writeMeta(dir string, m meta) error {
+// metaPath returns the external metadata file path for id under metaDir.
+// Callers must validate id first -- this does no validation of its own.
+func metaPath(metaDir, id string) string {
+	return filepath.Join(metaDir, id+".json")
+}
+
+func writeMeta(metaDir, id string, m meta) error {
+	if err := os.MkdirAll(metaDir, 0o755); err != nil { //nolint:gosec // metadata dir is user-owned working state, not sensitive
+		return fmt.Errorf("creating metadata dir: %w", err)
+	}
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("encoding canvas metadata: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, MetaFileName), data, 0o644); err != nil { //nolint:gosec // metadata sidecar is not sensitive
+	if err := os.WriteFile(metaPath(metaDir, id), data, 0o644); err != nil { //nolint:gosec // metadata is not sensitive
 		return fmt.Errorf("writing canvas metadata: %w", err)
 	}
 	return nil
 }
 
-func readMeta(dir string) meta {
-	data, err := os.ReadFile(filepath.Join(dir, MetaFileName)) //nolint:gosec // dir is derived from a validated canvas ID under the configured canvases dir
+func readMeta(metaDir, id string) meta {
+	data, err := os.ReadFile(metaPath(metaDir, id)) //nolint:gosec // id is validated by every exported entry point before it reaches here
 	if err != nil {
 		return meta{}
 	}
@@ -159,10 +187,22 @@ func readMeta(dir string) meta {
 	return m
 }
 
-func readInfo(dir, id string) (Info, error) {
-	m := readMeta(dir)
-	modTime := lastModified(dir)
-	return Info{ID: id, Title: m.Title, Dir: dir, ModTime: modTime}, nil
+func readInfo(canvasesDir, metaDir, id string) Info {
+	dir := Dir(canvasesDir, id)
+	m := readMeta(metaDir, id)
+	icon := m.Icon
+	if icon == "" {
+		icon = DefaultIcon(id)
+	}
+	return Info{
+		ID:          id,
+		Title:       m.Title,
+		Description: m.Description,
+		Icon:        icon,
+		Color:       DefaultColor(id),
+		Dir:         dir,
+		ModTime:     lastModified(dir),
+	}
 }
 
 // lastModified walks dir and returns the most recent modification time among

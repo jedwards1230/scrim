@@ -1,8 +1,9 @@
 // Package cli implements scrim's verb parsing and dispatch: add, path, list,
-// link, open, rm, status, stop, and serve. Each verb is a thin wrapper that
-// either talks to a running daemon over its local HTTP API (self-starting it
-// first if needed) or, for path/rm's fallback/status/stop, works directly
-// against the filesystem/daemon state.
+// link, open, rm, snap, snaps, revert, status, stop, and serve. Each verb is
+// a thin wrapper that either talks to a running daemon over its local HTTP
+// API (self-starting it first if needed) or, for path/rm's fallback/snap/
+// snaps/revert/status/stop, works directly against the filesystem/daemon
+// state.
 package cli
 
 import (
@@ -17,7 +18,8 @@ Usage:
   scrim <verb> [args]
 
 Verbs:
-  add <id> [--title T]   Register a canvas (self-starts the daemon)
+  add <id> [--title T] [--desc D] [--icon I]
+                          Register a canvas (self-starts the daemon)
   path <id>               Print the filesystem path for a canvas
   list                    List registered canvases (self-starts the daemon)
   link [<id>]             Print the URL for a canvas or the dashboard (self-starts
@@ -30,6 +32,10 @@ Verbs:
                            that launching is opt-in. Pass --browser or set
                            SCRIM_OPEN_BROWSER=1 to also launch it in your browser.
   rm <id>                 Remove a canvas
+  snap <id> [--label L]   Snapshot a canvas's current contents (does not self-start)
+  snaps <id>              List a canvas's snapshots (does not self-start)
+  revert <id> [<snap>]    Restore a canvas from a snapshot, latest by default
+                          (does not self-start; takes its own safety snapshot first)
   status                  Show daemon status (does not self-start)
   stop                    Stop the daemon (does not self-start)
   serve                   Run the daemon in the foreground
@@ -71,6 +77,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdOpen(rest, stdout, stderr)
 	case "rm":
 		return cmdRm(rest, stdout, stderr)
+	case "snap":
+		return cmdSnap(rest, stdout, stderr)
+	case "snaps":
+		return cmdSnaps(rest, stdout, stderr)
+	case "revert":
+		return cmdRevert(rest, stdout, stderr)
 	case "status":
 		return cmdStatus(rest, stdout, stderr)
 	case "stop":
