@@ -1,8 +1,8 @@
 // Package cli implements scrim's verb parsing and dispatch: add, path, list,
-// open, rm, status, stop, and serve. Each verb is a thin wrapper that either
-// talks to a running daemon over its local HTTP API (self-starting it first
-// if needed) or, for path/rm's fallback/status/stop, works directly against
-// the filesystem/daemon state.
+// link, open, rm, status, stop, and serve. Each verb is a thin wrapper that
+// either talks to a running daemon over its local HTTP API (self-starting it
+// first if needed) or, for path/rm's fallback/status/stop, works directly
+// against the filesystem/daemon state.
 package cli
 
 import (
@@ -20,7 +20,15 @@ Verbs:
   add <id> [--title T]   Register a canvas (self-starts the daemon)
   path <id>               Print the filesystem path for a canvas
   list                    List registered canvases (self-starts the daemon)
-  open [<id>]              Open a canvas or the dashboard in your browser (self-starts the daemon)
+  link [<id>]             Print the URL for a canvas or the dashboard (self-starts
+                           the daemon). Always print-only -- never launches a
+                           browser, no flag or env var can change that. This is
+                           the recommended everyday verb for getting a canvas's
+                           URL, especially for an agent.
+  open [<id>] [--browser] Print the URL for a canvas or the dashboard (self-starts
+                           the daemon). Default: prints only, plus a stderr hint
+                           that launching is opt-in. Pass --browser or set
+                           SCRIM_OPEN_BROWSER=1 to also launch it in your browser.
   rm <id>                 Remove a canvas
   status                  Show daemon status (does not self-start)
   stop                    Stop the daemon (does not self-start)
@@ -57,6 +65,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdPath(rest, stdout, stderr)
 	case "list":
 		return cmdList(rest, stdout, stderr)
+	case "link":
+		return cmdLink(rest, stdout, stderr)
 	case "open":
 		return cmdOpen(rest, stdout, stderr)
 	case "rm":
