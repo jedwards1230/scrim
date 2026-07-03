@@ -120,21 +120,58 @@ func (w *canvasWatcher) handleEvent(ev fsnotify.Event) {
 // scheduleReload (re)starts a per-canvas debounce timer, so a burst of
 // events for the same canvas within the debounce window collapses into one
 // onReload call.
+//
+// Map presence alone can't tell us whether an existing entry's timer is
+// still safely resettable: a timer's AfterFunc callback goroutine can start
+// running (committing to call w.onReload exactly once) before that
+// goroutine gets as far as acquiring w.mu to delete itself from w.timers.
+// If scheduleReload ran in that window and just called t.Reset on the
+// stale entry, per time.Timer's documented AfterFunc semantics that does
+// NOT reschedule the in-flight callback -- it arms a *second*, independent
+// run of the same closure, which only has one `defer w.fireWG.Done()` for
+// the one `fireWG.Add(1)` already spent, driving fireWG negative on the
+// second call (the reported crash).
+//
+// t.Stop() is the one operation that authoritatively answers "is this
+// timer still provably pending" -- it inspects the runtime timer's fire
+// state directly, independent of whether the spawned callback goroutine
+// has been scheduled to run yet. Stop() == true means the callback was
+// never dispatched and never will be for this timer generation, so Reset
+// is safe. Stop() == false means it already fired (or is in the process
+// of firing) and must never be Reset -- instead this treats the id as if
+// there were no existing timer at all and starts a fresh debounce cycle,
+// exactly per the task's required invariant.
 func (w *canvasWatcher) scheduleReload(id string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if t, ok := w.timers[id]; ok {
-		t.Reset(w.debounce)
-		return
+		if t.Stop() {
+			// Provably still pending: the same single invocation is just
+			// being pushed back, not duplicated.
+			t.Reset(w.debounce)
+			return
+		}
+		// Already firing/fired: fall through and replace this id's entry
+		// with a brand new timer + its own fireWG credit below. The old
+		// callback's own cleanup (see the identity check below) will
+		// no-op once it sees w.timers[id] no longer points at it, instead
+		// of clobbering the fresh entry we're about to install.
 	}
 	w.fireWG.Add(1)
-	w.timers[id] = time.AfterFunc(w.debounce, func() {
+	var t *time.Timer
+	t = time.AfterFunc(w.debounce, func() {
 		defer w.fireWG.Done()
 		w.mu.Lock()
-		delete(w.timers, id)
+		// Only delete this id's entry if it still refers to this exact
+		// timer -- a concurrent scheduleReload may have already replaced
+		// it (see above) after Stop() reported this one as already fired.
+		if w.timers[id] == t {
+			delete(w.timers, id)
+		}
 		w.mu.Unlock()
 		w.onReload(id)
 	})
+	w.timers[id] = t
 }
 
 // Close stops the watcher and waits for its event loop to exit, as well as
