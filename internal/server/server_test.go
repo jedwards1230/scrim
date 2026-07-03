@@ -14,6 +14,12 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 )
 
+// newTestServer returns a Server wired for httptest with auth disabled: the
+// bulk of this package's tests exercise canvas serving, the index page, and
+// the /api/* control surface, not auth itself, so they construct the mux
+// directly via routes() (bypassing Run(), which is what would otherwise
+// mint a token) and don't want every request rejected with 401 as a result.
+// Auth-specific tests use newAuthTestServer instead.
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	dir := t.TempDir()
@@ -22,6 +28,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 		Host:        "127.0.0.1",
 		Port:        0,
 		IdleTimeout: time.Hour,
+		NoAuth:      true,
 	}
 	s := New(cfg)
 	ts := httptest.NewServer(s.routes())
@@ -177,6 +184,7 @@ func TestAPIStatusActiveWithReapingDisabled(t *testing.T) {
 		Host:        "127.0.0.1",
 		Port:        0,
 		IdleTimeout: 0,
+		NoAuth:      true,
 	}
 	s := New(cfg)
 	ts := httptest.NewServer(s.routes())

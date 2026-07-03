@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -115,6 +116,68 @@ func TestCloseWaitsForInFlightDebounceCallback(t *testing.T) {
 	case <-closeDone:
 	case <-time.After(time.Second):
 		t.Fatal("Close() did not return after the in-flight callback finished")
+	}
+}
+
+// TestCloseDuringEventBurst is a regression test for a WaitGroup misuse:
+// close(w.done) alone doesn't guarantee loop()'s select immediately stops
+// picking the Events case over the done case, so a real fsnotify event
+// landing right as Close() runs could call scheduleReload -> fireWG.Add(1)
+// concurrently with Close()'s fireWG.Wait() -- an Add concurrent with Wait,
+// which sync.WaitGroup can panic on. Close must fully quiesce the event
+// loop (fsw.Close() + wg.Wait()) before it ever touches fireWG, so no
+// concurrent event can still be in flight when fireWG is inspected. This
+// floods the watcher with real filesystem events from a background
+// goroutine while repeatedly racing Close() against it, across many
+// iterations, to make any surviving ordering bug likely to surface (as a
+// panic, and under -race as a reported data race).
+func TestCloseDuringEventBurst(t *testing.T) {
+	const iterations = 25
+	for i := 0; i < iterations; i++ {
+		root := t.TempDir()
+		canvasDir := filepath.Join(root, "report")
+		if err := os.MkdirAll(canvasDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+
+		w, err := newCanvasWatcher(root, time.Millisecond, func(string) {})
+		if err != nil {
+			t.Fatalf("newCanvasWatcher() error = %v", err)
+		}
+
+		stopWriting := make(chan struct{})
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			f := filepath.Join(canvasDir, "index.html")
+			for {
+				select {
+				case <-stopWriting:
+					return
+				default:
+					_ = os.WriteFile(f, []byte("x"), 0o644)
+				}
+			}
+		}()
+
+		// Give the writer a head start so events are actually in flight
+		// (queued in fsw.Events or mid-select) when Close() runs.
+		time.Sleep(time.Millisecond)
+
+		closeDone := make(chan struct{})
+		go func() {
+			defer close(closeDone)
+			_ = w.Close()
+		}()
+
+		select {
+		case <-closeDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: Close() did not return (deadlock)", i)
+		}
+
+		close(stopWriting)
+		<-writerDone
 	}
 }
 

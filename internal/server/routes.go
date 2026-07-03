@@ -20,7 +20,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/canvases/{id}", s.handleDeleteCanvas)
 	mux.HandleFunc("POST /api/stop", s.handleStop)
 
-	return s.withActivity(mux)
+	return s.withAuth(s.withActivity(mux))
 }
 
 // withActivity marks the server as active on every request. SSE

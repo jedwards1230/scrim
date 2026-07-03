@@ -31,7 +31,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 
 	cfg := cf.toConfig()
 	if st, ok := daemon.TryLoadHealthy(cfg); ok {
-		client := apiclient.New(fmt.Sprintf("http://%s:%d", st.Host, st.Port))
+		client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
 		if err := client.DeleteCanvas(context.Background(), id); err != nil {
 			errOut(stderr, err)
 			return 1

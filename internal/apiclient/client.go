@@ -17,6 +17,7 @@ import (
 // Client talks to one daemon's control API.
 type Client struct {
 	baseURL string
+	token   string
 	http    *http.Client
 }
 
@@ -27,12 +28,25 @@ type Client struct {
 // timeout. A stuck or unresponsive daemon must not hang the CLI forever.
 const defaultTimeout = 10 * time.Second
 
-// New returns a Client for the daemon at baseURL (e.g. "http://127.0.0.1:7777").
+// New returns a Client for the daemon at baseURL (e.g. "http://127.0.0.1:7777"),
+// with no capability token attached. Use NewWithToken for a daemon that has
+// auth enabled — an unauthenticated Client talking to such a daemon gets
+// 401 on every call.
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
 		http:    &http.Client{Timeout: defaultTimeout},
 	}
+}
+
+// NewWithToken returns a Client for the daemon at baseURL that attaches
+// token as a "?t=" query parameter on every request — the same mechanism a
+// browser uses on its first hit. token may be empty (e.g. the daemon was
+// started with --no-auth), in which case this behaves exactly like New.
+func NewWithToken(baseURL, token string) *Client {
+	c := New(baseURL)
+	c.token = token
+	return c
 }
 
 // StatusResponse mirrors GET /api/status.
@@ -127,6 +141,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		q := req.URL.Query()
+		q.Set("t", c.token)
+		req.URL.RawQuery = q.Encode()
 	}
 
 	resp, err := c.http.Do(req)

@@ -7,9 +7,11 @@ agent-authored HTML canvases with live reload over SSE, and a human views
 them in a browser. An agent writes (or updates) an HTML file; `scrim` makes
 it reachable at a stable URL and pushes reload events when the file changes.
 
-> **Status**: Phase 2 (core engine). All CLI verbs below are implemented.
-> Auth and mDNS discovery (Phase 3) and browser auto-open / version-skew
-> restart (Phase 4) are not yet built — see [CLAUDE.md](CLAUDE.md).
+> **Status**: Phase 3 (auth + mDNS). All CLI verbs below are implemented.
+> A random capability token gates every request by default (`--no-auth` to
+> disable), and the daemon advertises `scrim.local` over mDNS when bound
+> beyond loopback. Browser auto-open / version-skew restart (Phase 4) are
+> not yet built — see [CLAUDE.md](CLAUDE.md).
 
 ## Install
 
@@ -42,6 +44,19 @@ The daemon self-starts on first use of any verb that needs it (`add`,
 | `--idle-timeout` | `SCRIM_IDLE_TIMEOUT` | `30m`       | Idle time before the daemon exits   |
 | `--no-auth`      | `SCRIM_NO_AUTH`      | `false`     | Disable local auth token            |
 | `--dir`          | `SCRIM_DIR`          | `~/.scrim`  | Directory for canvases + state      |
+
+## Auth & discovery
+
+Every daemon mints a random capability token at startup. The URLs `add`,
+`list`, `open`, and `status` print carry it as `?t=<token>`; the first
+request with a valid token sets a cookie so the browser's own follow-up
+requests (including live-reload's SSE connection) don't need it repeated.
+Requests with neither a valid token nor a valid cookie get 401. Pass
+`--no-auth` (or set `SCRIM_NO_AUTH=1`) to disable this entirely.
+
+When `--host` binds beyond loopback, the daemon also advertises itself as
+`scrim.local` over mDNS; printed URLs then show both the `scrim.local` form
+and the plain `ip:port` fallback, since mDNS can be blocked on some networks.
 
 ## Contributing
 

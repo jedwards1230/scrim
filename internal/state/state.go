@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -19,12 +21,35 @@ var ErrNotFound = errors.New("state: no daemon state file")
 
 // State is the daemon's on-disk record of itself.
 type State struct {
-	PID       int       `json:"pid"`
-	Host      string    `json:"host"`
-	Port      int       `json:"port"`
-	Token     string    `json:"token"`
+	PID   int    `json:"pid"`
+	Host  string `json:"host"`
+	Port  int    `json:"port"`
+	Token string `json:"token"`
+	// NoAuth records whether this daemon was started with auth disabled
+	// (--no-auth). Readers must check this field rather than inferring
+	// "auth disabled" from Token being empty -- an empty Token is only
+	// meaningful once NoAuth is known, so the two fields are always set
+	// together (see NewToken/Run).
+	NoAuth    bool      `json:"no_auth"`
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
+}
+
+// AuthEnabled reports whether requests to this daemon must present a valid
+// capability token (query param or cookie). It is the single source of
+// truth other packages should use instead of re-deriving the answer from
+// Token/NoAuth themselves.
+func (s *State) AuthEnabled() bool { return !s.NoAuth }
+
+// BaseURL is the HTTP base URL of the daemon that wrote this state, i.e.
+// where it is actually bound and listening (Host/Port), as opposed to a
+// caller-supplied config that may target a different address. Callers that
+// have already loaded a State (e.g. via a health check) should build their
+// API client from this rather than from a Config's BaseURL, since the two
+// can legitimately differ (the daemon was started with different flags/env
+// than the current invocation, or an auto-assigned port).
+func (s *State) BaseURL() string {
+	return "http://" + net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
 }
 
 // Load reads and parses the state file at path. A missing file returns
@@ -89,11 +114,12 @@ func Remove(path string) error {
 	return nil
 }
 
-// NewToken generates a random hex token for the state file's Token field.
-// Phase 2 does not verify this token against anything; it exists so Phase 3
-// (auth) can start using it without reshaping the state schema.
+// NewToken generates a random hex-encoded capability token for the state
+// file's Token field: 32 bytes (256 bits) of crypto/rand, hex-encoded. The
+// daemon mints a fresh one per lifetime and the HTTP server's auth
+// middleware compares presented tokens against it in constant time.
 func NewToken() (string, error) {
-	b := make([]byte, 16)
+	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating token: %w", err)
 	}

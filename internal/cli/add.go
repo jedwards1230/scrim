@@ -31,7 +31,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	client := apiclient.New(fmt.Sprintf("http://%s:%d", st.Host, st.Port))
+	client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
 	info, err := client.CreateCanvas(context.Background(), id, *title)
 	if err != nil {
 		errOut(stderr, err)
@@ -39,6 +39,6 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	outln(stdout, info.Dir)
-	outln(stdout, info.URL)
+	printURLLines(stdout, st.Host, info.URL)
 	return 0
 }
