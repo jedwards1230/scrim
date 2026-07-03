@@ -98,6 +98,16 @@ func TestWithAuthAcceptRejectMatrix(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
+			// Regression test for the documented interaction in auth.go: a
+			// present-but-wrong "?t=" is rejected even when the request also
+			// carries an otherwise-valid session cookie -- it must not fall
+			// back to cookie auth.
+			name:       "invalid token in query with an otherwise-valid cookie",
+			query:      "?t=wrong-token",
+			cookie:     &http.Cookie{Name: authCookieName, Value: testToken},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
 			name:       "valid cookie, no query token",
 			cookie:     &http.Cookie{Name: authCookieName, Value: testToken},
 			wantStatus: http.StatusOK,

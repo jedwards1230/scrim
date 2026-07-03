@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -95,3 +99,57 @@ func TestParseArgsPositionalBeforeFlags(t *testing.T) {
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestExitForParseErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"help request exits 0", flag.ErrHelp, 0},
+		{"wrapped help request still exits 0", fmt.Errorf("parsing: %w", flag.ErrHelp), 0},
+		{"any other error exits 2", errors.New("flag provided but not defined: -bogus"), 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exitForParseErr(tt.err); got != tt.want {
+				t.Errorf("exitForParseErr(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCommonFlagsToConfigResolvesDir is a regression test for a relative
+// --dir: a self-started detached daemon must resolve --dir the same way the
+// CLI process that spawns it does, which only holds if toConfig() makes it
+// absolute up front rather than leaving it relative (and therefore
+// dependent on whatever cwd happens to be in effect wherever it's read).
+func TestCommonFlagsToConfigResolvesDir(t *testing.T) {
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("os.Chdir() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatalf("os.Chdir() restore error = %v", err)
+		}
+	})
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+
+	cf := &commonFlags{dir: "relative-dir", host: "127.0.0.1", port: 7777}
+	cfg := cf.toConfig()
+
+	want := filepath.Join(cwd, "relative-dir")
+	if cfg.Dir != want {
+		t.Errorf("toConfig().Dir = %q, want %q", cfg.Dir, want)
+	}
+	if !filepath.IsAbs(cfg.Dir) {
+		t.Errorf("toConfig().Dir = %q, want an absolute path", cfg.Dir)
+	}
+}

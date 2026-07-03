@@ -96,6 +96,24 @@ func ExpandHome(path string) string {
 	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 }
 
+// ResolveDir expands a leading "~" in dir (see ExpandHome) and then resolves
+// the result to an absolute path. A relative --dir must be made absolute
+// before it's ever handed to a self-started daemon: the CLI process and the
+// detached daemon process it spawns could otherwise resolve the same
+// relative path against different working directories (or, less exotically,
+// a later CLI invocation from a different shell/cwd would silently target a
+// different directory than the one that started the daemon). Like
+// ExpandHome, this never fails a flag default -- a path that can't be
+// resolved (e.g. os.Getwd fails) is returned unchanged rather than erroring.
+func ResolveDir(dir string) string {
+	dir = ExpandHome(dir)
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
+}
+
 func defaultDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

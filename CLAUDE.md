@@ -20,14 +20,22 @@ Key packages under `internal/`:
 | `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title) |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
-| `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop |
+| `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop, version-skew restart |
 | `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper, capability-token auth middleware, mDNS advertisement |
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
+| `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`cmd /c start`) |
 | `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
 
 Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
-advertisement) is built. Phase 4 (`open` actually launching a browser,
-version-skew restart) is not built yet.
+advertisement) and Phase 4 (`open` launching a browser, version-skew
+restart) are both built. `internal/daemon.Ensure` compares its own
+`internal/version.Short()` against a healthy daemon's reported version on
+every self-start check; a mismatch stops that daemon and starts a fresh one
+transparently (canvases are untouched -- they live on disk, independent of
+the daemon process). The comparison is skipped entirely when the CLI's own
+version is the "dev" sentinel (unset `Version` and no VCS revision, e.g. a
+binary built outside a git checkout) -- otherwise every unversioned dev
+build would restart any real daemon it found on every single invocation.
 
 Planned data flow: `main.go` dispatches a verb → `cli` either talks to a
 running daemon over its local HTTP API or starts one (`daemon`) → the daemon

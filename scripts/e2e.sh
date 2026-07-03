@@ -12,6 +12,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$REPO_ROOT/.e2e-scrim"
+BIN2="$REPO_ROOT/.e2e-scrim-v2"
 WORKDIR="$(mktemp -d)"
 
 PASS=0
@@ -41,7 +42,7 @@ cleanup() {
     fi
   done
   rm -rf "$WORKDIR"
-  rm -f "$BIN"
+  rm -f "$BIN" "$BIN2"
 }
 trap cleanup EXIT
 
@@ -326,6 +327,84 @@ fi
 
 "$BIN" stop --dir "$DIR7" >/dev/null 2>&1 || true
 rm -f /tmp/e2e-race-a.$$ /tmp/e2e-race-b.$$
+
+# --- Scenario 11: open exits 0 and prints the URL regardless of auto-open ---
+log "Scenario 11: open always prints the URL and exits 0, whether or not a real browser is available"
+DIR_OPEN="$WORKDIR/s-open"
+"$BIN" add open-test --dir "$DIR_OPEN" --idle-timeout 5m >/dev/null
+OPEN_OUT=$("$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
+OPEN_STATUS=$?
+if [ "$OPEN_STATUS" -eq 0 ]; then
+  ok "open exits 0 in this (browserless CI) environment"
+else
+  bad "open exits 0 in this (browserless CI) environment (got $OPEN_STATUS)"
+fi
+if echo "$OPEN_OUT" | grep -q "^http://"; then
+  ok "open prints the canvas URL to stdout"
+else
+  bad "open prints the canvas URL to stdout"
+fi
+rm -f /tmp/e2e-open-stderr.$$
+"$BIN" stop --dir "$DIR_OPEN" >/dev/null 2>&1 || true
+
+# --- Scenario 12: version-skew restart ---
+# The actual browser-launch exec (open/xdg-open/cmd) isn't exercised beyond
+# scenario 11's "doesn't crash, exits 0" check -- there's no real browser in
+# CI, so the platform command-selection logic (internal/openurl) is covered
+# by unit tests instead; see internal/openurl/openurl_test.go.
+log "Scenario 12: a CLI built at a different version transparently restarts a mismatched daemon"
+DIR8="$WORKDIR/s8"
+"$BIN" add version-test --dir "$DIR8" --idle-timeout 5m >/dev/null
+PID8=$(pid_of_state "$DIR8/daemon.json")
+if [ -n "${PID8:-}" ] && kill -0 "$PID8" 2>/dev/null; then
+  ok "version-skew scenario: initial daemon started (pid $PID8)"
+else
+  bad "version-skew scenario: initial daemon started"
+fi
+
+# $BIN's own version is whatever `go build` picked up automatically (a git
+# commit hash, since this is a git checkout) -- an explicit -ldflags override
+# here is guaranteed to differ from it, without relying on the "dev" sentinel
+# exemption (which deliberately skips this check).
+if (cd "$REPO_ROOT" && go build -ldflags "-X github.com/jedwards1230/scrim/internal/version.Version=v9.9.9-e2e" -o "$BIN2" .); then
+  ok "version-skew scenario: built a second binary at a distinct explicit version"
+else
+  bad "version-skew scenario: built a second binary at a distinct explicit version"
+fi
+
+# `list` self-starts (calls daemon.Ensure) without creating a new canvas.
+"$BIN2" list --dir "$DIR8" >/dev/null 2>&1
+
+RESTARTED=0
+NEWPID8=""
+DEADLINE=$((SECONDS + 15))
+while [ $SECONDS -lt $DEADLINE ]; do
+  NEWPID8=$(pid_of_state "$DIR8/daemon.json" 2>/dev/null)
+  if [ -n "${NEWPID8:-}" ] && [ "$NEWPID8" != "$PID8" ] && kill -0 "$NEWPID8" 2>/dev/null; then
+    RESTARTED=1
+    break
+  fi
+  sleep 0.2
+done
+
+if [ "$RESTARTED" -eq 1 ]; then
+  ok "version-mismatched daemon (pid $PID8) was replaced by a fresh one (pid $NEWPID8)"
+else
+  bad "version-mismatched daemon (pid $PID8) was replaced by a fresh one"
+fi
+if [ -n "${PID8:-}" ] && ! kill -0 "$PID8" 2>/dev/null; then
+  ok "old daemon process (pid $PID8) actually exited"
+else
+  bad "old daemon process (pid $PID8) actually exited"
+fi
+if grep -q "v9.9.9-e2e" "$DIR8/daemon.json" 2>/dev/null; then
+  ok "new daemon's state file reports the new CLI's version"
+else
+  bad "new daemon's state file reports the new CLI's version"
+fi
+
+"$BIN2" stop --dir "$DIR8" >/dev/null 2>&1 || true
+rm -f "$BIN2"
 
 # --- Summary ---
 log "Summary"

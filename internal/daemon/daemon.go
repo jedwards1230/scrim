@@ -16,6 +16,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/state"
+	"github.com/jedwards1230/scrim/internal/version"
 )
 
 const (
@@ -37,10 +38,23 @@ const (
 )
 
 // Ensure returns the state of a healthy running daemon, self-starting one
-// (under a spawn lock) if none is found.
+// (under a spawn lock) if none is found. A running daemon whose reported
+// version doesn't match this CLI's own build is treated the same as a
+// stale/dead one: it's stopped gracefully first, then this function falls
+// through to the normal spawn path below, which finds no healthy daemon and
+// starts a fresh one -- transparently, without the caller needing to do
+// anything differently. Canvases are untouched throughout: they live on
+// disk under cfg.Dir, independent of the daemon process that happens to be
+// serving them.
 func Ensure(cfg config.Config) (*state.State, error) {
 	if st, ok := healthyState(cfg); ok {
-		return st, nil
+		stopped, err := stopIfVersionSkewed(cfg, st, version.Short())
+		if err != nil {
+			return nil, err
+		}
+		if !stopped {
+			return st, nil
+		}
 	}
 
 	// The lockfile itself needs somewhere to live before we can even
@@ -141,6 +155,46 @@ func healthyState(cfg config.Config) (*state.State, bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, false
+}
+
+// isDevVersion reports whether v is version.Short()'s fallback sentinel for
+// a build with no version information at all -- neither an -ldflags -X
+// ...Version stamp nor a VCS revision picked up via debug.ReadBuildInfo
+// (e.g. a binary built outside a git checkout, or with -buildvcs=false).
+func isDevVersion(v string) bool {
+	return v == "" || v == "dev"
+}
+
+// versionSkewed reports whether a running daemon's reported version differs
+// from cliVersion closely enough that the daemon should be replaced.
+//
+// It is deliberately false whenever cliVersion is the "dev" sentinel
+// (isDevVersion): an unversioned dev build (`go run`/`go test` outside a git
+// checkout, or built with -buildvcs=false) would otherwise report a
+// "mismatch" against every real daemon it ever finds -- including ones it
+// started itself moments earlier -- restarting a perfectly healthy daemon on
+// every single invocation. A daemon reporting the dev sentinel against a
+// versioned CLI is still a genuine mismatch (e.g. upgrading from a dev build
+// to a release build), so that direction is not exempted.
+func versionSkewed(cliVersion, daemonVersion string) bool {
+	if isDevVersion(cliVersion) {
+		return false
+	}
+	return cliVersion != daemonVersion
+}
+
+// stopIfVersionSkewed stops the currently-healthy daemon described by st
+// when its reported version differs from cliVersion, so Ensure's caller can
+// fall through to its normal spawn path and start a fresh one. Returns true
+// when a stop was actually issued.
+func stopIfVersionSkewed(cfg config.Config, st *state.State, cliVersion string) (bool, error) {
+	if !versionSkewed(cliVersion, st.Version) {
+		return false, nil
+	}
+	if _, err := Stop(cfg); err != nil {
+		return false, fmt.Errorf("restarting version-mismatched daemon (cli %s, daemon %s): %w", cliVersion, st.Version, err)
+	}
+	return true, nil
 }
 
 // spawnAndWait re-execs the current binary as a detached `serve` process

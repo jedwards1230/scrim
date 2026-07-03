@@ -20,7 +20,7 @@ func cmdServe(args []string, _, stderr io.Writer) int {
 	fs := newFlagSet("serve", stderr)
 	cf := registerCommonFlags(fs)
 	if err := parseArgs(fs, args); err != nil {
-		return 2
+		return exitForParseErr(err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -7,11 +7,12 @@ agent-authored HTML canvases with live reload over SSE, and a human views
 them in a browser. An agent writes (or updates) an HTML file; `scrim` makes
 it reachable at a stable URL and pushes reload events when the file changes.
 
-> **Status**: Phase 3 (auth + mDNS). All CLI verbs below are implemented.
-> A random capability token gates every request by default (`--no-auth` to
-> disable), and the daemon advertises `scrim.local` over mDNS when bound
-> beyond loopback. Browser auto-open / version-skew restart (Phase 4) are
-> not yet built — see [CLAUDE.md](CLAUDE.md).
+> **Status**: Phase 4 (polish). All CLI verbs below are implemented. A random
+> capability token gates every request by default (`--no-auth` to disable),
+> the daemon advertises `scrim.local` over mDNS when bound beyond loopback,
+> `open` launches your default browser, and a version-mismatched daemon is
+> replaced automatically the next time the CLI self-starts one — see
+> [CLAUDE.md](CLAUDE.md).
 
 ## Install
 
@@ -41,9 +42,11 @@ The daemon self-starts on first use of any verb that needs it (`add`,
 |------------------|----------------------|-------------|-------------------------------------|
 | `--port`         | `SCRIM_PORT`         | `7777`      | Port the daemon listens on          |
 | `--host`         | `SCRIM_HOST`         | `127.0.0.1` | Host the daemon binds to            |
-| `--idle-timeout` | `SCRIM_IDLE_TIMEOUT` | `30m`       | Idle time before the daemon exits   |
+| `--idle-timeout` | `SCRIM_IDLE_TIMEOUT` | `30m`       | Idle time before the daemon exits. `0` or negative disables idle exit entirely — the daemon then only stops via `scrim stop` or a signal |
 | `--no-auth`      | `SCRIM_NO_AUTH`      | `false`     | Disable local auth token            |
-| `--dir`          | `SCRIM_DIR`          | `~/.scrim`  | Directory for canvases + state      |
+| `--dir`          | `SCRIM_DIR`          | `~/.scrim`  | Directory for canvases + state. A relative value is resolved to an absolute path immediately (against the CLI's cwd), before it's ever handed to a self-started daemon |
+
+Run `scrim --help` (or `scrim <verb> --help`) for the full flag/verb reference.
 
 ## Auth & discovery
 
@@ -57,6 +60,25 @@ Requests with neither a valid token nor a valid cookie get 401. Pass
 When `--host` binds beyond loopback, the daemon also advertises itself as
 `scrim.local` over mDNS; printed URLs then show both the `scrim.local` form
 and the plain `ip:port` fallback, since mDNS can be blocked on some networks.
+
+## Browser auto-open
+
+`scrim open [<id>]` launches the resolved URL in your platform's default
+browser (`open` on macOS, `xdg-open` on Linux, `cmd /c start` on Windows).
+The URL is always printed to stdout too — if auto-open isn't supported or
+fails (e.g. no browser installed, headless environment), `open` prints a
+one-line notice on stderr and still exits `0`.
+
+## Version-skew restart
+
+Every self-start check (`add`, `list`, `open`, or any other verb that talks
+to the daemon) compares this CLI binary's own version against the version a
+currently-running daemon reports on `/api/status`. A mismatch is treated the
+same as a stale/dead daemon: the old one is stopped gracefully and a fresh
+one is started transparently — canvases are untouched, since they live on
+disk independent of the daemon process. This check is skipped for an
+unversioned "dev" build (no `-ldflags` version and no VCS revision), so a
+`go run`/`go test` build doesn't restart a real daemon on every invocation.
 
 ## Contributing
 
