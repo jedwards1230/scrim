@@ -99,10 +99,12 @@ scrim serve             Run the daemon in the foreground (containers/systemd;
                         not for normal use)
 ```
 
-Every verb that needs the daemon (`add`, `list`, `link`, `open`, `status`,
+Every verb that needs the daemon running (`add`, `list`, `link`, `open`,
 etc.) self-starts it as needed and idles it down after `--idle-timeout` of
-inactivity. `snap`/`snaps`/`revert` (like `path`/`rm`'s fallback path) are
-pure filesystem operations and never self-start the daemon.
+inactivity. `status` and `stop` never self-start it — they only report on or
+act against an already-running daemon, printing "no daemon running" instead
+if there isn't one. `snap`/`snaps`/`revert` (like `path`/`rm`'s fallback
+path) are pure filesystem operations and never self-start the daemon either.
 
 ## Fragments, markdown, and full documents
 
