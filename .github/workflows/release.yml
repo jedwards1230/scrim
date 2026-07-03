@@ -1,0 +1,231 @@
+# Single-file release pipeline (modeled on jedwards1230/deck's release.yml).
+#
+# Triggered on push to main (or manual dispatch). A `detect` job reads the merged
+# PR's semver label — releases are OPT-IN: the merged PR must carry a
+# semver:patch|minor|major label. No matching label → no release (no patch
+# default). When a release is warranted it delegates version compute, tag
+# creation, and AI release notes to the shared
+# jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1, then
+# cross-builds the Go binaries (5 platforms) and publishes the GitHub Release.
+#
+# The git tag is the single source of truth: the build job checks out the TAGGED
+# commit and stamps the computed version into the binaries via -ldflags
+# (internal/version) — no file edit, nothing pushed back to main.
+name: Release
+
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('Release: {0}{1}', inputs.dry_run && 'dry-run ' || '', inputs.bump_type)
+      || format('Release: {0}', github.event.head_commit.message || github.sha)
+  }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: "Compute version + preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  # ai-release.yml@v1 reads merged PRs for the changelog and the detect job runs
+  # `gh pr list` — both need pull-requests:read. A restricted permissions block
+  # defaults every unlisted scope to none, so grant it explicitly.
+  pull-requests: read
+
+jobs:
+  detect:
+    name: Detect bump type
+    runs-on: ubuntu-latest
+    outputs:
+      bump_type: ${{ steps.bump.outputs.type }}
+      dry_run: ${{ steps.bump.outputs.dry_run }}
+      release: ${{ steps.bump.outputs.release }}
+    steps:
+      - name: Determine bump type
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TYPE="${{ inputs.bump_type }}"
+            DRY="${{ inputs.dry_run }}"
+            RELEASE="true"
+          else
+            # Look up the PR(s) associated with this exact commit directly
+            # (a targeted commit->PR lookup, not a list+client-side-filter),
+            # so the merged PR can never fall outside a paginated window
+            # regardless of how many other PRs merge around the same time.
+            LABELS=""
+            for attempt in 1 2 3; do
+              # shellcheck disable=SC2016 # $ENV.GITHUB_SHA is jq's own env-var
+              # syntax, not a bash variable -- must stay single-quoted so bash
+              # doesn't expand it before jq sees it.
+              LABELS=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
+                --jq '.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA) | .labels[].name' 2>/dev/null || echo "")
+              if [ -n "$LABELS" ]; then break; fi
+              echo "Attempt ${attempt}: no labels for ${GITHUB_SHA} yet, retrying in 5s..."
+              sleep 5
+            done
+            echo "Labels for ${GITHUB_SHA}: ${LABELS:-<none>}"
+            DRY="false"
+            if echo "$LABELS" | grep -q 'semver:major'; then
+              TYPE="major"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:minor'; then
+              TYPE="minor"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:patch'; then
+              TYPE="patch"; RELEASE="true"
+            else
+              TYPE="none"; RELEASE="false"
+              echo "::notice::no semver:* label on the merged PR — skipping release"
+            fi
+          fi
+          # Defensive: make sure a future label-parsing bug can't silently
+          # propagate an unexpected value downstream.
+          case "$TYPE" in
+            major | minor | patch | none) ;;
+            *)
+              echo "::error::invalid bump type computed: $TYPE"
+              exit 1
+              ;;
+          esac
+          {
+            echo "type=$TYPE"
+            echo "dry_run=$DRY"
+            echo "release=$RELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Tag & Generate Notes
+    needs: [detect]
+    if: needs.detect.outputs.release == 'true'
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1
+    with:
+      service_name: scrim
+      service_description: "an agent-canvas projection daemon with SSE live-reload"
+      bump_type: ${{ needs.detect.outputs.bump_type }}
+      dry_run: ${{ needs.detect.outputs.dry_run == 'true' }}
+      create_release: false
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  build:
+    name: Build cross-platform binaries
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-X github.com/jedwards1230/scrim/internal/version.Version=${VERSION} \
+                   -X github.com/jedwards1230/scrim/internal/version.Commit=${COMMIT} \
+                   -X github.com/jedwards1230/scrim/internal/version.Date=${DATE}"
+          mkdir -p dist
+          # NOTE: if this list changes, update the "Binaries" line in the
+          # "Write workflow summary" step below to match.
+          platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"; GOARCH="${platform#*/}"
+            output="scrim-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then output="${output}.exe"; fi
+            echo "Building ${GOOS}/${GOARCH}..."
+            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "$LDFLAGS" -o "dist/${output}" .
+          done
+          ls -lh dist/
+
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: scrim-binaries
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [detect, prepare, build]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: scrim-binaries
+          path: dist
+
+      - name: Compose release body (AI notes)
+        env:
+          BODY_B64: ${{ needs.prepare.outputs.release_body }}
+        run: |
+          set -euo pipefail
+          # ai-release.yml emits a base64-encoded body to survive Actions' job-output
+          # character restrictions; decode before use.
+          echo "$BODY_B64" | base64 -d > /tmp/release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.version }}
+          body_path: /tmp/release_body.md
+          make_latest: true
+          files: dist/*
+
+      - name: Write workflow summary
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREV: ${{ needs.prepare.outputs.prev_tag }}
+          BUMP_TYPE: ${{ needs.prepare.outputs.bump_type }}
+        run: |
+          {
+            echo "## Release ${TAG}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Version | ${VERSION} |"
+            echo "| Tag | ${TAG} |"
+            echo "| Previous | ${PREV} |"
+            echo "| Bump | ${BUMP_TYPE} |"
+            # Keep this in sync with the "platforms" list in the build job.
+            echo "| Binaries | linux/darwin (amd64 + arm64), windows (amd64) |"
+          } >> "$GITHUB_STEP_SUMMARY"
