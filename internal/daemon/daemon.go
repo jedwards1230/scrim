@@ -90,16 +90,27 @@ func Stop(cfg config.Config) (found bool, err error) {
 		return true, fmt.Errorf("requesting daemon stop: %w", err)
 	}
 
+	if err := finalizeStop(cfg, st.PID); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// finalizeStop waits for pid to exit after a stop has been requested. A
+// confirmed-dead pid is success on its own — a SIGKILL/OOM-kill leaves
+// nothing to clean up the state file, so finalizeStop removes it itself
+// rather than keep polling for it to also disappear (which would report a
+// false "timed out" for an already-dead daemon).
+func finalizeStop(cfg config.Config, pid int) error {
 	deadline := time.Now().Add(stopTimeout)
 	for time.Now().Before(deadline) {
-		if !pidAlive(st.PID) {
-			if _, statErr := os.Stat(cfg.StateFilePath()); os.IsNotExist(statErr) {
-				return true, nil
-			}
+		if !pidAlive(pid) {
+			_ = state.Remove(cfg.StateFilePath())
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return true, fmt.Errorf("timed out waiting for daemon (pid %d) to stop", st.PID)
+	return fmt.Errorf("timed out waiting for daemon (pid %d) to stop", pid)
 }
 
 // healthyState reads the state file and, if present and well-formed,
