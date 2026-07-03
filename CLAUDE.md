@@ -11,14 +11,22 @@ browser.
 `scrim` is a single Go binary with no external services — the CLI and the
 daemon are the same binary, dispatching on `os.Args`.
 
-Key packages under `internal/` (most are Phase 2 — not built yet):
+Key packages under `internal/`:
 
 | Package | Responsibility |
 |---------|---------------|
-| `version` | Build-time version stamping via ldflags (implemented) |
-| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve` (TODO) |
-| `daemon` | Daemon lifecycle: state file, self-start, health-check (TODO) |
-| `server` | HTTP server, SSE live-reload, static canvas serving (TODO) |
+| `version` | Build-time version stamping via ldflags |
+| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth from flags/env/defaults; derives on-disk paths |
+| `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
+| `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title) |
+| `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
+| `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop |
+| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper |
+| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve` |
+
+Phase 3 (auth via the state file's `token` field, mDNS advertisement) and
+Phase 4 (`open` actually launching a browser, version-skew restart) are not
+built yet.
 
 Planned data flow: `main.go` dispatches a verb → `cli` either talks to a
 running daemon over its local HTTP API or starts one (`daemon`) → the daemon
