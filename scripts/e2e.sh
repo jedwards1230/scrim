@@ -104,6 +104,36 @@ with_events_path() {
   fi
 }
 
+# with_status_path rewrites a canvas URL (which may carry a "?t=..." query)
+# into that daemon's /api/status URL, preserving the query string so the
+# same token authenticates the status call.
+with_status_path() {
+  local url="$1" root query
+  root="$(echo "$url" | sed -E 's#(https?://[^/]+).*#\1#')"
+  case "$url" in
+    *'?'*) query="${url#*\?}" ;;
+    *) query="" ;;
+  esac
+  if [ -n "$query" ]; then
+    echo "${root}/api/status?${query}"
+  else
+    echo "${root}/api/status"
+  fi
+}
+
+# sse_client_count curls /api/status at the given (already token-qualified)
+# status URL and extracts the "sse_clients" count. Echoes -1 if the request
+# fails or the field can't be found, so callers can poll without tripping
+# `set -e`-style failures.
+sse_client_count() {
+  local status_url="$1" body
+  body=$(curl -fsS --max-time 2 "$status_url" 2>/dev/null) || {
+    echo -1
+    return
+  }
+  echo "$body" | grep -o '"sse_clients":[0-9]*' | grep -o '[0-9]*$' || echo -1
+}
+
 # --- Scenario 1 + 2: self-start on `add`, HTML served with injected script ---
 log "Scenario 1+2: add self-starts daemon; canvas HTML is served with injected SSE script"
 DIR1="$WORKDIR/s1"
@@ -420,6 +450,7 @@ CANVAS_URL9=$(echo "$OUT9" | sed -n '2p')
 echo '<html><body>sse-stop e2e</body></html>' >"$CANVAS_DIR9/index.html"
 
 EVENTS_URL9="$(with_events_path "$CANVAS_URL9")"
+STATUS_URL9="$(with_status_path "$CANVAS_URL9")"
 SSE_OUT9="$WORKDIR/sse-stop-out.txt"
 : >"$SSE_OUT9"
 # --max-time is a generous safety net against a leaked process if an
@@ -429,11 +460,25 @@ SSE_OUT9="$WORKDIR/sse-stop-out.txt"
 curl -fsS -N --max-time 60 "$EVENTS_URL9" >"$SSE_OUT9" 2>/dev/null &
 SSE_CURL_PID=$!
 
-sleep 0.5 # let the SSE connection register before we stop
-if kill -0 "$SSE_CURL_PID" 2>/dev/null; then
-  ok "sse-stop scenario: SSE connection is open before stop"
+# `kill -0` on the backgrounded curl PID only proves the curl *process* is
+# alive -- it doesn't prove the SSE request actually reached the server and
+# got registered in the hub (a curl still stuck in DNS/connect would pass
+# the same check). Poll the daemon's own /api/status sse_clients count
+# instead, which only goes to 1 once hub.register has actually run for
+# this connection.
+REG_DEADLINE=$((SECONDS + 5))
+REGISTERED=0
+while [ $SECONDS -lt $REG_DEADLINE ]; do
+  if [ "$(sse_client_count "$STATUS_URL9")" = "1" ]; then
+    REGISTERED=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$REGISTERED" -eq 1 ] && kill -0 "$SSE_CURL_PID" 2>/dev/null; then
+  ok "sse-stop scenario: SSE connection is open and registered with the hub before stop"
 else
-  bad "sse-stop scenario: SSE connection is open before stop"
+  bad "sse-stop scenario: SSE connection is open and registered with the hub before stop (hub sse_clients never reached 1)"
 fi
 
 STOP_START=$SECONDS
@@ -462,6 +507,77 @@ fi
 # it explicitly rather than relying on that.
 kill "$SSE_CURL_PID" 2>/dev/null || true
 wait "$SSE_CURL_PID" 2>/dev/null || true
+
+# --- Scenario 14: SIGTERM to the daemon exits promptly despite an open SSE
+# connection (issue #11, the ctx.Done() path specifically) ---
+# Scenario 13 covers `scrim stop`, which goes through initiateShutdown /
+# s.stopCh. A signal delivered straight to the daemon process instead goes
+# through Run's ctx.Done() case (signal.NotifyContext in cli/serve.go) --
+# a separate path that shipped without hub.closeAll wired in, even after
+# PR #12's fix for the stop path. This sends SIGTERM directly to the daemon
+# process (not via `scrim stop`) to exercise that path specifically.
+log "Scenario 14: SIGTERM to the daemon process exits promptly despite an open SSE connection (issue #11, ctx.Done path)"
+DIR10="$WORKDIR/s10"
+OUT10=$("$BIN" add sigterm-test --dir "$DIR10" --idle-timeout 5m 2>&1)
+CANVAS_DIR10=$(echo "$OUT10" | sed -n '1p')
+CANVAS_URL10=$(echo "$OUT10" | sed -n '2p')
+echo '<html><body>sigterm e2e</body></html>' >"$CANVAS_DIR10/index.html"
+
+EVENTS_URL10="$(with_events_path "$CANVAS_URL10")"
+STATUS_URL10="$(with_status_path "$CANVAS_URL10")"
+SSE_OUT10="$WORKDIR/sse-sigterm-out.txt"
+: >"$SSE_OUT10"
+curl -fsS -N --max-time 60 "$EVENTS_URL10" >"$SSE_OUT10" 2>/dev/null &
+SSE_CURL_PID10=$!
+
+REG_DEADLINE=$((SECONDS + 5))
+REGISTERED10=0
+while [ $SECONDS -lt $REG_DEADLINE ]; do
+  if [ "$(sse_client_count "$STATUS_URL10")" = "1" ]; then
+    REGISTERED10=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$REGISTERED10" -eq 1 ]; then
+  ok "sigterm scenario: SSE connection is open and registered with the hub before signal"
+else
+  bad "sigterm scenario: SSE connection is open and registered with the hub before signal (hub sse_clients never reached 1)"
+fi
+
+PID10=$(pid_of_state "$DIR10/daemon.json")
+SIGTERM_START=$SECONDS
+kill -TERM "$PID10" 2>/dev/null || true
+
+SIGTERM_DEADLINE=$((SECONDS + 5))
+EXITED10=0
+while [ $SECONDS -lt $SIGTERM_DEADLINE ]; do
+  if ! kill -0 "$PID10" 2>/dev/null; then
+    EXITED10=1
+    break
+  fi
+  sleep 0.1
+done
+SIGTERM_ELAPSED=$((SECONDS - SIGTERM_START))
+
+if [ "$EXITED10" -eq 1 ]; then
+  ok "sigterm scenario: daemon process exited after SIGTERM despite an open SSE connection (${SIGTERM_ELAPSED}s)"
+else
+  bad "sigterm scenario: daemon process exited after SIGTERM despite an open SSE connection"
+fi
+if [ "$SIGTERM_ELAPSED" -le 4 ]; then
+  ok "sigterm scenario: exited in ${SIGTERM_ELAPSED}s (bounded well under the old ~5s timeout)"
+else
+  bad "sigterm scenario: exited in ${SIGTERM_ELAPSED}s, want <= 4s"
+fi
+if wait_for_file_gone "$DIR10/daemon.json" 5; then
+  ok "sigterm scenario: state file removed after SIGTERM"
+else
+  bad "sigterm scenario: state file removed after SIGTERM"
+fi
+
+kill "$SSE_CURL_PID10" 2>/dev/null || true
+wait "$SSE_CURL_PID10" 2>/dev/null || true
 
 # --- Summary ---
 log "Summary"
