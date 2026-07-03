@@ -5,10 +5,17 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strconv"
 
 	"github.com/jedwards1230/scrim/internal/mdns"
 	"github.com/jedwards1230/scrim/internal/state"
 )
+
+// defaultHTTPPort is the port a browser (or any HTTP client) assumes when
+// none is given in a "http://" URL — omitting it from a printed URL is
+// purely cosmetic (":80" adds nothing a browser needs), not a privacy
+// measure like the rest of this package.
+const defaultHTTPPort = 80
 
 // baseURLFor builds the URL for path (e.g. "/") against the daemon
 // described by st, appending the capability token as a "?t=" query
@@ -17,11 +24,22 @@ import (
 // this is only for URLs the CLI builds itself, like the bare dashboard URL
 // printed by `open` (no id) and `status`.
 func baseURLFor(st *state.State, path string) string {
-	u := fmt.Sprintf("http://%s:%d%s", st.Host, st.Port, path)
+	u := fmt.Sprintf("http://%s%s", formatHostPort(st.Host, st.Port), path)
 	if st.AuthEnabled() {
 		u += "?t=" + st.Token
 	}
 	return u
+}
+
+// formatHostPort formats host:port for a printed URL, omitting the port
+// entirely when it's the default HTTP port — a printed "http://host/" reads
+// cleaner than "http://host:80/", and browsers treat them identically.
+// Every other port is kept explicit.
+func formatHostPort(host string, port int) string {
+	if port == defaultHTTPPort {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // printURLLines writes each of lines to w, one per line. Callers compute

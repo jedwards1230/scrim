@@ -3,6 +3,8 @@ package server
 import (
 	"crypto/subtle"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -22,12 +24,29 @@ const (
 	authCookieMaxAge = 24 * time.Hour
 )
 
+// apiRoutePrefix is the control-surface prefix exempted from the
+// redirect-after-query-token behavior below (see withAuth): it's
+// programmatic traffic from the CLI's own apiclient, which presents the
+// token on every single call and expects a direct response, not a 302 --
+// redirecting would silently turn a POST/DELETE into a GET (browsers and
+// Go's http.Client alike drop the body and switch method on a 301/302/303
+// redirect), and apiclient's http.Client has no cookie jar to carry the
+// cookie across the hop anyway.
+const apiRoutePrefix = "/api/"
+
 // withAuth wraps next with capability-token gating. Unless the daemon was
 // started with --no-auth, every request to every route it serves -- the
 // index page, static canvas assets, the per-canvas SSE endpoint, and the
 // /api/* control surface alike -- must present a valid token, either as a
-// "?t=" query parameter (which also sets a cookie for subsequent requests)
-// or as that previously-set cookie. Anything else gets 401.
+// "?t=" query parameter or as a previously-set cookie. Anything else gets
+// 401.
+//
+// A valid "?t=" hit against a browser-facing route (anything other than
+// /api/*) sets the cookie and then redirects to the same URL with the
+// token stripped from the query string, rather than serving the request
+// directly -- so the token doesn't linger in the URL bar, browser history,
+// or a copied/shared link. The redirected request then serves normally,
+// authenticated by the cookie set moments earlier.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	if s.cfg.NoAuth {
 		return next
@@ -50,7 +69,11 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
 			})
-			next.ServeHTTP(w, r)
+			if strings.HasPrefix(r.URL.Path, apiRoutePrefix) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			http.Redirect(w, r, urlWithoutToken(r.URL), http.StatusFound)
 			return
 		}
 
@@ -61,6 +84,20 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 
 		http.Error(w, "unauthorized: missing or invalid token", http.StatusUnauthorized)
 	})
+}
+
+// urlWithoutToken returns the path (and any other query parameters) of u,
+// with the "t" capability-token query parameter removed -- the redirect
+// target for a request that just proved it holds a valid token via the
+// query string.
+func urlWithoutToken(u *url.URL) string {
+	q := u.Query()
+	q.Del(tokenQueryParam)
+	target := u.EscapedPath()
+	if encoded := q.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	return target
 }
 
 // constantTimeEqual reports whether a and b are equal, using

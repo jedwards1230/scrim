@@ -21,7 +21,21 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/canvases/{id}", s.handleDeleteCanvas)
 	mux.HandleFunc("POST /api/stop", s.handleStop)
 
-	return s.withAuth(s.withActivity(mux))
+	return withSecurityHeaders(s.withAuth(s.withActivity(mux)))
+}
+
+// withSecurityHeaders sets response headers that apply to every request
+// regardless of outcome -- including a 401 from withAuth or a 302 from its
+// token-redirect, neither of which reach the mux's own handlers -- so it
+// wraps outermost. Referrer-Policy: no-referrer keeps the current URL (and,
+// before a redirect strips it, the capability token riding in its query
+// string) from ever being sent to a destination this page might link out
+// to.
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withActivity marks the server as active on every request. SSE

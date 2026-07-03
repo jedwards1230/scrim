@@ -156,9 +156,15 @@ fi
 
 echo '<html><body><h1>Hello E2E</h1></body></html>' >"$CANVAS_DIR/index.html"
 
-# CANVAS_URL already carries "?t=<token>" (auth is on by default), so this
-# is also the first half of the "valid token succeeds" auth assertion.
-BODY=$(curl -fsS "$CANVAS_URL" || true)
+# CANVAS_URL already carries "?t=<token>" (auth is on by default). A valid
+# query token now redirects (302) to the same URL with the token stripped
+# (see internal/server/auth.go) rather than serving the request directly,
+# so this follows the redirect (-L) and picks up/resends the cookie it sets
+# along the way (-b/-c a shared jar) -- exactly what a real browser does --
+# rather than expecting the first hop itself to return content. This is
+# also the first half of the "valid token succeeds" auth assertion.
+JAR1="$WORKDIR/jar1.txt"
+BODY=$(curl -fsS -L -b "$JAR1" -c "$JAR1" "$CANVAS_URL" || true)
 if echo "$BODY" | grep -q "Hello E2E"; then
   ok "served HTML contains original content"
 else
@@ -175,7 +181,12 @@ log "Scenario 3: touching a canvas file delivers an SSE reload event"
 EVENTS_URL="$(with_events_path "$CANVAS_URL")"
 SSE_OUT="$WORKDIR/sse-out.txt"
 : >"$SSE_OUT"
-curl -fsS -N --max-time 6 "$EVENTS_URL" >"$SSE_OUT" 2>/dev/null &
+# Authenticate via the cookie JAR1 already holds (from the request above)
+# rather than the query token -- this is what a real browser's own
+# EventSource connection does too (the injected reload script's SSE URL
+# never carries a token), and it avoids the token-redirect entirely for a
+# long-lived streaming connection.
+curl -fsS -N --max-time 6 -b "$JAR1" "$(strip_query "$EVENTS_URL")" >"$SSE_OUT" 2>/dev/null &
 CURL_PID=$!
 sleep 0.5 # let the SSE connection register before we touch the file
 echo '<html><body><h1>Updated</h1></body></html>' >"$CANVAS_DIR/index.html"
@@ -218,12 +229,18 @@ else
 fi
 
 # --- Scenario 5: auth accepts a request with a valid token ---
-log "Scenario 5: a request with a valid token is accepted with 200"
+log "Scenario 5: a request with a valid token redirects (302), and following it succeeds (200)"
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$CANVAS_URL")
-if [ "$STATUS" = "200" ]; then
-  ok "request with a valid token gets 200"
+if [ "$STATUS" = "302" ]; then
+  ok "request with a valid token gets 302 (token-stripping redirect)"
 else
-  bad "request with a valid token gets 200 (got $STATUS)"
+  bad "request with a valid token gets 302 (got $STATUS)"
+fi
+FOLLOWED_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -L -b "$JAR1" -c "$JAR1" "$CANVAS_URL")
+if [ "$FOLLOWED_STATUS" = "200" ]; then
+  ok "following the redirect (cookie-authenticated) gets 200"
+else
+  bad "following the redirect (cookie-authenticated) gets 200 (got $FOLLOWED_STATUS)"
 fi
 
 # --- Scenario 6: --no-auth bypasses gating entirely ---
@@ -569,11 +586,20 @@ EVENTS_URL9="$(with_events_path "$CANVAS_URL9")"
 STATUS_URL9="$(with_status_path "$CANVAS_URL9")"
 SSE_OUT9="$WORKDIR/sse-stop-out.txt"
 : >"$SSE_OUT9"
+# A query token now redirects (302) rather than serving the request
+# directly (see internal/server/auth.go), which would prevent this
+# long-lived streaming connection from ever registering. Prime a cookie
+# with a quick, redirect-followed throwaway request first, then open the
+# actual SSE connection cookie-authenticated (no token in its URL at all,
+# exactly like a real browser's own EventSource) so it's server directly
+# rather than redirected.
+JAR9="$WORKDIR/jar9.txt"
+curl -fsS -L -o /dev/null -b "$JAR9" -c "$JAR9" "$CANVAS_URL9"
 # --max-time is a generous safety net against a leaked process if an
 # assertion below fails partway through -- it's well beyond how long this
 # scenario should ever actually take, and the connection is explicitly
 # killed right after use regardless of pass/fail.
-curl -fsS -N --max-time 60 "$EVENTS_URL9" >"$SSE_OUT9" 2>/dev/null &
+curl -fsS -N --max-time 60 -b "$JAR9" "$(strip_query "$EVENTS_URL9")" >"$SSE_OUT9" 2>/dev/null &
 SSE_CURL_PID=$!
 
 # `kill -0` on the backgrounded curl PID only proves the curl *process* is
@@ -643,7 +669,12 @@ EVENTS_URL10="$(with_events_path "$CANVAS_URL10")"
 STATUS_URL10="$(with_status_path "$CANVAS_URL10")"
 SSE_OUT10="$WORKDIR/sse-sigterm-out.txt"
 : >"$SSE_OUT10"
-curl -fsS -N --max-time 60 "$EVENTS_URL10" >"$SSE_OUT10" 2>/dev/null &
+# See the identical comment in Scenario 13: prime a cookie via a
+# redirect-followed throwaway request, then open the actual SSE connection
+# cookie-authenticated so it's served directly instead of redirected.
+JAR10="$WORKDIR/jar10.txt"
+curl -fsS -L -o /dev/null -b "$JAR10" -c "$JAR10" "$CANVAS_URL10"
+curl -fsS -N --max-time 60 -b "$JAR10" "$(strip_query "$EVENTS_URL10")" >"$SSE_OUT10" 2>/dev/null &
 SSE_CURL_PID10=$!
 
 REG_DEADLINE=$((SECONDS + 5))
@@ -704,7 +735,12 @@ CANVAS_DIR11=$(echo "$OUT11" | sed -n '1p')
 CANVAS_URL11=$(echo "$OUT11" | sed -n '2p')
 printf '# Hello Markdown\n\nSome *body* text.\n' >"$CANVAS_DIR11/index.md"
 
-BODY11=$(curl -fsS "$CANVAS_URL11" || true)
+# A valid query token now redirects (302) to a token-stripped URL rather
+# than serving the request directly (see internal/server/auth.go) -- follow
+# it (-L), picking up and resending the cookie it sets along the way
+# (-b/-c a jar), just like a real browser would.
+JAR11="$WORKDIR/jar11.txt"
+BODY11=$(curl -fsS -L -b "$JAR11" -c "$JAR11" "$CANVAS_URL11" || true)
 if echo "$BODY11" | grep -q "<h1>Hello Markdown</h1>"; then
   ok "index.md scenario: response contains goldmark-rendered heading"
 else
@@ -721,10 +757,14 @@ else
   bad "index.md scenario: response contains injected SSE <script>"
 fi
 
+# Authenticate the long-lived SSE connection via the cookie JAR11 already
+# holds (from the request above), not the query token -- exactly like a
+# real browser's own EventSource connection (see the identical pattern and
+# comment in Scenario 3) -- so it's served directly instead of redirected.
 EVENTS_URL11="$(with_events_path "$CANVAS_URL11")"
 SSE_OUT11="$WORKDIR/sse-md-out.txt"
 : >"$SSE_OUT11"
-curl -fsS -N --max-time 6 "$EVENTS_URL11" >"$SSE_OUT11" 2>/dev/null &
+curl -fsS -N --max-time 6 -b "$JAR11" "$(strip_query "$EVENTS_URL11")" >"$SSE_OUT11" 2>/dev/null &
 CURL_PID11=$!
 sleep 0.5 # let the SSE connection register before we touch the file
 printf '# Hello Markdown\n\nUpdated *body* text.\n' >"$CANVAS_DIR11/index.md"
@@ -757,7 +797,8 @@ CANVAS_DIR12=$(echo "$OUT12" | sed -n '1p')
 CANVAS_URL12=$(echo "$OUT12" | sed -n '2p')
 printf '<h1>Just a fragment</h1>\n<p>no doctype or html tag here</p>\n' >"$CANVAS_DIR12/index.html"
 
-BODY12=$(curl -fsS "$CANVAS_URL12" || true)
+# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15.
+BODY12=$(curl -fsS -L -b "$WORKDIR/jar12.txt" -c "$WORKDIR/jar12.txt" "$CANVAS_URL12" || true)
 if echo "$BODY12" | grep -q "Just a fragment"; then
   ok "fragment scenario: response contains the fragment's original content"
 else
@@ -778,7 +819,8 @@ CANVAS_DIR13=$(echo "$OUT13" | sed -n '1p')
 CANVAS_URL13=$(echo "$OUT13" | sed -n '2p')
 printf '<!doctype html>\n<html><head><title>e2e complete</title></head><body><h1>Complete Doc</h1></body></html>\n' >"$CANVAS_DIR13/index.html"
 
-BODY13=$(curl -fsS "$CANVAS_URL13" || true)
+# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15.
+BODY13=$(curl -fsS -L -b "$WORKDIR/jar13.txt" -c "$WORKDIR/jar13.txt" "$CANVAS_URL13" || true)
 if echo "$BODY13" | grep -q "<title>e2e complete</title>" && echo "$BODY13" | grep -q "<h1>Complete Doc</h1>"; then
   ok "complete-document scenario: original document content is present verbatim"
 else
@@ -904,6 +946,101 @@ if echo "$PREREVERT_SNAPS" | grep -q "prerevert"; then
 else
   bad "revert scenario: a prerevert safety snapshot was taken automatically"
 fi
+
+# --- Scenario 21: privacy -- the daemon log never contains tokens, canvas
+# paths, or canvas IDs ---
+# This is the load-bearing regression test for the whole privacy-hardening
+# epic: it drives a mix of real traffic (a successful, cookie-authenticated
+# canvas request following the token-stripping redirect; a genuine 404; a
+# 401 for a missing token; a 401 for a wrong token) through a daemon, then
+# greps its ENTIRE log output -- both the log file (item 2) and, since the
+# daemon's stdout/stderr are fully redirected to that same file (cmd.Stdout
+# = cmd.Stderr = logFile in spawnAndWait), there is nothing else to check
+# separately -- for the capability token, any "/c/" path fragment, and the
+# canvas ID. It's run twice for stability, since a flaky pass here would be
+# far worse than a flaky pass anywhere else in this suite.
+log "Scenario 21: privacy -- daemon log never contains tokens, paths, or canvas IDs"
+
+run_privacy_scenario() {
+  local n="$1"
+  local dir="$WORKDIR/privacy-$n"
+  local id="privacy-test-$n"
+  local jar="$WORKDIR/privacy-cookies-$n.txt"
+  local out canvas_dir canvas_url token base body status
+
+  out=$("$BIN" add "$id" --dir "$dir" --idle-timeout 5m 2>&1)
+  canvas_dir=$(echo "$out" | sed -n '1p')
+  canvas_url=$(echo "$out" | sed -n '2p')
+  echo '<html><body>privacy e2e content</body></html>' >"$canvas_dir/index.html"
+
+  token=$(echo "$canvas_url" | sed -E 's/.*[?&]t=([^&]*).*/\1/')
+  base="$(strip_query "$canvas_url")"
+
+  # 1. A successful request: follow the token-stripping redirect (-L),
+  # picking up and resending the cookie it sets along the way (-b/-c), just
+  # like a real browser would.
+  body=$(curl -fsS -L -b "$jar" -c "$jar" "$canvas_url" || true)
+  if echo "$body" | grep -q "privacy e2e content"; then
+    ok "privacy run $n: successful canvas request serves real content"
+  else
+    bad "privacy run $n: successful canvas request serves real content"
+  fi
+
+  # 2. A genuine 404: cookie-authenticated (from step 1's jar), no query
+  # token, for a path that doesn't exist.
+  status=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" "${base}does-not-exist.html")
+  if [ "$status" = "404" ]; then
+    ok "privacy run $n: nonexistent path gets 404"
+  else
+    bad "privacy run $n: nonexistent path gets 404 (got $status)"
+  fi
+
+  # 3. 401 for no token and no cookie at all.
+  status=$(curl -s -o /dev/null -w '%{http_code}' "$base")
+  if [ "$status" = "401" ]; then
+    ok "privacy run $n: no token/cookie gets 401"
+  else
+    bad "privacy run $n: no token/cookie gets 401 (got $status)"
+  fi
+
+  # 4. 401 for a wrong token.
+  status=$(curl -s -o /dev/null -w '%{http_code}' "${base}?t=totally-wrong-token")
+  if [ "$status" = "401" ]; then
+    ok "privacy run $n: wrong token gets 401"
+  else
+    bad "privacy run $n: wrong token gets 401 (got $status)"
+  fi
+
+  "$BIN" stop --dir "$dir" >/dev/null 2>&1 || true
+  wait_for_file_gone "$dir/daemon.json" 5 || true
+
+  local logfile="$dir/daemon.log"
+  if [ -f "$logfile" ]; then
+    ok "privacy run $n: daemon log file exists"
+  else
+    bad "privacy run $n: daemon log file exists"
+    return
+  fi
+
+  if grep -qF "$token" "$logfile"; then
+    bad "privacy run $n: daemon log does not contain the capability token"
+  else
+    ok "privacy run $n: daemon log does not contain the capability token"
+  fi
+  if grep -qF "/c/" "$logfile"; then
+    bad "privacy run $n: daemon log does not contain a /c/ path fragment"
+  else
+    ok "privacy run $n: daemon log does not contain a /c/ path fragment"
+  fi
+  if grep -qF "$id" "$logfile"; then
+    bad "privacy run $n: daemon log does not contain the canvas ID"
+  else
+    ok "privacy run $n: daemon log does not contain the canvas ID"
+  fi
+}
+
+run_privacy_scenario 1
+run_privacy_scenario 2
 
 # --- Summary ---
 log "Summary"

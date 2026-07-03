@@ -77,6 +77,11 @@ func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// Canvas content is agent-authored and potentially sensitive; no-store
+	// keeps it (and the Last-Modified/ETag http.ServeContent would
+	// otherwise let a cache retain and later revalidate against) out of any
+	// browser disk/memory cache entirely, not just marked stale.
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, target, fi.ModTime(), f)
 }
 
@@ -118,7 +123,10 @@ func (s *Server) serveMarkdownIndex(w http.ResponseWriter, r *http.Request, id, 
 func (s *Server) writeHTML(w http.ResponseWriter, id string, html []byte) {
 	injected := injectReloadScript(html, id)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	// no-store rather than no-cache: canvas content is agent-authored and
+	// potentially sensitive, so it shouldn't be retained by any cache at
+	// all, not just revalidated before reuse.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(injected)
 }

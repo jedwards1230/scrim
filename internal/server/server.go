@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/mdns"
 	"github.com/jedwards1230/scrim/internal/state"
 	"github.com/jedwards1230/scrim/internal/version"
@@ -58,7 +58,15 @@ func New(cfg config.Config) *Server {
 // signal), the /api/stop handler, or the idle reaper. It always cleans up
 // the state file before returning.
 func (s *Server) Run(ctx context.Context) error {
-	if err := os.MkdirAll(s.canvasesDir, 0o755); err != nil { //nolint:gosec // canvases dir is a user-owned working directory
+	// HardenPermissions tightens s.cfg.Dir (and any preexisting state/log
+	// file under it) to owner-only before anything else touches the
+	// filesystem, so a directory created by an older scrim version -- or by
+	// hand -- doesn't stay world-readable just because this daemon didn't
+	// create it itself.
+	if err := s.cfg.HardenPermissions(); err != nil {
+		return fmt.Errorf("hardening scrim dir permissions: %w", err)
+	}
+	if err := os.MkdirAll(s.canvasesDir, 0o755); err != nil { //nolint:gosec // canvases dir is a user-owned working directory; its parent (s.cfg.Dir) is already owner-only
 		return fmt.Errorf("creating canvases dir: %w", err)
 	}
 
@@ -105,15 +113,16 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// mDNS advertisement is a discovery aid, not a functional requirement,
 	// and it's only meaningful when something on the LAN could actually
-	// reach this daemon (see mdns.IsLoopbackHost). A bind failure (e.g. no
-	// multicast support in this environment) is logged and otherwise
-	// ignored rather than treated as fatal to the daemon. mdnsAdv.Stop is
-	// nil-safe, so it's deferred unconditionally and withdraws the
-	// advertisement on every exit path below -- graceful stop, idle reap,
-	// and the http-server-error path alike.
-	mdnsAdv, mdnsErr := mdns.MaybeStart(s.cfg.Host, s.port)
+	// reach this daemon (see mdns.IsLoopbackHost) and the daemon hasn't
+	// opted out of it entirely (--no-mdns / s.cfg.NoMDNS). A bind failure
+	// (e.g. no multicast support in this environment) is logged and
+	// otherwise ignored rather than treated as fatal to the daemon.
+	// mdnsAdv.Stop is nil-safe, so it's deferred unconditionally and
+	// withdraws the advertisement on every exit path below -- graceful
+	// stop, idle reap, and the http-server-error path alike.
+	mdnsAdv, mdnsErr := mdns.MaybeStart(s.cfg.Host, s.port, s.cfg.NoMDNS)
 	if mdnsErr != nil {
-		log.Printf("mdns: not advertising %s: %v", mdns.ServiceHost, mdnsErr)
+		logging.Error(logging.CategoryMDNS, fmt.Errorf("not advertising %s: %w", mdns.ServiceHost, mdnsErr))
 	}
 	defer func() { _ = mdnsAdv.Stop() }()
 
@@ -124,6 +133,13 @@ func (s *Server) Run(ctx context.Context) error {
 	httpServer := &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Left nil, net/http falls back to its own package-level logger
+		// (straight to os.Stderr) for things like malformed requests or a
+		// panic recovered inside a handler -- bypassing scrim's logging
+		// policy (never a raw request path/query/token) entirely. Routing
+		// it through logging.StdLogger applies the same scrubbing as every
+		// other log call site in this package.
+		ErrorLog: logging.StdLogger(logging.CategoryHTTP),
 	}
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- httpServer.Serve(listener) }()

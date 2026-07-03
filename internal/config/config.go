@@ -5,6 +5,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -33,6 +35,11 @@ type Config struct {
 	Port        int
 	IdleTimeout time.Duration
 	NoAuth      bool
+	// NoMDNS disables the daemon's mDNS ("scrim.local") advertisement even
+	// when Host binds beyond loopback. It decouples "bound beyond loopback"
+	// from "advertises on mDNS": a daemon can be reachable on the LAN
+	// without broadcasting its presence to it.
+	NoMDNS bool
 }
 
 // Default returns the configuration that would be used with no flags and no
@@ -44,6 +51,7 @@ func Default() Config {
 		Port:        DefaultPort,
 		IdleTimeout: DefaultIdleTimeout,
 		NoAuth:      false,
+		NoMDNS:      false,
 	}
 }
 
@@ -73,6 +81,11 @@ func FromEnv() Config {
 	if v, ok := os.LookupEnv("SCRIM_NO_AUTH"); ok && v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.NoAuth = b
+		}
+	}
+	if v, ok := os.LookupEnv("SCRIM_NO_MDNS"); ok && v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.NoMDNS = b
 		}
 	}
 	cfg.Dir = ExpandHome(cfg.Dir)
@@ -148,4 +161,59 @@ func (c Config) VersionsDir() string { return filepath.Join(c.Dir, "versions") }
 // BaseURL is the daemon's HTTP base URL.
 func (c Config) BaseURL() string {
 	return "http://" + net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+}
+
+const (
+	// dirPerm is the permission enforced on c.Dir: owner-only
+	// read/write/traverse. Nothing under it (the state file, the log file,
+	// canvas contents) is reachable by another user on the same host once
+	// this holds, regardless of those entries' own individual permissions.
+	dirPerm = 0o700
+	// filePerm is the permission enforced on the state file and log file:
+	// owner-only read/write.
+	filePerm = 0o600
+)
+
+// HardenPermissions ensures c.Dir exists and is owner-only (dirPerm), and
+// tightens the state file and log file to owner-only (filePerm) if they
+// already exist. It's idempotent and meant to be called on every daemon
+// startup/self-start, whether c.Dir is brand new or was created by an
+// older scrim version (or by hand, e.g. `mkdir ~/.scrim`) with looser
+// permissions -- those don't get silently grandfathered in.
+func (c Config) HardenPermissions() error {
+	if err := enforceDirPerm(c.Dir); err != nil {
+		return err
+	}
+	if err := enforceFilePerm(c.StateFilePath()); err != nil {
+		return err
+	}
+	return enforceFilePerm(c.LogFilePath())
+}
+
+// enforceDirPerm creates dir if missing and (re)sets its permission to
+// dirPerm either way -- MkdirAll alone only applies a permission to a
+// directory it actually creates, leaving a preexisting looser-permissioned
+// directory untouched.
+func enforceDirPerm(dir string) error {
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		return fmt.Errorf("creating dir %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, dirPerm); err != nil {
+		return fmt.Errorf("tightening permissions on %s: %w", dir, err)
+	}
+	return nil
+}
+
+// enforceFilePerm tightens the permission of an existing file at path to
+// filePerm. A missing file is not an error -- there's nothing to tighten
+// yet, and whatever creates it is responsible for using filePerm from the
+// start.
+func enforceFilePerm(path string) error {
+	if err := os.Chmod(path, filePerm); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("tightening permissions on %s: %w", path, err)
+	}
+	return nil
 }

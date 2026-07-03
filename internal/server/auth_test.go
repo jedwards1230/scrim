@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,12 +71,27 @@ func TestConstantTimeEqual(t *testing.T) {
 	}
 }
 
+// noRedirectClient returns an http.Client that never automatically follows
+// a redirect -- so a test can inspect the 302 response itself (status,
+// Location, Set-Cookie) rather than whatever the followed request lands on.
+func noRedirectClient() *http.Client {
+	return &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // TestWithAuthAcceptRejectMatrix is the accept/reject matrix for the auth
 // middleware: a valid token in the query, a valid cookie, an invalid token,
 // and missing-everything, each run against a representative sample of every
-// kind of route the daemon serves -- the index page, a static canvas asset,
-// and the SSE endpoint -- since the middleware must gate all of them, not
-// just /api/*.
+// browser-facing route the daemon serves -- the index page, a static canvas
+// asset, and the SSE endpoint -- since the middleware must gate all of
+// them, not just /api/*. A valid query token against these routes redirects
+// (see TestWithAuthQueryTokenRedirectsAndStripsToken for the full
+// redirect-then-cookie-auth flow); every other case is unaffected by that
+// change.
 func TestWithAuthAcceptRejectMatrix(t *testing.T) {
 	_, ts := newAuthTestServer(t)
 
@@ -88,9 +104,9 @@ func TestWithAuthAcceptRejectMatrix(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name:       "valid token in query",
+			name:       "valid token in query redirects to strip it",
 			query:      "?t=" + testToken,
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusFound,
 		},
 		{
 			name:       "invalid token in query",
@@ -123,7 +139,7 @@ func TestWithAuthAcceptRejectMatrix(t *testing.T) {
 		},
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := noRedirectClient()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, route := range routes {
@@ -142,27 +158,39 @@ func TestWithAuthAcceptRejectMatrix(t *testing.T) {
 				if resp.StatusCode != tt.wantStatus {
 					t.Errorf("GET %s%s status = %d, want %d", route, tt.query, resp.StatusCode, tt.wantStatus)
 				}
+				if tt.wantStatus == http.StatusFound {
+					loc := resp.Header.Get("Location")
+					if strings.Contains(loc, tokenQueryParam+"=") {
+						t.Errorf("GET %s%s Location %q still carries the token query param", route, tt.query, loc)
+					}
+				}
 			}
 		})
 	}
 }
 
-// TestWithAuthQueryTokenSetsCookie confirms a valid ?t= hit sets the auth
-// cookie, so a browser's subsequent same-origin requests (including its own
-// EventSource request against the SSE endpoint, and requests for injected
-// static assets) don't need the query param repeated.
-func TestWithAuthQueryTokenSetsCookie(t *testing.T) {
+// TestWithAuthQueryTokenRedirectsAndStripsToken exercises the full
+// browser-facing flow end to end: a valid "?t=" hit gets a 302 to the same
+// path with the token stripped (other query params preserved) and the
+// cookie set, and the redirected request -- now cookie-authenticated, no
+// token in the URL -- succeeds.
+func TestWithAuthQueryTokenRedirectsAndStripsToken(t *testing.T) {
 	_, ts := newAuthTestServer(t)
+	client := noRedirectClient()
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(ts.URL + "/?t=" + testToken)
+	resp, err := client.Get(ts.URL + "/c/report/?t=" + testToken + "&extra=kept")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+
+	loc := resp.Header.Get("Location")
+	if loc != "/c/report/?extra=kept" {
+		t.Errorf("Location = %q, want %q (token stripped, other query params preserved)", loc, "/c/report/?extra=kept")
 	}
 
 	var found *http.Cookie
@@ -173,10 +201,50 @@ func TestWithAuthQueryTokenSetsCookie(t *testing.T) {
 		}
 	}
 	if found == nil {
-		t.Fatal("response did not set the auth cookie")
+		t.Fatal("302 response did not set the auth cookie")
 	}
 	if found.Value != testToken {
 		t.Errorf("cookie value = %q, want %q", found.Value, testToken)
+	}
+
+	// Follow the redirect manually, presenting only the cookie -- exactly
+	// what a browser does automatically -- with no token in the URL at all.
+	req, err := http.NewRequest(http.MethodGet, ts.URL+loc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(found)
+	resp2, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("redirected request status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+// TestWithAuthAPIRoutesNotRedirected confirms /api/* is exempted from the
+// query-token redirect: the CLI's own apiclient always presents the token
+// as a query param and expects a direct response on every call, never a
+// 302 -- which would otherwise silently turn a POST/DELETE into a GET (or
+// fail outright against a client with no cookie jar to carry the cookie
+// across the hop).
+func TestWithAuthAPIRoutesNotRedirected(t *testing.T) {
+	_, ts := newAuthTestServer(t)
+	client := noRedirectClient()
+
+	resp, err := client.Get(ts.URL + "/api/status?t=" + testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/status?t=<valid> status = %d, want 200 (no redirect)", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("GET /api/status?t=<valid> set a Location header (%q); /api/* must never redirect", loc)
 	}
 }
 

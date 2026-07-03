@@ -153,3 +153,32 @@ func TestCommonFlagsToConfigResolvesDir(t *testing.T) {
 		t.Errorf("toConfig().Dir = %q, want an absolute path", cfg.Dir)
 	}
 }
+
+// TestRegisterCommonFlagsNoMDNS confirms --no-mdns parses through
+// registerCommonFlags and survives into the resolved config.Config,
+// following the exact same pattern as the existing --no-auth flag.
+func TestRegisterCommonFlagsNoMDNS(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "unset defaults to false", args: nil, want: false},
+		{name: "--no-mdns sets true", args: []string{"--no-mdns"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := newFlagSet("test", &discard{})
+			cf := registerCommonFlags(fs)
+			if err := parseArgs(fs, tt.args); err != nil {
+				t.Fatalf("parseArgs() error = %v", err)
+			}
+			if cf.noMDNS != tt.want {
+				t.Errorf("noMDNS = %v, want %v", cf.noMDNS, tt.want)
+			}
+			if got := cf.toConfig().NoMDNS; got != tt.want {
+				t.Errorf("toConfig().NoMDNS = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
