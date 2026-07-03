@@ -112,11 +112,15 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) canvasResponse(info canvas.Info) apiclient.CanvasResponse {
+	url := fmt.Sprintf("http://%s:%d/c/%s/", s.cfg.Host, s.port, info.ID)
+	if !s.cfg.NoAuth {
+		url += "?t=" + s.token
+	}
 	return apiclient.CanvasResponse{
 		ID:         info.ID,
 		Title:      info.Title,
 		Dir:        info.Dir,
-		URL:        fmt.Sprintf("http://%s:%d/c/%s/", s.cfg.Host, s.port, info.ID),
+		URL:        url,
 		ModifiedAt: info.ModTime,
 		SSEClients: s.hub.canvasClientCount(info.ID),
 	}

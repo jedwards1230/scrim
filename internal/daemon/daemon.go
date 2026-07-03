@@ -83,7 +83,7 @@ func Stop(cfg config.Config) (found bool, err error) {
 		return false, nil
 	}
 
-	client := apiclient.New(cfg.BaseURL())
+	client := apiclient.NewWithToken(cfg.BaseURL(), st.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 	defer cancel()
 	if err := client.Stop(ctx); err != nil {
@@ -124,7 +124,7 @@ func healthyState(cfg config.Config) (*state.State, bool) {
 		return nil, false
 	}
 
-	client := apiclient.New(fmt.Sprintf("http://%s:%d", st.Host, st.Port))
+	client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
 	for i := 0; i < healthCheckRetries; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 		_, err := client.Status(ctx)

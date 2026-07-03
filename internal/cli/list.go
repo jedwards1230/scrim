@@ -25,7 +25,7 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	client := apiclient.New(fmt.Sprintf("http://%s:%d", st.Host, st.Port))
+	client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
 	canvases, err := client.ListCanvases(context.Background())
 	if err != nil {
 		errOut(stderr, err)
@@ -41,7 +41,14 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		if title == "" {
 			title = "-"
 		}
-		outf(stdout, "%s\t%s\t%s\n", c.ID, title, c.URL)
+		lines := urlLines(st.Host, c.URL)
+		outf(stdout, "%s\t%s\t%s\n", c.ID, title, lines[0])
+		// When mDNS is active there's a second (fallback, plain host:port)
+		// line — print it indented under the same row rather than widening
+		// the tab-separated columns for every canvas.
+		for _, fallback := range lines[1:] {
+			outf(stdout, "\t\t%s\n", fallback)
+		}
 	}
 	return 0
 }

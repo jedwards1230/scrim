@@ -27,7 +27,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	client := apiclient.New(fmt.Sprintf("http://%s:%d", st.Host, st.Port))
+	client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
 	resp, err := client.Status(context.Background())
 	if err != nil {
 		errOut(stderr, err)
@@ -43,5 +43,11 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	outf(stdout, "sse clients:  %d\n", resp.SSEClients)
 	outf(stdout, "idle for:     %s\n", time.Duration(resp.IdleSeconds*float64(time.Second)).Round(time.Second))
 	outf(stdout, "idle timeout: %s\n", time.Duration(resp.IdleTimeoutSeconds*float64(time.Second)).Round(time.Second))
+
+	lines := urlLines(st.Host, baseURLFor(st, "/"))
+	outf(stdout, "url:          %s\n", lines[0])
+	for _, fallback := range lines[1:] {
+		outf(stdout, "url (plain):  %s\n", fallback)
+	}
 	return 0
 }

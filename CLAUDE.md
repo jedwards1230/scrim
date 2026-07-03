@@ -21,12 +21,13 @@ Key packages under `internal/`:
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title) |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
 | `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop |
-| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper |
-| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve` |
+| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper, capability-token auth middleware, mDNS advertisement |
+| `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
+| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
 
-Phase 3 (auth via the state file's `token` field, mDNS advertisement) and
-Phase 4 (`open` actually launching a browser, version-skew restart) are not
-built yet.
+Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
+advertisement) is built. Phase 4 (`open` actually launching a browser,
+version-skew restart) is not built yet.
 
 Planned data flow: `main.go` dispatches a verb → `cli` either talks to a
 running daemon over its local HTTP API or starts one (`daemon`) → the daemon

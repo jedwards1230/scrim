@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/mdns"
 	"github.com/jedwards1230/scrim/internal/state"
 	"github.com/jedwards1230/scrim/internal/version"
 )
@@ -32,7 +34,8 @@ type Server struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
-	port int // actual bound port, set once in Run before any handler starts
+	port  int    // actual bound port, set once in Run before any handler starts
+	token string // capability token; empty when cfg.NoAuth is set, set once in Run
 }
 
 // New returns a Server configured from cfg. Call Run to start it.
@@ -65,16 +68,23 @@ func (s *Server) Run(ctx context.Context) error {
 		s.port = tcpAddr.Port
 	}
 
-	token, err := state.NewToken()
-	if err != nil {
-		_ = listener.Close()
-		return err
+	var token string
+	if !s.cfg.NoAuth {
+		var err error
+		token, err = state.NewToken()
+		if err != nil {
+			_ = listener.Close()
+			return err
+		}
 	}
+	s.token = token
+
 	st := &state.State{
 		PID:       os.Getpid(),
 		Host:      s.cfg.Host,
 		Port:      s.port,
 		Token:     token,
+		NoAuth:    s.cfg.NoAuth,
 		Version:   version.Short(),
 		StartedAt: s.startedAt,
 	}
@@ -90,6 +100,20 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	defer watcher.Close() //nolint:errcheck // best-effort cleanup on shutdown
+
+	// mDNS advertisement is a discovery aid, not a functional requirement,
+	// and it's only meaningful when something on the LAN could actually
+	// reach this daemon (see mdns.IsLoopbackHost). A bind failure (e.g. no
+	// multicast support in this environment) is logged and otherwise
+	// ignored rather than treated as fatal to the daemon. mdnsAdv.Stop is
+	// nil-safe, so it's deferred unconditionally and withdraws the
+	// advertisement on every exit path below -- graceful stop, idle reap,
+	// and the http-server-error path alike.
+	mdnsAdv, mdnsErr := mdns.MaybeStart(s.cfg.Host, s.port)
+	if mdnsErr != nil {
+		log.Printf("mdns: not advertising %s: %v", mdns.ServiceHost, mdnsErr)
+	}
+	defer func() { _ = mdnsAdv.Stop() }()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

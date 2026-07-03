@@ -30,10 +30,10 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		errOut(stderr, err)
 		return 1
 	}
-	baseURL := fmt.Sprintf("http://%s:%d", st.Host, st.Port)
+	apiBaseURL := fmt.Sprintf("http://%s:%d", st.Host, st.Port)
 
 	if len(pos) == 0 {
-		outln(stdout, baseURL+"/")
+		printURLLines(stdout, st.Host, baseURLFor(st, "/"))
 		return 0
 	}
 
@@ -43,7 +43,7 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	client := apiclient.New(baseURL)
+	client := apiclient.NewWithToken(apiBaseURL, st.Token)
 	canvases, err := client.ListCanvases(context.Background())
 	if err != nil {
 		errOut(stderr, err)
@@ -51,7 +51,7 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, c := range canvases {
 		if c.ID == id {
-			outln(stdout, c.URL)
+			printURLLines(stdout, st.Host, c.URL)
 			return 0
 		}
 	}

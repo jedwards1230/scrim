@@ -141,4 +141,50 @@ func TestNewToken(t *testing.T) {
 	if a == b {
 		t.Fatal("NewToken() returned identical tokens on successive calls")
 	}
+	// 32 bytes hex-encoded is 64 hex characters.
+	if len(a) != 64 {
+		t.Fatalf("NewToken() length = %d, want 64", len(a))
+	}
+}
+
+func TestAuthEnabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		noAuth bool
+		want   bool
+	}{
+		{name: "auth enabled by default", noAuth: false, want: true},
+		{name: "no-auth disables it", noAuth: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &State{NoAuth: tt.noAuth}
+			if got := st.AuthEnabled(); got != tt.want {
+				t.Errorf("AuthEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStateNoAuthRoundTrip guards against NoAuth silently getting dropped
+// across a Save/Load cycle -- readers depend on it being an explicit,
+// persisted field rather than inferred from an empty Token.
+func TestStateNoAuthRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.json")
+
+	st := &State{PID: 1, Port: 1, Token: "", NoAuth: true}
+	if err := Save(path, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NoAuth {
+		t.Error("Load() lost NoAuth=true across a round trip")
+	}
+	if got.AuthEnabled() {
+		t.Error("AuthEnabled() = true after loading a --no-auth state, want false")
+	}
 }
