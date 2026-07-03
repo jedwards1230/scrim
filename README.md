@@ -109,12 +109,17 @@ fallback, since mDNS can be blocked on some networks.
 
 Beyond the token-stripping redirect above: every response carries
 `Referrer-Policy: no-referrer`, canvas content responses are marked
-`Cache-Control: no-store` so browsers never retain them, `~/.scrim` (or
-whatever `--dir` points to) is tightened to owner-only permissions on every
-startup (0700 for the directory, 0600 for the state and log files -- even
-if it was created looser by an older scrim version), and the daemon's own
-logging never includes a request path, canvas ID, query string, or the raw
-token, at any log level.
+`Cache-Control: no-store` so browsers never retain them, and the daemon's
+own logging never includes a request path, canvas ID, query string, or the
+raw token, at any log level.
+
+On Unix-like systems (Linux, macOS), `~/.scrim` (or whatever `--dir` points
+to) is also tightened to owner-only permissions on every startup (0700 for
+the directory, 0600 for the state and log files -- even if it was created
+looser by an older scrim version). This isn't implemented on Windows yet
+(`os.Chmod` there only toggles the read-only attribute, not owner-only
+access) -- a one-time warning is logged instead of silently claiming
+success; tracked in [#19](https://github.com/jedwards1230/scrim/issues/19).
 
 ## link vs. open
 

@@ -10,9 +10,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/jedwards1230/scrim/internal/logging"
 )
 
 const (
@@ -180,7 +184,23 @@ const (
 // startup/self-start, whether c.Dir is brand new or was created by an
 // older scrim version (or by hand, e.g. `mkdir ~/.scrim`) with looser
 // permissions -- those don't get silently grandfathered in.
+//
+// This is a Unix-only guarantee -- see permissionHardeningSupported. On a
+// platform where it doesn't hold, HardenPermissions still returns nil (there
+// really is nothing more it can do), but logs a one-time warning rather than
+// silently claiming success.
 func (c Config) HardenPermissions() error {
+	return c.hardenPermissionsForGOOS(runtime.GOOS)
+}
+
+// hardenPermissionsForGOOS is HardenPermissions's actual implementation,
+// parameterized on goos so tests can exercise the Windows no-op path
+// without needing to run on a real Windows host.
+func (c Config) hardenPermissionsForGOOS(goos string) error {
+	if !permissionHardeningSupported(goos) {
+		warnPermissionHardeningUnsupported()
+		return nil
+	}
 	if err := enforceDirPerm(c.Dir); err != nil {
 		return err
 	}
@@ -189,6 +209,40 @@ func (c Config) HardenPermissions() error {
 	}
 	return enforceFilePerm(c.LogFilePath())
 }
+
+// permissionHardeningSupported reports whether goos supports owner-only
+// enforcement via os.Chmod the way enforceDirPerm/enforceFilePerm use it.
+// It does not on Windows: os.Chmod there only toggles the
+// FILE_ATTRIBUTE_READONLY flag (whether the file is writable at all) --
+// there's no Unix-style "owner-only, unreadable by other accounts on the
+// same host" primitive behind it, so the dirPerm/filePerm calls below would
+// silently no-op rather than actually tightening anything.
+func permissionHardeningSupported(goos string) bool {
+	return goos != "windows"
+}
+
+var windowsPermissionWarnOnce sync.Once
+
+// warnPermissionHardeningUnsupported logs, once per process, that owner-only
+// permission hardening isn't available on this platform. HardenPermissions
+// is called on every self-start check and daemon startup -- without the
+// sync.Once guard, a single long-lived process could log this several
+// times over instead of once.
+func warnPermissionHardeningUnsupported() {
+	windowsPermissionWarnOnce.Do(func() {
+		logging.Error(logging.CategoryConfig, errPermissionHardeningUnsupported)
+	})
+}
+
+// errPermissionHardeningUnsupported is a static, pre-scrubbed message (it
+// carries no path or other request-derived text) describing the Windows
+// gap in permission hardening -- see permissionHardeningSupported. Tracked
+// as https://github.com/jedwards1230/scrim/issues/19.
+var errPermissionHardeningUnsupported = errors.New(
+	"owner-only permission hardening is unavailable on this platform: " +
+		"--dir, the state file, and the log file are not being tightened " +
+		"(tracked as scrim#19)",
+)
 
 // enforceDirPerm creates dir if missing and (re)sets its permission to
 // dirPerm either way -- MkdirAll alone only applies a permission to a

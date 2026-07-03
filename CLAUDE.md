@@ -16,7 +16,7 @@ Key packages under `internal/`:
 | Package | Responsibility |
 |---------|---------------|
 | `version` | Build-time version stamping via ldflags |
-| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file |
+| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file on Unix (Windows lacks an equivalent primitive, logged as a one-time warning instead of claiming success -- tracked in #19) |
 | `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title, description, icon) stored externally under `config.Config.MetaDir()`, and deterministic default icon/color derivation from a canvas's ID |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |

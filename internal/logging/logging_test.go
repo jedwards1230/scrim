@@ -3,8 +3,10 @@ package logging
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -109,6 +111,59 @@ func TestErrorNilIsNoOp(t *testing.T) {
 	Error(CategoryHTTP, nil)
 	if buf.Len() != 0 {
 		t.Errorf("Error(category, nil) wrote output, want none: %q", buf.String())
+	}
+}
+
+// TestErrorConcurrentWritesDoNotInterleave is the regression test for the
+// read-out-then-write-outside-the-lock race: Error must hold mu across the
+// whole write, not just the read of out, or two goroutines racing this call
+// (as the HTTP server, idle reaper, and other daemon goroutines do in
+// practice) can interleave their Fprintf calls on the shared writer and
+// corrupt output. Run with `go test -race` to also catch the underlying
+// data race directly.
+func TestErrorConcurrentWritesDoNotInterleave(t *testing.T) {
+	buf := withCapturedOutput(t)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			Error(CategoryDaemon, fmt.Errorf("concurrent-message-%03d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != n {
+		t.Fatalf("got %d log lines, want %d (interleaved/corrupted write splits or merges lines); output:\n%s", len(lines), n, out)
+	}
+
+	seen := make(map[int]bool, n)
+	for _, line := range lines {
+		if !strings.Contains(line, string(CategoryDaemon)) {
+			t.Errorf("line missing category, likely corrupted by an interleaved write: %q", line)
+			continue
+		}
+		msgStart := strings.Index(line, "concurrent-message-")
+		if msgStart < 0 {
+			t.Errorf("line missing expected message prefix, likely corrupted by an interleaved write: %q", line)
+			continue
+		}
+		var idx int
+		if _, err := fmt.Sscanf(line[msgStart:], "concurrent-message-%03d", &idx); err != nil {
+			t.Errorf("line did not parse as an intact message %q: %v", line, err)
+			continue
+		}
+		if seen[idx] {
+			t.Errorf("message %03d appeared more than once, output was duplicated/split: %q", idx, line)
+		}
+		seen[idx] = true
+	}
+	if len(seen) != n {
+		t.Errorf("saw %d distinct intact messages, want %d", len(seen), n)
 	}
 }
 

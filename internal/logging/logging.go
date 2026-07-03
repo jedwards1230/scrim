@@ -38,6 +38,9 @@ const (
 	CategoryAuth   Category = "auth"
 	CategorySSE    Category = "sse"
 	CategoryDaemon Category = "daemon"
+	// CategoryConfig covers startup-time configuration concerns that aren't
+	// tied to a request, e.g. internal/config's permission-hardening.
+	CategoryConfig Category = "config"
 )
 
 var (
@@ -62,17 +65,24 @@ func SetOutput(w io.Writer) {
 // <message>", with the message scrubbed (see scrub) before being written. A
 // nil err is a no-op, so call sites can write `logging.Error(cat, err)`
 // directly after an `if err != nil` without an extra branch disappearing.
+//
+// mu is held for the whole read-out-then-write, not just the read of out --
+// Error is called concurrently from the HTTP server, the idle reaper, and
+// other daemon goroutines, all sharing the same underlying io.Writer.
+// Releasing the lock between reading out and writing to it would let two
+// concurrent calls race on that writer, interleaving or corrupting their
+// output; holding it across the whole call makes each Error call atomic
+// with respect to both other Error calls and a concurrent SetOutput.
 func Error(category Category, err error) {
 	if err == nil {
 		return
 	}
 	mu.Lock()
-	w := out
-	mu.Unlock()
+	defer mu.Unlock()
 	// A failure to write a log line has nowhere else to go and nothing
 	// actionable to do about it -- it's silently dropped, same as every
 	// other best-effort write in this codebase.
-	_, _ = fmt.Fprintf(w, "%s [%s] %s\n", time.Now().UTC().Format(time.RFC3339), category, scrub(err.Error()))
+	_, _ = fmt.Fprintf(out, "%s [%s] %s\n", time.Now().UTC().Format(time.RFC3339), category, scrub(err.Error()))
 }
 
 // StdLogger returns a *log.Logger that forwards every line written to it to

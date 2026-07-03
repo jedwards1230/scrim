@@ -1,11 +1,16 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jedwards1230/scrim/internal/logging"
 )
 
 func TestFromEnv(t *testing.T) {
@@ -207,6 +212,87 @@ func TestHardenPermissionsMissingFilesIsNotAnError(t *testing.T) {
 	cfg := Config{Dir: dir, Host: "127.0.0.1", Port: 7777}
 	if err := cfg.HardenPermissions(); err != nil {
 		t.Fatalf("HardenPermissions() error = %v, want nil for a dir with no state/log files yet", err)
+	}
+}
+
+// TestPermissionHardeningSupported confirms the OS-detection helper draws
+// the line exactly at Windows -- the only platform where os.Chmod doesn't
+// apply Unix-style owner-only permission bits.
+func TestPermissionHardeningSupported(t *testing.T) {
+	tests := []struct {
+		goos string
+		want bool
+	}{
+		{"windows", false},
+		{"linux", true},
+		{"darwin", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			if got := permissionHardeningSupported(tt.goos); got != tt.want {
+				t.Errorf("permissionHardeningSupported(%q) = %v, want %v", tt.goos, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHardenPermissionsForGOOSWindowsIsHonestNoOp confirms HardenPermissions
+// must not claim to have tightened permissions on a platform where os.Chmod
+// can't actually enforce owner-only access. It must leave existing
+// permissions untouched (no attempted, silently no-op'd chmod) and still
+// return nil -- there's nothing more it can do, but it must not error
+// either.
+//
+// This drives the goos through hardenPermissionsForGOOS directly rather than
+// relying on runtime.GOOS, since this environment doesn't run on real
+// Windows -- see permissionHardeningSupported.
+func TestHardenPermissionsForGOOSWindowsIsHonestNoOp(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("os.Chmod(dir) setup error = %v", err)
+	}
+	statePath := filepath.Join(dir, "daemon.json")
+	if err := os.WriteFile(statePath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("writing state file: %v", err)
+	}
+
+	cfg := Config{Dir: dir, Host: "127.0.0.1", Port: 7777}
+	if err := cfg.hardenPermissionsForGOOS("windows"); err != nil {
+		t.Fatalf("hardenPermissionsForGOOS(windows) error = %v, want nil", err)
+	}
+
+	// Permissions must be left exactly as they were -- no chmod attempted.
+	assertMode(t, dir, 0o755)
+	assertMode(t, statePath, 0o644)
+}
+
+// TestHardenPermissionsForGOOSWindowsWarnsOnce confirms the Windows no-op
+// path logs the platform-limitation warning through the same scrubbed
+// logging surface everything else uses, and only once per process even
+// across repeated calls -- HardenPermissions runs on every self-start
+// check, not just once per daemon lifetime, so without the guard it would
+// spam.
+func TestHardenPermissionsForGOOSWindowsWarnsOnce(t *testing.T) {
+	windowsPermissionWarnOnce = sync.Once{}
+	t.Cleanup(func() { windowsPermissionWarnOnce = sync.Once{} })
+
+	var buf bytes.Buffer
+	logging.SetOutput(&buf)
+	t.Cleanup(func() { logging.SetOutput(nil) })
+
+	cfg := Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7777}
+	for i := 0; i < 3; i++ {
+		if err := cfg.hardenPermissionsForGOOS("windows"); err != nil {
+			t.Fatalf("hardenPermissionsForGOOS(windows) call %d error = %v", i, err)
+		}
+	}
+
+	out := buf.String()
+	if n := strings.Count(out, string(logging.CategoryConfig)); n != 1 {
+		t.Errorf("got %d warning lines across 3 calls, want exactly 1; output:\n%s", n, out)
+	}
+	if !strings.Contains(out, "permission hardening is unavailable") {
+		t.Errorf("warning output missing expected message; got: %s", out)
 	}
 }
 
