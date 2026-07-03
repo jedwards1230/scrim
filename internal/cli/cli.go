@@ -31,6 +31,8 @@ Flags (all verbs):
   --host HOST            Host the daemon binds to (env SCRIM_HOST, default 127.0.0.1)
   --port PORT            Port the daemon listens on (env SCRIM_PORT, default 7777)
   --idle-timeout DUR     Idle time before the daemon exits (env SCRIM_IDLE_TIMEOUT, default 30m)
+                         0 or negative disables idle exit entirely (the daemon
+                         only stops via "scrim stop" or a signal)
   --no-auth              Disable the local auth token (env SCRIM_NO_AUTH)
 
   -h, --help             Show this help

@@ -29,7 +29,7 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	fs.StringVar(&cf.dir, "dir", envDefaults.Dir, "directory for canvases + daemon state (env SCRIM_DIR)")
 	fs.StringVar(&cf.host, "host", envDefaults.Host, "host the daemon binds to (env SCRIM_HOST)")
 	fs.IntVar(&cf.port, "port", envDefaults.Port, "port the daemon listens on (env SCRIM_PORT)")
-	fs.DurationVar(&cf.idleTimeout, "idle-timeout", envDefaults.IdleTimeout, "idle time before the daemon exits (env SCRIM_IDLE_TIMEOUT)")
+	fs.DurationVar(&cf.idleTimeout, "idle-timeout", envDefaults.IdleTimeout, "idle time before the daemon exits (env SCRIM_IDLE_TIMEOUT); 0 or negative disables idle exit entirely")
 	fs.BoolVar(&cf.noAuth, "no-auth", envDefaults.NoAuth, "disable the local auth token (env SCRIM_NO_AUTH)")
 	return cf
 }

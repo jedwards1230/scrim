@@ -37,7 +37,11 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 		IdleTimeoutSeconds: s.cfg.IdleTimeout.Seconds(),
 		IdleSeconds:        idleSeconds,
 		SSEClients:         sseClients,
-		Active:             sseClients > 0 || idleSeconds < s.cfg.IdleTimeout.Seconds(),
+		// With reaping disabled (idleTimeout <= 0) the daemon is always
+		// considered active — idleSeconds is otherwise always >= 0, which
+		// would make "idleSeconds < IdleTimeoutSeconds" spuriously false
+		// once IdleTimeoutSeconds is itself <= 0.
+		Active: sseClients > 0 || s.cfg.IdleTimeout <= 0 || idleSeconds < s.cfg.IdleTimeout.Seconds(),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

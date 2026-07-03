@@ -29,6 +29,12 @@ type canvasWatcher struct {
 
 	mu     sync.Mutex
 	timers map[string]*time.Timer
+	// fireWG tracks in-flight debounce callbacks (the goroutine
+	// time.AfterFunc spawns for each timer), so Close is a true quiescence
+	// barrier: a callback that had already fired (and so couldn't be
+	// canceled by Timer.Stop) is waited out before Close returns, instead
+	// of being left to run after the caller thinks Close has finished.
+	fireWG sync.WaitGroup
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -121,7 +127,9 @@ func (w *canvasWatcher) scheduleReload(id string) {
 		t.Reset(w.debounce)
 		return
 	}
+	w.fireWG.Add(1)
 	w.timers[id] = time.AfterFunc(w.debounce, func() {
+		defer w.fireWG.Done()
 		w.mu.Lock()
 		delete(w.timers, id)
 		w.mu.Unlock()
@@ -129,14 +137,25 @@ func (w *canvasWatcher) scheduleReload(id string) {
 	})
 }
 
-// Close stops the watcher and waits for its event loop to exit.
+// Close stops the watcher and waits for its event loop to exit, as well as
+// for any debounce callback that was already firing at the time of the call
+// to finish (see fireWG).
 func (w *canvasWatcher) Close() error {
 	close(w.done)
 	w.mu.Lock()
 	for _, t := range w.timers {
-		t.Stop()
+		if t.Stop() {
+			// Successfully canceled before it fired: its callback (and the
+			// fireWG.Add(1) that goes with it) will never run.
+			w.fireWG.Done()
+		}
+		// If Stop returns false, the callback already fired (or is in the
+		// process of firing) and will call fireWG.Done() itself; waiting
+		// below still catches it since it blocks on w.mu, released once
+		// this loop finishes.
 	}
 	w.mu.Unlock()
+	w.fireWG.Wait()
 	err := w.fsw.Close()
 	w.wg.Wait()
 	return err

@@ -167,6 +167,31 @@ func TestAPIStatus(t *testing.T) {
 	}
 }
 
+// TestAPIStatusActiveWithReapingDisabled guards against Active going
+// spuriously false whenever --idle-timeout <= 0 (reaping disabled): with no
+// idle timeout to compare against, the daemon should always report active
+// rather than "idleSeconds < a non-positive timeout", which is never true.
+func TestAPIStatusActiveWithReapingDisabled(t *testing.T) {
+	cfg := config.Config{
+		Dir:         t.TempDir(),
+		Host:        "127.0.0.1",
+		Port:        0,
+		IdleTimeout: 0,
+	}
+	s := New(cfg)
+	ts := httptest.NewServer(s.routes())
+	t.Cleanup(ts.Close)
+
+	client := apiclient.New(ts.URL)
+	resp, err := client.Status(t.Context())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !resp.Active {
+		t.Error("Status().Active = false with idle-timeout disabled, want true")
+	}
+}
+
 func TestIndexPageListsCanvases(t *testing.T) {
 	_, ts := newTestServer(t)
 	client := apiclient.New(ts.URL)
