@@ -51,6 +51,16 @@ func TestLooksLikeCompleteHTMLDocument(t *testing.T) {
 			content: "<div>no wrapper here</div>",
 			want:    false,
 		},
+		{
+			name:    "custom element with html- prefix is not a complete document",
+			content: "<html-widget>somecontent</html-widget>",
+			want:    false,
+		},
+		{
+			name:    "custom tag name starting with html is not a complete document",
+			content: "<htmlx>somecontent</htmlx>",
+			want:    false,
+		},
 	}
 
 	for _, tt := range tests {
