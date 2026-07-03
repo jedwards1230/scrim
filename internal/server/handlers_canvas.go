@@ -40,7 +40,7 @@ func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, err := resolveServablePath(root, r.PathValue("rest"))
+	target, viaIndex, err := resolveServablePath(root, r.PathValue("rest"))
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, errOutsideRoot) {
 			http.NotFound(w, r)
@@ -51,8 +51,15 @@ func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := strings.ToLower(filepath.Ext(target))
-	if ext == ".html" || ext == ".htm" {
+	switch {
+	case ext == ".html" || ext == ".htm":
 		s.serveHTML(w, r, id, target)
+		return
+	case viaIndex && (ext == ".md" || ext == ".markdown"):
+		// Only the index.md-as-directory-index case renders markdown; a
+		// directly-requested notes.md falls through to raw static serving
+		// below, same as any other non-HTML file.
+		s.serveMarkdownIndex(w, r, id, target)
 		return
 	}
 
@@ -71,13 +78,43 @@ func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, target, fi.ModTime(), f)
 }
 
+// serveHTML serves an .html/.htm file. A complete document (one already
+// containing <!doctype or <html) is served as-is aside from reload-script
+// injection; a bare fragment is first wrapped in scrim's default skeleton
+// (see wrapInSkeleton) so it gets a sensible presentation.
 func (s *Server) serveHTML(w http.ResponseWriter, r *http.Request, id, target string) {
 	data, err := os.ReadFile(target) //nolint:gosec // target is resolved+validated by resolveServablePath
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	injected := injectReloadScript(data, id)
+	if !looksLikeCompleteHTMLDocument(data) {
+		data = wrapInSkeleton(data)
+	}
+	s.writeHTML(w, id, data)
+}
+
+// serveMarkdownIndex renders an index.md (reached via directory-index
+// fallback, never a direct .md request -- see resolveServablePath) to HTML
+// via goldmark and wraps it in scrim's default skeleton.
+func (s *Server) serveMarkdownIndex(w http.ResponseWriter, r *http.Request, id, target string) {
+	source, err := os.ReadFile(target) //nolint:gosec // target is resolved+validated by resolveServablePath
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rendered, err := renderMarkdown(source)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.writeHTML(w, id, wrapInSkeleton(rendered))
+}
+
+// writeHTML injects the live-reload script into html and writes it as the
+// response body.
+func (s *Server) writeHTML(w http.ResponseWriter, id string, html []byte) {
+	injected := injectReloadScript(html, id)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
