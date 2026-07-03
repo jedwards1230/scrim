@@ -7,12 +7,10 @@ agent-authored HTML canvases with live reload over SSE, and a human views
 them in a browser. An agent writes (or updates) an HTML file; `scrim` makes
 it reachable at a stable URL and pushes reload events when the file changes.
 
-> **Status**: Phase 4 (polish). All CLI verbs below are implemented. A random
-> capability token gates every request by default (`--no-auth` to disable),
-> the daemon advertises `scrim.local` over mDNS when bound beyond loopback,
-> `open` launches your default browser, and a version-mismatched daemon is
-> replaced automatically the next time the CLI self-starts one — see
-> [CLAUDE.md](CLAUDE.md).
+> A random capability token gates every request by default (`--no-auth` to
+> disable), the daemon advertises `scrim.local` over mDNS when bound beyond
+> loopback, `open` launches your default browser, and a version-mismatched
+> daemon is replaced automatically the next time the CLI self-starts one.
 
 ## Install
 
