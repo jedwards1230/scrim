@@ -26,6 +26,7 @@ import (
 type Server struct {
 	cfg         config.Config
 	canvasesDir string
+	metaDir     string
 	startedAt   time.Time
 
 	hub      *hub
@@ -43,6 +44,7 @@ func New(cfg config.Config) *Server {
 	return &Server{
 		cfg:         cfg,
 		canvasesDir: cfg.CanvasesDir(),
+		metaDir:     cfg.MetaDir(),
 		startedAt:   time.Now(),
 		hub:         newHub(),
 		activity:    newActivityTracker(),

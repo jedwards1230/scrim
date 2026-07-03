@@ -12,6 +12,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /c/{id}", s.handleCanvasRedirect)
 	mux.HandleFunc("GET /c/{id}/__events", s.handleSSE)
+	mux.HandleFunc("GET /c/{id}/favicon.ico", s.handleCanvasFavicon)
 	mux.HandleFunc("GET /c/{id}/{rest...}", s.handleCanvas)
 
 	mux.HandleFunc("GET /api/status", s.handleAPIStatus)

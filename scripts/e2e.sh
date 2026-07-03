@@ -808,6 +808,103 @@ else
 fi
 "$BIN" stop --dir "$DIR13" >/dev/null 2>&1 || true
 
+# --- Scenario 18: add --title/--desc/--icon renders in the dashboard gallery ---
+log "Scenario 18: add --title/--desc/--icon renders in the dashboard gallery"
+DIR14="$WORKDIR/s14"
+"$BIN" add gallery-test --title "Gallery Title" --desc "Gallery Desc" --icon "🎨" --dir "$DIR14" --idle-timeout 5m >/dev/null
+if [ -f "$DIR14/daemon.json" ]; then
+  ok "gallery scenario: daemon started"
+else
+  bad "gallery scenario: daemon started"
+fi
+
+# `open` with no id prints the dashboard's own (token-qualified) URL on its
+# first stdout line and always exits 0, whether or not a real browser is
+# available (see Scenario 11) -- the same mechanism used there to get a
+# fully-qualified URL without hardcoding the auth token here.
+DASHBOARD_URL14=$("$BIN" open --dir "$DIR14" 2>/dev/null | head -1)
+BODY14=$(curl -fsS "$DASHBOARD_URL14" || true)
+if echo "$BODY14" | grep -q "Gallery Title"; then
+  ok "gallery scenario: dashboard HTML contains the canvas title"
+else
+  bad "gallery scenario: dashboard HTML contains the canvas title"
+fi
+if echo "$BODY14" | grep -q "Gallery Desc"; then
+  ok "gallery scenario: dashboard HTML contains the canvas description"
+else
+  bad "gallery scenario: dashboard HTML contains the canvas description"
+fi
+if echo "$BODY14" | grep -q "🎨"; then
+  ok "gallery scenario: dashboard HTML contains the canvas icon"
+else
+  bad "gallery scenario: dashboard HTML contains the canvas icon"
+fi
+"$BIN" stop --dir "$DIR14" >/dev/null 2>&1 || true
+
+# --- Scenario 19: snap + snaps are pure filesystem operations (no daemon) ---
+log "Scenario 19: snap + snaps are pure filesystem operations, no daemon required"
+DIR15="$WORKDIR/s15"
+CANVAS_DIR15=$("$BIN" path snaptest --dir "$DIR15")
+mkdir -p "$CANVAS_DIR15"
+echo '<html><body>v1</body></html>' >"$CANVAS_DIR15/index.html"
+
+SNAP_OUT=$("$BIN" snap snaptest --label mysnap --dir "$DIR15" 2>&1)
+if [ -f "$DIR15/daemon.json" ]; then
+  bad "snap scenario: snap did not self-start the daemon (found daemon.json)"
+else
+  ok "snap scenario: snap did not self-start the daemon"
+fi
+if echo "$SNAP_OUT" | grep -q "mysnap"; then
+  ok "snap scenario: snap reports the label"
+else
+  bad "snap scenario: snap reports the label"
+fi
+
+SNAPS_OUT=$("$BIN" snaps snaptest --dir "$DIR15" 2>&1)
+if echo "$SNAPS_OUT" | grep -q "mysnap"; then
+  ok "snaps scenario: snaps lists the snapshot"
+else
+  bad "snaps scenario: snaps lists the snapshot"
+fi
+
+# --- Scenario 20: modify after a snapshot, then revert restores it ---
+log "Scenario 20: modify after a snapshot, then revert (default: latest) restores the pre-modification contents"
+DIR16="$WORKDIR/s16"
+CANVAS_DIR16=$("$BIN" path reverttest --dir "$DIR16")
+mkdir -p "$CANVAS_DIR16"
+echo '<html><body>pre-modification</body></html>' >"$CANVAS_DIR16/index.html"
+
+"$BIN" snap reverttest --dir "$DIR16" >/dev/null 2>&1
+
+echo '<html><body>MODIFIED</body></html>' >"$CANVAS_DIR16/index.html"
+echo "extra" >"$CANVAS_DIR16/extra.txt"
+
+"$BIN" revert reverttest --dir "$DIR16" >/dev/null 2>&1
+if [ -f "$DIR16/daemon.json" ]; then
+  bad "revert scenario: revert did not self-start the daemon (found daemon.json)"
+else
+  ok "revert scenario: revert did not self-start the daemon"
+fi
+if grep -q "pre-modification" "$CANVAS_DIR16/index.html" 2>/dev/null; then
+  ok "revert scenario: canvas contents match the pre-modification snapshot"
+else
+  bad "revert scenario: canvas contents match the pre-modification snapshot"
+fi
+if [ ! -f "$CANVAS_DIR16/extra.txt" ]; then
+  ok "revert scenario: a file added after the snapshot is gone post-revert (replace, not merge)"
+else
+  bad "revert scenario: a file added after the snapshot is gone post-revert (replace, not merge)"
+fi
+
+# revert takes its own "prerevert" safety snapshot of the pre-revert state
+# before restoring -- confirm it actually did.
+PREREVERT_SNAPS=$("$BIN" snaps reverttest --dir "$DIR16" 2>&1)
+if echo "$PREREVERT_SNAPS" | grep -q "prerevert"; then
+  ok "revert scenario: a prerevert safety snapshot was taken automatically"
+else
+  bad "revert scenario: a prerevert safety snapshot was taken automatically"
+fi
+
 # --- Summary ---
 log "Summary"
 echo "passed: $PASS"

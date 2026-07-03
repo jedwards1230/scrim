@@ -17,10 +17,14 @@ var indexTemplateSrc string
 var indexTemplate = template.Must(template.New("index").Parse(indexTemplateSrc))
 
 type indexCanvas struct {
-	ID      string
-	Title   string
-	URL     string
-	ModTime string
+	ID          string
+	Title       string
+	Description string
+	Icon        string
+	Color       string
+	URL         string
+	ModTime     string
+	SSEClients  int
 }
 
 type indexData struct {
@@ -28,10 +32,15 @@ type indexData struct {
 	Version  string
 }
 
-// handleIndex serves the server-rendered dashboard at "/": a plain HTML
-// table listing every canvas with a link to its served URL.
+// handleIndex serves the server-rendered dashboard at "/": a card gallery
+// listing every canvas with its icon, title, description, last-modified
+// time, and a live SSE viewer count. The initial render bakes in the
+// viewer count at request time; templates/index.html.tmpl's inline script
+// then keeps it live by polling GET /api/canvases on an interval (see that
+// file's comment for why polling was chosen over a dashboard-wide SSE
+// endpoint).
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	infos, err := canvas.List(s.canvasesDir)
+	infos, err := canvas.List(s.canvasesDir, s.metaDir)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -40,10 +49,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data := indexData{Version: version.Short()}
 	for _, info := range infos {
 		data.Canvases = append(data.Canvases, indexCanvas{
-			ID:      info.ID,
-			Title:   info.Title,
-			URL:     fmt.Sprintf("/c/%s/", info.ID),
-			ModTime: info.ModTime.Format(time.RFC1123),
+			ID:          info.ID,
+			Title:       info.Title,
+			Description: info.Description,
+			Icon:        info.Icon,
+			Color:       info.Color,
+			URL:         fmt.Sprintf("/c/%s/", info.ID),
+			ModTime:     info.ModTime.Format(time.RFC1123),
+			SSEClients:  s.hub.canvasClientCount(info.ID),
 		})
 	}
 

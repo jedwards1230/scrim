@@ -16,7 +16,7 @@ import (
 // used both by the CLI (to decide whether to self-start) and as a general
 // status query.
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	infos, err := canvas.List(s.canvasesDir)
+	infos, err := canvas.List(s.canvasesDir, s.metaDir)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -49,8 +49,10 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 // handleCreateCanvas serves POST /api/canvases.
 func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Icon        string `json:"icon"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -60,11 +62,11 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := canvas.Create(s.canvasesDir, body.ID, body.Title); err != nil {
+	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	info, err := canvas.Get(s.canvasesDir, body.ID)
+	info, err := canvas.Get(s.canvasesDir, s.metaDir, body.ID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -74,7 +76,7 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 
 // handleListCanvases serves GET /api/canvases.
 func (s *Server) handleListCanvases(w http.ResponseWriter, r *http.Request) {
-	infos, err := canvas.List(s.canvasesDir)
+	infos, err := canvas.List(s.canvasesDir, s.metaDir)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -97,7 +99,7 @@ func (s *Server) handleDeleteCanvas(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id)
 		return
 	}
-	if err := canvas.Delete(s.canvasesDir, id); err != nil {
+	if err := canvas.Delete(s.canvasesDir, s.metaDir, id); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -117,12 +119,15 @@ func (s *Server) canvasResponse(info canvas.Info) apiclient.CanvasResponse {
 		url += "?t=" + s.token
 	}
 	return apiclient.CanvasResponse{
-		ID:         info.ID,
-		Title:      info.Title,
-		Dir:        info.Dir,
-		URL:        url,
-		ModifiedAt: info.ModTime,
-		SSEClients: s.hub.canvasClientCount(info.ID),
+		ID:          info.ID,
+		Title:       info.Title,
+		Description: info.Description,
+		Icon:        info.Icon,
+		Color:       info.Color,
+		Dir:         info.Dir,
+		URL:         url,
+		ModifiedAt:  info.ModTime,
+		SSEClients:  s.hub.canvasClientCount(info.ID),
 	}
 }
 

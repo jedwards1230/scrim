@@ -66,8 +66,15 @@ type StatusResponse struct {
 
 // CanvasResponse mirrors one canvas entry from /api/canvases.
 type CanvasResponse struct {
-	ID         string    `json:"id"`
-	Title      string    `json:"title,omitempty"`
+	ID          string `json:"id"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Icon and Color are always populated: Icon is either the custom value
+	// given at creation time or a deterministic default derived from ID,
+	// and Color is always derived from ID (see internal/canvas.DefaultIcon
+	// / DefaultColor).
+	Icon       string    `json:"icon"`
+	Color      string    `json:"color"`
 	Dir        string    `json:"dir"`
 	URL        string    `json:"url"`
 	ModifiedAt time.Time `json:"modified_at"`
@@ -93,12 +100,16 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	return &resp, nil
 }
 
-// CreateCanvas calls POST /api/canvases.
-func (c *Client) CreateCanvas(ctx context.Context, id, title string) (*CanvasResponse, error) {
+// CreateCanvas calls POST /api/canvases. description and icon may be empty
+// -- an empty icon lets the daemon derive a deterministic default from id
+// (see internal/canvas.DefaultIcon).
+func (c *Client) CreateCanvas(ctx context.Context, id, title, description, icon string) (*CanvasResponse, error) {
 	body := struct {
-		ID    string `json:"id"`
-		Title string `json:"title,omitempty"`
-	}{ID: id, Title: title}
+		ID          string `json:"id"`
+		Title       string `json:"title,omitempty"`
+		Description string `json:"description,omitempty"`
+		Icon        string `json:"icon,omitempty"`
+	}{ID: id, Title: title, Description: description, Icon: icon}
 	var resp CanvasResponse
 	if err := c.do(ctx, http.MethodPost, "/api/canvases", body, &resp); err != nil {
 		return nil, err

@@ -116,12 +116,21 @@ func TestAPICanvasLifecycle(t *testing.T) {
 	client := apiclient.New(ts.URL)
 	ctx := t.Context()
 
-	created, err := client.CreateCanvas(ctx, "report", "My Report")
+	created, err := client.CreateCanvas(ctx, "report", "My Report", "A description", "🐸")
 	if err != nil {
 		t.Fatalf("CreateCanvas() error = %v", err)
 	}
 	if created.ID != "report" || created.Title != "My Report" {
 		t.Errorf("CreateCanvas() = %+v", created)
+	}
+	if created.Description != "A description" {
+		t.Errorf("CreateCanvas().Description = %q, want %q", created.Description, "A description")
+	}
+	if created.Icon != "🐸" {
+		t.Errorf("CreateCanvas().Icon = %q, want the explicit override %q", created.Icon, "🐸")
+	}
+	if created.Color == "" {
+		t.Error("CreateCanvas().Color is empty, want a deterministic default")
 	}
 
 	list, err := client.ListCanvases(ctx)
@@ -152,7 +161,7 @@ func TestAPICanvasLifecycle(t *testing.T) {
 func TestAPICreateCanvasRejectsInvalidID(t *testing.T) {
 	_, ts := newTestServer(t)
 	client := apiclient.New(ts.URL)
-	_, err := client.CreateCanvas(t.Context(), "../escape", "")
+	_, err := client.CreateCanvas(t.Context(), "../escape", "", "", "")
 	if err == nil {
 		t.Fatal("CreateCanvas() with traversal id error = nil, want error")
 	}
@@ -203,7 +212,7 @@ func TestAPIStatusActiveWithReapingDisabled(t *testing.T) {
 func TestIndexPageListsCanvases(t *testing.T) {
 	_, ts := newTestServer(t)
 	client := apiclient.New(ts.URL)
-	if _, err := client.CreateCanvas(t.Context(), "report", "My Report"); err != nil {
+	if _, err := client.CreateCanvas(t.Context(), "report", "My Report", "A description", "🐸"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,6 +227,12 @@ func TestIndexPageListsCanvases(t *testing.T) {
 	}
 	if !strings.Contains(body, "My Report") {
 		t.Errorf("index page missing canvas title: %s", body)
+	}
+	if !strings.Contains(body, "A description") {
+		t.Errorf("index page missing canvas description: %s", body)
+	}
+	if !strings.Contains(body, "🐸") {
+		t.Errorf("index page missing canvas icon: %s", body)
 	}
 }
 

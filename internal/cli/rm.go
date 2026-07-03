@@ -36,7 +36,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 			errOut(stderr, err)
 			return 1
 		}
-	} else if err := canvas.Delete(cfg.CanvasesDir(), id); err != nil {
+	} else if err := canvas.Delete(cfg.CanvasesDir(), cfg.MetaDir(), id); err != nil {
 		errOut(stderr, err)
 		return 1
 	}

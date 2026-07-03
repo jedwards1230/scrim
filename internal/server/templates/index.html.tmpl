@@ -4,34 +4,170 @@
 <meta charset="utf-8">
 <title>scrim</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
-  h1 { font-size: 1.25rem; }
-  table { border-collapse: collapse; width: 100%; max-width: 60rem; }
-  th, td { text-align: left; padding: 0.4rem 0.75rem; border-bottom: 1px solid #ddd; }
-  th { color: #666; font-weight: 600; }
-  a { color: #0645ad; }
-  .empty { color: #666; }
-  footer { margin-top: 2rem; color: #999; font-size: 0.85rem; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --fg: #1a1a1a;
+    --muted: #666;
+    --card-bg: #ffffff;
+    --border: #e2e2e2;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a;
+    --fg: #e8e8e8;
+    --muted: #9a9a9a;
+    --card-bg: #212226;
+    --border: #33343a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --card-bg: #212226;
+      --border: #33343a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    padding: 2rem;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 72rem;
+    margin: 0 auto 1.5rem;
+  }
+  h1 { font-size: 1.25rem; margin: 0; }
+  #theme-toggle {
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+    gap: 1rem;
+    max-width: 72rem;
+    margin: 0 auto;
+  }
+  .card {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1rem;
+    background: var(--card-bg);
+    text-decoration: none;
+    color: inherit;
+  }
+  .card:hover { border-color: var(--muted); }
+  .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.6rem;
+    font-size: 1.75rem;
+    margin-bottom: 0.6rem;
+  }
+  .card h2 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+  .card .desc { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.6rem; min-height: 1.2rem; }
+  .meta { display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: var(--muted); gap: 0.5rem; }
+  .viewers { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+  .viewers .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--border); }
+  .viewers.live .dot { background: #22c55e; }
+  .empty { color: var(--muted); max-width: 72rem; margin: 0 auto; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.85rem; max-width: 72rem; margin-left: auto; margin-right: auto; }
 </style>
 </head>
 <body>
-<h1>scrim</h1>
+<header>
+  <h1>scrim</h1>
+  <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
+</header>
 {{if .Canvases}}
-<table>
-  <thead><tr><th>ID</th><th>Title</th><th>Last modified</th></tr></thead>
-  <tbody>
+<div class="grid">
   {{range .Canvases}}
-    <tr>
-      <td><a href="{{.URL}}">{{.ID}}</a></td>
-      <td>{{if .Title}}{{.Title}}{{else}}&mdash;{{end}}</td>
-      <td>{{.ModTime}}</td>
-    </tr>
+  <a class="card" href="{{.URL}}" data-id="{{.ID}}">
+    <div class="icon" style="background:{{.Color}}22;">{{.Icon}}</div>
+    <h2>{{if .Title}}{{.Title}}{{else}}{{.ID}}{{end}}</h2>
+    <p class="desc">{{.Description}}</p>
+    <div class="meta">
+      <span>{{.ModTime}}</span>
+      <span class="viewers" data-viewers>
+        <span class="dot"></span>
+        <span data-count>{{.SSEClients}}</span> viewing
+      </span>
+    </div>
+  </a>
   {{end}}
-  </tbody>
-</table>
+</div>
 {{else}}
 <p class="empty">No canvases yet. Use <code>scrim add &lt;id&gt;</code> to create one.</p>
 {{end}}
 <footer>scrim {{.Version}}</footer>
+<script>
+(function () {
+  // Dashboard-chrome-only light/dark toggle: individual canvases are never
+  // touched here -- they render exactly as their agent authored them. The
+  // default follows prefers-color-scheme; the button flips an explicit
+  // override that's remembered for next time.
+  var toggle = document.getElementById("theme-toggle");
+  var root = document.documentElement;
+  var stored = localStorage.getItem("scrim-theme");
+  if (stored) root.setAttribute("data-theme", stored);
+  toggle.addEventListener("click", function () {
+    var current = root.getAttribute("data-theme");
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var next;
+    if (current === "dark") next = "light";
+    else if (current === "light") next = "dark";
+    else next = prefersDark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    localStorage.setItem("scrim-theme", next);
+  });
+})();
+
+(function () {
+  // Live per-canvas SSE viewer counts, kept fresh by polling GET
+  // /api/canvases -- the same endpoint apiclient.ListCanvases already
+  // calls -- rather than opening a second, dashboard-wide SSE connection.
+  // A few seconds of staleness on a viewer count is a fine tradeoff for
+  // staying consistent with this project's "no build step, no framework"
+  // approach (see assets/reload.js): one more plain fetch/setInterval loop
+  // is simpler than standing up and wiring a whole extra live-connection
+  // mechanism just for this.
+  var POLL_INTERVAL_MS = 3000;
+  function refresh() {
+    fetch("/api/canvases", { credentials: "same-origin" })
+      .then(function (resp) { return resp.ok ? resp.json() : []; })
+      .then(function (canvases) {
+        (canvases || []).forEach(function (c) {
+          var card = document.querySelector('.card[data-id="' + CSS.escape(c.id) + '"]');
+          if (!card) return;
+          var countEl = card.querySelector("[data-count]");
+          var viewersEl = card.querySelector("[data-viewers]");
+          if (countEl) countEl.textContent = c.sse_clients;
+          if (viewersEl) viewersEl.classList.toggle("live", c.sse_clients > 0);
+        });
+      })
+      .catch(function () {
+        // The daemon may be mid-restart, or fetch itself unsupported/blocked;
+        // just skip this tick and try again on the next one.
+      });
+  }
+  setInterval(refresh, POLL_INTERVAL_MS);
+})();
+</script>
 </body>
 </html>

@@ -124,11 +124,15 @@ func (s *Server) writeHTML(w http.ResponseWriter, id string, html []byte) {
 }
 
 // injectReloadScript appends a small <script> that opens an EventSource
-// against the canvas's SSE endpoint and reloads on any message, inserting
-// it before </body> when present, or at the end of the document otherwise.
+// against the canvas's SSE endpoint and reloads on any message, plus a
+// <link rel="icon"> pointing at the canvas's favicon (see
+// handleCanvasFavicon) -- browsers honor an icon link anywhere in the
+// document, not just <head>, so it rides along with the reload script
+// rather than needing a separate injection point. Both are inserted before
+// </body> when present, or at the end of the document otherwise.
 func injectReloadScript(html []byte, id string) []byte {
 	script := strings.ReplaceAll(reloadScriptTemplate, "__SCRIM_EVENTS_URL__", "/c/"+id+"/__events")
-	snippet := []byte("<script>\n" + script + "</script>\n")
+	snippet := []byte("<link rel=\"icon\" href=\"/c/" + id + "/favicon.ico\">\n<script>\n" + script + "</script>\n")
 
 	lower := bytes.ToLower(html)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx != -1 {
