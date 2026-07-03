@@ -1,0 +1,17 @@
+{
+  "name": "jedwards1230-scrim",
+  "owner": {
+    "name": "jedwards1230"
+  },
+  "metadata": {
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "scrim",
+      "source": "./plugins/scrim",
+      "description": "Live HTML/CSS/JS projection surface for showing the user something visual -- write plain files into a scrim canvas and a self-starting daemon serves them with instant live-reload, a card gallery, and snapshots",
+      "version": "0.2.0"
+    }
+  ]
+}
