@@ -864,8 +864,15 @@ fi
 # first stdout line and always exits 0, whether or not a real browser is
 # available (see Scenario 11) -- the same mechanism used there to get a
 # fully-qualified URL without hardcoding the auth token here.
+#
+# The dashboard URL carries a valid query token, which now redirects (302) to
+# a token-stripped URL rather than serving the request directly (see
+# internal/server/auth.go) -- follow it (-L), picking up and resending the
+# cookie it sets along the way (-b/-c a jar), just like a real browser would
+# (same pattern as Scenario 5/21).
 DASHBOARD_URL14=$("$BIN" open --dir "$DIR14" 2>/dev/null | head -1)
-BODY14=$(curl -fsS "$DASHBOARD_URL14" || true)
+JAR14="$WORKDIR/jar14.txt"
+BODY14=$(curl -fsS -L -b "$JAR14" -c "$JAR14" "$DASHBOARD_URL14" || true)
 if echo "$BODY14" | grep -q "Gallery Title"; then
   ok "gallery scenario: dashboard HTML contains the canvas title"
 else
