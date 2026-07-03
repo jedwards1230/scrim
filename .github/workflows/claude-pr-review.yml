@@ -1,0 +1,44 @@
+# Claude PR review — calls the shared reusable workflow in
+# jedwards1230/release-workflows, which runs claude-code-action@v1 in Haiku
+# PR-review mode with the public jedwards1230-plugins marketplace + review-team
+# plugin enabled by default. The focus below is appended to the base prompt.
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@v1
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      draft_on_blocking: true
+      extra_plugins: |
+        go-quality@jedwards1230-plugins
+      focus: |
+        scrim is a single Go binary: a shared, self-starting daemon that serves
+        agent-authored HTML canvases to a browser with live reload over SSE.
+        Highest-value review lenses:
+        - Concurrency: the daemon holds a canvas registry and fans SSE reload
+          events to many browser clients. Flag data races on shared state
+          (guard with a mutex / use -race), goroutine or SSE-connection leaks
+          on client disconnect, and unbounded per-client channels.
+        - File watching: watcher setup/teardown per canvas — flag leaked
+          watchers, missed close, or reload storms from rapid file writes.
+        - Path/ID safety: canvas IDs map to filesystem paths — flag path
+          traversal or writing/serving outside the canvas root.
+        - Daemon lifecycle: self-start, stop, and status must be race-free
+          (pidfile/socket handling, double-start, stale-daemon detection).
+        - Serving scope: this is a local dev tool — flag any bind that exposes
+          it beyond loopback without an explicit opt-in.
+        - When the diff touches Go, prioritize the go-quality:go-reviewer agent
+          for language-specific Go review.
+        Do NOT re-flag gofmt/golangci-lint/go-mod-tidy findings — CI owns those.
