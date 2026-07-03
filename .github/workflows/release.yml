@@ -72,12 +72,17 @@ jobs:
             DRY="${{ inputs.dry_run }}"
             RELEASE="true"
           else
+            # Look up the PR(s) associated with this exact commit directly
+            # (a targeted commit->PR lookup, not a list+client-side-filter),
+            # so the merged PR can never fall outside a paginated window
+            # regardless of how many other PRs merge around the same time.
             LABELS=""
             for attempt in 1 2 3; do
-              LABELS=$(gh pr list --state merged --base main --limit 100 \
-                --json labels,mergeCommit \
-                | jq -r --arg sha "$GITHUB_SHA" \
-                  '.[] | select(.mergeCommit.oid == $sha) | .labels[].name' 2>/dev/null || echo "")
+              # shellcheck disable=SC2016 # $ENV.GITHUB_SHA is jq's own env-var
+              # syntax, not a bash variable -- must stay single-quoted so bash
+              # doesn't expand it before jq sees it.
+              LABELS=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
+                --jq '.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA) | .labels[].name' 2>/dev/null || echo "")
               if [ -n "$LABELS" ]; then break; fi
               echo "Attempt ${attempt}: no labels for ${GITHUB_SHA} yet, retrying in 5s..."
               sleep 5
@@ -210,5 +215,5 @@ jobs:
             echo "| Tag | ${TAG} |"
             echo "| Previous | ${PREV} |"
             echo "| Bump | ${BUMP_TYPE} |"
-            echo "| Binaries | linux/darwin/windows (amd64 + arm64) |"
+            echo "| Binaries | linux/darwin (amd64 + arm64), windows (amd64) |"
           } >> "$GITHUB_STEP_SUMMARY"
