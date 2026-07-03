@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/canvas"
@@ -11,21 +13,30 @@ import (
 	"github.com/jedwards1230/scrim/internal/openurl"
 )
 
-// cmdOpen implements `scrim open [<id>]`. It self-starts the daemon if
-// needed, prints the URL for a canvas (or the dashboard, with no id), and
-// launches it in the platform's default browser. The printed URL is always
-// there as a fallback, whether or not the auto-open succeeds -- a failed or
-// unsupported auto-open is reported as a notice, not a command failure.
+// openBrowserEnvVar is the environment variable that persistently opts in to
+// the auto-launch behavior --browser enables for a single invocation.
+const openBrowserEnvVar = "SCRIM_OPEN_BROWSER"
+
+// cmdOpen implements `scrim open [<id>] [--browser]`. It self-starts the
+// daemon if needed and prints the URL for a canvas (or the dashboard, with
+// no id). Launching that URL in the platform's default browser is opt-in --
+// via --browser or a truthy SCRIM_OPEN_BROWSER -- since scrim's daemon is
+// commonly self-started by an agent on the user's behalf, and a browser tab
+// popping up unprompted is a surprise, not a convenience. The printed URL is
+// always there, whether or not auto-open was requested; when it was and it
+// fails, that's reported as a notice, not a command failure.
 func cmdOpen(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("open", stderr)
 	cf := registerCommonFlags(fs)
+	browserFlag := fs.Bool("browser", false, "launch the URL in your default browser (default: print only; env SCRIM_OPEN_BROWSER)")
 	if err := parseArgs(fs, args); err != nil {
 		return exitForParseErr(err)
 	}
 	pos := fs.Args()
 	if len(pos) > 1 {
-		return usageError(stderr, "usage: scrim open [<id>]")
+		return usageError(stderr, "usage: scrim open [<id>] [--browser]")
 	}
+	launch := shouldOpenBrowser(*browserFlag, os.Getenv(openBrowserEnvVar))
 
 	cfg := cf.toConfig()
 	st, err := daemon.Ensure(cfg)
@@ -39,7 +50,9 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		url := baseURLFor(st, "/")
 		lines := urlLines(st.Host, url)
 		printURLLines(stdout, lines)
-		openBrowser(primaryURL(lines, url), stderr)
+		if launch {
+			openBrowser(primaryURL(lines, url), stderr)
+		}
 		return 0
 	}
 
@@ -59,12 +72,31 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		if c.ID == id {
 			lines := urlLines(st.Host, c.URL)
 			printURLLines(stdout, lines)
-			openBrowser(primaryURL(lines, c.URL), stderr)
+			if launch {
+				openBrowser(primaryURL(lines, c.URL), stderr)
+			}
 			return 0
 		}
 	}
 	outf(stderr, "error: canvas %q not found\n", id)
 	return 1
+}
+
+// shouldOpenBrowser reports whether cmdOpen should launch the browser: only
+// when explicitly opted in, via the --browser flag or a truthy
+// SCRIM_OPEN_BROWSER env value. envVal is parsed the same way
+// config.FromEnv parses SCRIM_NO_AUTH -- strconv.ParseBool, with an empty or
+// malformed value treated as not set (false) rather than an error, since an
+// env-sourced opt-in is always overridable by the explicit flag.
+func shouldOpenBrowser(flagSet bool, envVal string) bool {
+	if flagSet {
+		return true
+	}
+	if envVal == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(envVal)
+	return err == nil && b
 }
 
 // primaryURL returns the URL that was printed as the first line -- i.e. the
@@ -80,12 +112,18 @@ func primaryURL(lines []string, fallback string) string {
 	return fallback
 }
 
+// launchBrowser is openurl.Open, indirected through a package variable so
+// tests can confirm cmdOpen's default (no --browser, no env) never calls
+// into openurl -- which itself execs a real OS command and can't be
+// meaningfully asserted on in a unit test -- without a broader mocking seam.
+var launchBrowser = openurl.Open
+
 // openBrowser launches url in the platform's default browser, printing a
 // one-line notice to stderr on failure. It never affects cmdOpen's exit
 // code -- the URL is already on stdout, so a failed or unsupported auto-open
 // is a nice-to-have that didn't pan out, not an error.
 func openBrowser(url string, stderr io.Writer) {
-	if err := openurl.Open(url); err != nil {
+	if err := launchBrowser(url); err != nil {
 		outf(stderr, "notice: could not open a browser automatically (%v); use the URL above\n", err)
 	}
 }

@@ -9,7 +9,8 @@ it reachable at a stable URL and pushes reload events when the file changes.
 
 > A random capability token gates every request by default (`--no-auth` to
 > disable), the daemon advertises `scrim.local` over mDNS when bound beyond
-> loopback, `open` launches your default browser, and a version-mismatched
+> loopback, `open` prints a canvas's URL (launching your default browser is
+> opt-in, via `--browser` or `SCRIM_OPEN_BROWSER=1`), and a version-mismatched
 > daemon is replaced automatically the next time the CLI self-starts one.
 
 ## Install
@@ -24,7 +25,7 @@ go install github.com/jedwards1230/scrim@latest
 scrim add <id>      # Register a canvas
 scrim path <id>     # Print the filesystem path for a canvas
 scrim list          # List registered canvases
-scrim open [<id>]   # Open a canvas (or the dashboard) in a browser
+scrim open [<id>]   # Print a canvas's (or the dashboard's) URL; add --browser to also open it
 scrim rm <id>       # Remove a canvas
 scrim status        # Show daemon status
 scrim stop          # Stop the daemon
@@ -61,14 +62,17 @@ and the plain `ip:port` fallback, since mDNS can be blocked on some networks.
 
 ## Browser auto-open
 
-`scrim open [<id>]` launches the resolved URL in your platform's default
-browser (`open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler`
-on Windows). When mDNS is active, the URL handed to the browser is the same
-`scrim.local` one printed first — not the plain `ip:port` fallback — so it
-still works when the daemon is bound to an unaddressable host like `0.0.0.0`.
-The URL is always printed to stdout too — if auto-open isn't supported or
-fails (e.g. no browser installed, headless environment), `open` prints a
-one-line notice on stderr and still exits `0`.
+`scrim open [<id>]` always prints the resolved URL to stdout. Launching it
+in your platform's default browser (`open` on macOS, `xdg-open` on Linux,
+`rundll32 url.dll,FileProtocolHandler` on Windows) is **opt-in**, since
+scrim's daemon is commonly self-started by an agent on the user's behalf —
+pass `--browser` for a one-off launch, or set `SCRIM_OPEN_BROWSER=1` to make
+that the default for every `open`. When mDNS is active, the URL handed to
+the browser is the same `scrim.local` one printed first — not the plain
+`ip:port` fallback — so it still works when the daemon is bound to an
+unaddressable host like `0.0.0.0`. If the launch is requested but fails
+(e.g. no browser installed, headless environment), `open` prints a one-line
+notice on stderr and still exits `0`.
 
 ## Version-skew restart
 

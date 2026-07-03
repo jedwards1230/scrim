@@ -358,30 +358,105 @@ fi
 "$BIN" stop --dir "$DIR7" >/dev/null 2>&1 || true
 rm -f /tmp/e2e-race-a.$$ /tmp/e2e-race-b.$$
 
-# --- Scenario 11: open exits 0 and prints the URL regardless of auto-open ---
-log "Scenario 11: open always prints the URL and exits 0, whether or not a real browser is available"
+# --- Scenario 11: open prints the URL by default and never launches a
+# browser unless explicitly opted in (--browser or SCRIM_OPEN_BROWSER=1) ---
+# A stub "open"/"xdg-open" is put on PATH ahead of the real one so the
+# opt-in case can assert a launch was actually attempted without ever
+# popping a real browser tab on the machine running this script.
+log "Scenario 11: open prints the URL by default (no browser launch); --browser/SCRIM_OPEN_BROWSER opts in"
 DIR_OPEN="$WORKDIR/s-open"
 "$BIN" add open-test --dir "$DIR_OPEN" --idle-timeout 5m >/dev/null
-OPEN_OUT=$("$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
+
+STUB_BIN_DIR="$WORKDIR/stub-bin"
+mkdir -p "$STUB_BIN_DIR"
+BROWSER_MARKER="$WORKDIR/browser-launch-marker"
+case "$(uname -s)" in
+Darwin) STUB_CMD_NAME="open" ;;
+Linux) STUB_CMD_NAME="xdg-open" ;;
+*) STUB_CMD_NAME="" ;;
+esac
+if [ -n "$STUB_CMD_NAME" ]; then
+  cat >"$STUB_BIN_DIR/$STUB_CMD_NAME" <<EOF
+#!/usr/bin/env bash
+echo "\$@" > "$BROWSER_MARKER"
+EOF
+  chmod +x "$STUB_BIN_DIR/$STUB_CMD_NAME"
+fi
+
+# (a) default: no --browser, no env -- prints the URL, exits 0, and the
+# stub is never invoked (no "could not open a browser" notice either, since
+# openBrowser is never even called).
+rm -f "$BROWSER_MARKER"
+OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
 OPEN_STATUS=$?
+OPEN_ERR=$(cat /tmp/e2e-open-stderr.$$)
 if [ "$OPEN_STATUS" -eq 0 ]; then
-  ok "open exits 0 in this (browserless CI) environment"
+  ok "open (default) exits 0"
 else
-  bad "open exits 0 in this (browserless CI) environment (got $OPEN_STATUS)"
+  bad "open (default) exits 0 (got $OPEN_STATUS)"
 fi
 if echo "$OPEN_OUT" | grep -q "^http://"; then
-  ok "open prints the canvas URL to stdout"
+  ok "open (default) prints the canvas URL to stdout"
 else
-  bad "open prints the canvas URL to stdout"
+  bad "open (default) prints the canvas URL to stdout"
 fi
-rm -f /tmp/e2e-open-stderr.$$
+if [ -f "$BROWSER_MARKER" ]; then
+  bad "open (default) must NOT launch a browser (stub was invoked)"
+else
+  ok "open (default) does not launch a browser"
+fi
+if echo "$OPEN_ERR" | grep -q "could not open a browser"; then
+  bad "open (default) must not print the auto-open notice (browser launch was never attempted)"
+else
+  ok "open (default) prints no auto-open notice"
+fi
+
+# (b) --browser opts in: same URL on stdout, plus an actual launch attempt.
+if [ -n "$STUB_CMD_NAME" ]; then
+  rm -f "$BROWSER_MARKER"
+  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" --browser 2>/tmp/e2e-open-stderr.$$)
+  OPEN_STATUS=$?
+  if [ "$OPEN_STATUS" -eq 0 ]; then
+    ok "open --browser exits 0"
+  else
+    bad "open --browser exits 0 (got $OPEN_STATUS)"
+  fi
+  if [ -f "$BROWSER_MARKER" ]; then
+    ok "open --browser attempts a browser launch (stub invoked)"
+  else
+    bad "open --browser attempts a browser launch (stub invoked)"
+  fi
+else
+  printf "  [SKIP] Scenario 11(b): no stub command for uname -s=%s\n" "$(uname -s)"
+fi
+
+# (c) SCRIM_OPEN_BROWSER=1 opts in persistently, without the flag.
+if [ -n "$STUB_CMD_NAME" ]; then
+  rm -f "$BROWSER_MARKER"
+  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
+  OPEN_STATUS=$?
+  if [ "$OPEN_STATUS" -eq 0 ]; then
+    ok "SCRIM_OPEN_BROWSER=1 open exits 0"
+  else
+    bad "SCRIM_OPEN_BROWSER=1 open exits 0 (got $OPEN_STATUS)"
+  fi
+  if [ -f "$BROWSER_MARKER" ]; then
+    ok "SCRIM_OPEN_BROWSER=1 attempts a browser launch without --browser (stub invoked)"
+  else
+    bad "SCRIM_OPEN_BROWSER=1 attempts a browser launch without --browser (stub invoked)"
+  fi
+else
+  printf "  [SKIP] Scenario 11(c): no stub command for uname -s=%s\n" "$(uname -s)"
+fi
+
+rm -f /tmp/e2e-open-stderr.$$ "$BROWSER_MARKER"
 "$BIN" stop --dir "$DIR_OPEN" >/dev/null 2>&1 || true
 
 # --- Scenario 12: version-skew restart ---
-# The actual browser-launch exec (open/xdg-open/cmd) isn't exercised beyond
-# scenario 11's "doesn't crash, exits 0" check -- there's no real browser in
-# CI, so the platform command-selection logic (internal/openurl) is covered
-# by unit tests instead; see internal/openurl/openurl_test.go.
+# The actual browser-launch exec (open/xdg-open/cmd) is exercised via the
+# PATH-stub trick in scenario 11 above -- the platform command-selection
+# logic itself (internal/openurl) is covered by unit tests; see
+# internal/openurl/openurl_test.go.
 log "Scenario 12: a CLI built at a different version transparently restarts a mismatched daemon"
 DIR8="$WORKDIR/s8"
 "$BIN" add version-test --dir "$DIR8" --idle-timeout 5m >/dev/null
