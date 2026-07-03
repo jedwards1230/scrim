@@ -1,0 +1,33 @@
+# .github/dependabot.yml — Dependabot version updates
+#
+# Opt-in, per-repo. Only the ecosystems this repo actually has manifests for:
+# Go modules (go.mod) and GitHub Actions (.github/workflows/*.yml).
+version: 2
+updates:
+  # --- CI actions ---
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # --- Go modules ---
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(gomod)"
+    groups:
+      go:
+        patterns: ["*"]
