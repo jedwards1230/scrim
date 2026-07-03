@@ -27,11 +27,37 @@ func TestBaseURLFor(t *testing.T) {
 			path: "/",
 			want: "http://127.0.0.1:7777/",
 		},
+		{
+			name: "default HTTP port 80 is omitted from the printed URL",
+			st:   &state.State{Host: "127.0.0.1", Port: 80, Token: "", NoAuth: true},
+			path: "/",
+			want: "http://127.0.0.1/",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := baseURLFor(tt.st, tt.path); got != tt.want {
 				t.Errorf("baseURLFor() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatHostPort(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "default HTTP port omitted", host: "127.0.0.1", port: 80, want: "127.0.0.1"},
+		{name: "non-default port kept explicit", host: "127.0.0.1", port: 7777, want: "127.0.0.1:7777"},
+		{name: "other well-known port is not special-cased", host: "example.com", port: 443, want: "example.com:443"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatHostPort(tt.host, tt.port); got != tt.want {
+				t.Errorf("formatHostPort(%q, %d) = %q, want %q", tt.host, tt.port, got, tt.want)
 			}
 		})
 	}

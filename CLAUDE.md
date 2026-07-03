@@ -16,14 +16,15 @@ Key packages under `internal/`:
 | Package | Responsibility |
 |---------|---------------|
 | `version` | Build-time version stamping via ldflags |
-| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth from flags/env/defaults; derives on-disk paths |
+| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file on Unix (Windows lacks an equivalent primitive, logged as a one-time warning instead of claiming success -- tracked in #19) |
 | `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title, description, icon) stored externally under `config.Config.MetaDir()`, and deterministic default icon/color derivation from a canvas's ID |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
 | `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop, version-skew restart |
-| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, the card-gallery index page, `/api/*`, per-canvas favicon (agent-authored or generated from the canvas's icon), idle reaper, capability-token auth middleware, mDNS advertisement. Serve-time only (files on disk are never modified): an `index.md` directory-index is rendered via `goldmark`, and a bare HTML fragment (no `<!doctype`/`<html>`) is wrapped -- both in an embedded skeleton (`assets/skeleton.html`: CSS reset, `prefers-color-scheme` theming, viewport meta) before reload-script injection. A complete HTML document passes through unwrapped. |
+| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, the card-gallery index page, `/api/*`, per-canvas favicon (agent-authored or generated from the canvas's icon), idle reaper, capability-token auth middleware (redirects a valid query token to a token-stripped URL), mDNS advertisement (opt-out via --no-mdns). Serve-time only (files on disk are never modified): an `index.md` directory-index is rendered via `goldmark`, and a bare HTML fragment (no `<!doctype`/`<html>`) is wrapped -- both in an embedded skeleton (`assets/skeleton.html`: CSS reset, `prefers-color-scheme` theming, viewport meta) before reload-script injection. A complete HTML document passes through unwrapped. |
 | `snapshot` | Canvas versioning: copy a canvas directory's current contents into a timestamped snapshot, list them, and revert a canvas back to one -- a pure filesystem operation against `config.Config.VersionsDir()`, independent of the daemon |
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
+| `logging` | Sole sanctioned logging surface for `server`/`daemon`: category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog` |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
 

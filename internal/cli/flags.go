@@ -11,15 +11,16 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 )
 
-// commonFlags are the --port/--host/--idle-timeout/--no-auth/--dir flags
-// shared by every verb, defaulted from SCRIM_* environment variables (and,
-// under those, scrim's built-in defaults).
+// commonFlags are the --port/--host/--idle-timeout/--no-auth/--no-mdns/--dir
+// flags shared by every verb, defaulted from SCRIM_* environment variables
+// (and, under those, scrim's built-in defaults).
 type commonFlags struct {
 	dir         string
 	host        string
 	port        int
 	idleTimeout time.Duration
 	noAuth      bool
+	noMDNS      bool
 }
 
 // registerCommonFlags adds the shared flags to fs and returns a handle to
@@ -32,6 +33,7 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	fs.IntVar(&cf.port, "port", envDefaults.Port, "port the daemon listens on (env SCRIM_PORT)")
 	fs.DurationVar(&cf.idleTimeout, "idle-timeout", envDefaults.IdleTimeout, "idle time before the daemon exits (env SCRIM_IDLE_TIMEOUT); 0 or negative disables idle exit entirely")
 	fs.BoolVar(&cf.noAuth, "no-auth", envDefaults.NoAuth, "disable the local auth token (env SCRIM_NO_AUTH)")
+	fs.BoolVar(&cf.noMDNS, "no-mdns", envDefaults.NoMDNS, "don't advertise the daemon over mDNS, even when --host binds beyond loopback (env SCRIM_NO_MDNS)")
 	return cf
 }
 
@@ -46,6 +48,7 @@ func (cf *commonFlags) toConfig() config.Config {
 		Port:        cf.port,
 		IdleTimeout: cf.idleTimeout,
 		NoAuth:      cf.noAuth,
+		NoMDNS:      cf.noMDNS,
 	}
 }
 

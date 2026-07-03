@@ -66,13 +66,17 @@ func IsLoopbackHost(host string) bool {
 	return ip.IsLoopback()
 }
 
-// MaybeStart starts advertising scrim.local via mDNS if host is not a
-// loopback address (see IsLoopbackHost), returning (nil, nil) when it is.
-// The returned Advertiser's Stop is always safe to call, including on the
-// nil returned for the loopback case, so callers can unconditionally defer
-// cleanup regardless of which branch ran.
-func MaybeStart(host string, port int) (*Advertiser, error) {
-	if IsLoopbackHost(host) {
+// MaybeStart starts advertising scrim.local via mDNS if noMDNS is false and
+// host is not a loopback address (see IsLoopbackHost), returning (nil, nil)
+// otherwise. noMDNS decouples "bound beyond loopback" from "advertises on
+// mDNS": a daemon bound to a LAN address can still opt out of the
+// advertisement entirely (scrim's --no-mdns flag) while remaining reachable
+// by anyone who already has its address. The returned Advertiser's Stop is
+// always safe to call, including on the nil returned for either no-op case,
+// so callers can unconditionally defer cleanup regardless of which branch
+// ran.
+func MaybeStart(host string, port int, noMDNS bool) (*Advertiser, error) {
+	if noMDNS || IsLoopbackHost(host) {
 		return nil, nil
 	}
 	return Start(host, port)

@@ -32,14 +32,21 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register with the hub *before* writing the response headers: once the
+	// client observes a 200, it (and anything asserting on hub.clientCount,
+	// e.g. the shutdown tests) must be able to assume the connection is
+	// already tracked. Registering after the header write/flush leaves a
+	// window where the client sees "connected" before the server has
+	// actually recorded it -- a real, if narrow, TOCTOU race between the
+	// two goroutines.
+	ch, unregister := s.hub.register(id)
+	defer unregister()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	ch, unregister := s.hub.register(id)
-	defer unregister()
 	// An open SSE connection counts as activity for its whole lifetime (via
 	// the reaper's separate SSE-client-count check); touching activity
 	// again on disconnect restarts the idle clock from the moment the

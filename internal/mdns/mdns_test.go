@@ -35,12 +35,33 @@ func TestMaybeStartLoopbackNoOp(t *testing.T) {
 	tests := []string{"", "127.0.0.1", "::1", "localhost"}
 	for _, host := range tests {
 		t.Run(host, func(t *testing.T) {
-			adv, err := MaybeStart(host, 7777)
+			adv, err := MaybeStart(host, 7777, false)
 			if err != nil {
 				t.Fatalf("MaybeStart(%q) error = %v, want nil", host, err)
 			}
 			if adv != nil {
 				t.Fatalf("MaybeStart(%q) = %+v, want nil advertiser for a loopback host", host, adv)
+			}
+		})
+	}
+}
+
+// TestMaybeStartNoMDNSNoOp confirms noMDNS suppresses advertisement
+// regardless of the bind host -- including a non-loopback (LAN-reachable)
+// one that would otherwise trigger a real mDNS responder -- without ever
+// attempting to bind a multicast listener. This is the --no-mdns flag's
+// entire contract: decouple "bound beyond loopback" from "advertises on
+// mDNS".
+func TestMaybeStartNoMDNSNoOp(t *testing.T) {
+	tests := []string{"0.0.0.0", "192.168.8.50", "127.0.0.1"}
+	for _, host := range tests {
+		t.Run(host, func(t *testing.T) {
+			adv, err := MaybeStart(host, 7777, true)
+			if err != nil {
+				t.Fatalf("MaybeStart(%q, noMDNS=true) error = %v, want nil", host, err)
+			}
+			if adv != nil {
+				t.Fatalf("MaybeStart(%q, noMDNS=true) = %+v, want nil advertiser", host, adv)
 			}
 		})
 	}
@@ -93,7 +114,7 @@ func TestStartStopLifecycle(t *testing.T) {
 // tolerated (skip), but a nil result with a nil error (a silent no-op) is
 // not.
 func TestMaybeStartNonLoopbackAttemptsStart(t *testing.T) {
-	adv, err := MaybeStart("0.0.0.0", 7778)
+	adv, err := MaybeStart("0.0.0.0", 7778, false)
 	if err != nil {
 		t.Skipf("mdns: multicast listener unavailable in this environment: %v", err)
 	}

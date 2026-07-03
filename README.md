@@ -84,6 +84,7 @@ passed through unsanitized, the same trust model as a `.html` canvas.
 | `--host`         | `SCRIM_HOST`         | `127.0.0.1` | Host the daemon binds to            |
 | `--idle-timeout` | `SCRIM_IDLE_TIMEOUT` | `30m`       | Idle time before the daemon exits. `0` or negative disables idle exit entirely — the daemon then only stops via `scrim stop` or a signal |
 | `--no-auth`      | `SCRIM_NO_AUTH`      | `false`     | Disable local auth token            |
+| `--no-mdns`      | `SCRIM_NO_MDNS`      | `false`     | Don't advertise over mDNS, even when `--host` binds beyond loopback |
 | `--dir`          | `SCRIM_DIR`          | `~/.scrim`  | Directory for canvases + state. A relative value is resolved to an absolute path immediately (against the CLI's cwd), before it's ever handed to a self-started daemon |
 
 Run `scrim --help` (or `scrim <verb> --help`) for the full flag/verb reference.
@@ -92,14 +93,33 @@ Run `scrim --help` (or `scrim <verb> --help`) for the full flag/verb reference.
 
 Every daemon mints a random capability token at startup. The URLs `add`,
 `list`, `link`, `open`, and `status` print carry it as `?t=<token>`; the first
-request with a valid token sets a cookie so the browser's own follow-up
-requests (including live-reload's SSE connection) don't need it repeated.
-Requests with neither a valid token nor a valid cookie get 401. Pass
-`--no-auth` (or set `SCRIM_NO_AUTH=1`) to disable this entirely.
+request with a valid token sets a cookie and is then redirected to the same
+URL with the token stripped, so it never lingers in the URL bar, browser
+history, or a copied/shared link -- the browser's own follow-up requests
+(including live-reload's SSE connection) authenticate via that cookie
+instead. Requests with neither a valid token nor a valid cookie get 401.
+Pass `--no-auth` (or set `SCRIM_NO_AUTH=1`) to disable this entirely.
 
 When `--host` binds beyond loopback, the daemon also advertises itself as
-`scrim.local` over mDNS; printed URLs then show both the `scrim.local` form
-and the plain `ip:port` fallback, since mDNS can be blocked on some networks.
+`scrim.local` over mDNS unless `--no-mdns` (or `SCRIM_NO_MDNS=1`) is set;
+printed URLs then show both the `scrim.local` form and the plain `ip:port`
+fallback, since mDNS can be blocked on some networks.
+
+## Privacy
+
+Beyond the token-stripping redirect above: every response carries
+`Referrer-Policy: no-referrer`, canvas content responses are marked
+`Cache-Control: no-store` so browsers never retain them, and the daemon's
+own logging never includes a request path, canvas ID, query string, or the
+raw token, at any log level.
+
+On Unix-like systems (Linux, macOS), `~/.scrim` (or whatever `--dir` points
+to) is also tightened to owner-only permissions on every startup (0700 for
+the directory, 0600 for the state and log files -- even if it was created
+looser by an older scrim version). This isn't implemented on Windows yet
+(`os.Chmod` there only toggles the read-only attribute, not owner-only
+access) -- a one-time warning is logged instead of silently claiming
+success; tracked in [#19](https://github.com/jedwards1230/scrim/issues/19).
 
 ## link vs. open
 

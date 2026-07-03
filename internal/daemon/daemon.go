@@ -58,9 +58,11 @@ func Ensure(cfg config.Config) (*state.State, error) {
 	}
 
 	// The lockfile itself needs somewhere to live before we can even
-	// attempt to acquire it.
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil { //nolint:gosec // config dir is a user-owned working directory
-		return nil, fmt.Errorf("creating scrim dir: %w", err)
+	// attempt to acquire it. HardenPermissions also tightens any
+	// preexisting state/log file left behind at looser permissions by an
+	// older scrim version, not just freshly-created ones.
+	if err := cfg.HardenPermissions(); err != nil {
+		return nil, fmt.Errorf("hardening scrim dir permissions: %w", err)
 	}
 
 	lockErr := withSpawnLock(cfg.LockFilePath(), spawnLockTimeout, func() error {
@@ -206,12 +208,24 @@ func spawnAndWait(cfg config.Config) error {
 		return fmt.Errorf("locating scrim executable: %w", err)
 	}
 
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil { //nolint:gosec // config dir is a user-owned working directory
-		return fmt.Errorf("creating scrim dir: %w", err)
+	// HardenPermissions creates cfg.Dir if missing and tightens it (and any
+	// preexisting state/log file under it) to owner-only, before the log
+	// file is opened below -- so a stale daemon.log left behind at looser
+	// permissions by an older scrim version gets tightened here rather than
+	// silently staying world-readable.
+	if err := cfg.HardenPermissions(); err != nil {
+		return fmt.Errorf("hardening scrim dir permissions: %w", err)
 	}
-	logFile, err := os.OpenFile(cfg.LogFilePath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) //nolint:gosec // daemon log is not sensitive
+	logFile, err := os.OpenFile(cfg.LogFilePath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening daemon log: %w", err)
+	}
+	// The create-mode above is already umask-safe (0o600 has no group/other
+	// bits for umask to touch), but chmod explicitly anyway so the intended
+	// permission doesn't depend on umask semantics at all -- belt-and-suspenders
+	// for the privacy-hardening goal this file is about.
+	if err := os.Chmod(cfg.LogFilePath(), 0o600); err != nil {
+		return fmt.Errorf("tightening daemon log permissions: %w", err)
 	}
 	defer logFile.Close() //nolint:errcheck // the child inherits its own fd copy; our copy's close error isn't actionable
 
@@ -224,6 +238,9 @@ func spawnAndWait(cfg config.Config) error {
 	}
 	if cfg.NoAuth {
 		args = append(args, "--no-auth")
+	}
+	if cfg.NoMDNS {
+		args = append(args, "--no-mdns")
 	}
 
 	cmd := exec.Command(exePath, args...) //nolint:gosec // exePath is our own binary (os.Executable), args are our own config
