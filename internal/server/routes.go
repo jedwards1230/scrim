@@ -21,7 +21,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/canvases/{id}", s.handleDeleteCanvas)
 	mux.HandleFunc("POST /api/stop", s.handleStop)
 
-	return withSecurityHeaders(s.withAuth(s.withActivity(mux)))
+	// The push route only exists in hub mode -- registering it
+	// unconditionally would give the default daemon a write surface it
+	// never asked for and has no gate for.
+	gate := s.withAuth
+	if s.isHub() {
+		mux.HandleFunc("POST /api/push/{id}", s.handlePush)
+		gate = s.withHubGate
+	}
+
+	return withSecurityHeaders(gate(s.withActivity(mux)))
 }
 
 // withSecurityHeaders sets response headers that apply to every request
