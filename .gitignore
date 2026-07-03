@@ -1,4 +1,5 @@
 /scrim
+/.e2e-scrim
 *.exe
 dist/
 coverage.out

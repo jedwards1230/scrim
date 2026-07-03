@@ -7,8 +7,9 @@ agent-authored HTML canvases with live reload over SSE, and a human views
 them in a browser. An agent writes (or updates) an HTML file; `scrim` makes
 it reachable at a stable URL and pushes reload events when the file changes.
 
-> **Status**: Phase 1 scaffold. The CLI verbs below are planned but not yet
-> implemented — see [CLAUDE.md](CLAUDE.md) for the architecture and rollout.
+> **Status**: Phase 2 (core engine). All CLI verbs below are implemented.
+> Auth and mDNS discovery (Phase 3) and browser auto-open / version-skew
+> restart (Phase 4) are not yet built — see [CLAUDE.md](CLAUDE.md).
 
 ## Install
 
