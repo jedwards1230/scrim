@@ -16,7 +16,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	cf := registerCommonFlags(fs)
 	title := fs.String("title", "", "canvas title")
 	if err := parseArgs(fs, args); err != nil {
-		return 2
+		return exitForParseErr(err)
 	}
 	pos := fs.Args()
 	if len(pos) != 1 {
@@ -39,6 +39,6 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	outln(stdout, info.Dir)
-	printURLLines(stdout, st.Host, info.URL)
+	printURLLines(stdout, urlLines(st.Host, info.URL))
 	return 0
 }

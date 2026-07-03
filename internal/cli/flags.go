@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -35,10 +36,12 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 }
 
 // toConfig resolves the parsed flags into a config.Config, expanding a
-// leading "~" in --dir.
+// leading "~" in --dir and resolving it to an absolute path -- this must
+// happen here, before --dir is ever handed to a self-started daemon (see
+// config.ResolveDir).
 func (cf *commonFlags) toConfig() config.Config {
 	return config.Config{
-		Dir:         config.ExpandHome(cf.dir),
+		Dir:         config.ResolveDir(cf.dir),
 		Host:        cf.host,
 		Port:        cf.port,
 		IdleTimeout: cf.idleTimeout,
@@ -94,6 +97,18 @@ func reorderFlagsFirst(fs *flag.FlagSet, args []string) []string {
 		}
 	}
 	return append(flagArgs, positional...)
+}
+
+// exitForParseErr maps a parseArgs error to a process exit code: 0 for an
+// explicit -h/--help request (flag.ErrHelp -- the flag package has already
+// printed the flag usage via fs.Usage()), 2 for anything else (unknown
+// flag, bad value). This matches the "help isn't a usage error" convention
+// the top-level --help/-h/help handling already uses in cli.go's Run.
+func exitForParseErr(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	return 2
 }
 
 func isBoolFlag(fs *flag.FlagSet, name string) bool {

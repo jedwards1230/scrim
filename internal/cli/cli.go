@@ -20,7 +20,7 @@ Verbs:
   add <id> [--title T]   Register a canvas (self-starts the daemon)
   path <id>               Print the filesystem path for a canvas
   list                    List registered canvases (self-starts the daemon)
-  open [<id>]              Print the URL for a canvas or the dashboard (self-starts the daemon)
+  open [<id>]              Open a canvas or the dashboard in your browser (self-starts the daemon)
   rm <id>                 Remove a canvas
   status                  Show daemon status (does not self-start)
   stop                    Stop the daemon (does not self-start)

@@ -12,7 +12,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("stop", stderr)
 	cf := registerCommonFlags(fs)
 	if err := parseArgs(fs, args); err != nil {
-		return 2
+		return exitForParseErr(err)
 	}
 
 	cfg := cf.toConfig()

@@ -17,7 +17,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("rm", stderr)
 	cf := registerCommonFlags(fs)
 	if err := parseArgs(fs, args); err != nil {
-		return 2
+		return exitForParseErr(err)
 	}
 	pos := fs.Args()
 	if len(pos) != 1 {

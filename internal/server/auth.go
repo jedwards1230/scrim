@@ -34,6 +34,10 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if queryToken := r.URL.Query().Get(tokenQueryParam); queryToken != "" {
+			// A present-but-wrong "?t=" is a hard 401, even if the request
+			// also carries a valid session cookie from an earlier hit: an
+			// explicit bad token in the query string is deliberately not
+			// silently ignored in favor of falling back to cookie auth.
 			if !constantTimeEqual(queryToken, s.token) {
 				http.Error(w, "unauthorized: invalid token", http.StatusUnauthorized)
 				return
