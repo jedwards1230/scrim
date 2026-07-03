@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -89,7 +90,7 @@ func TestResolveServablePathSymlinkedIndexRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := resolveServablePath(root, "escape-dir")
+	_, _, err := resolveServablePath(root, "escape-dir")
 	if err == nil {
 		t.Fatal("resolveServablePath(symlinked index.html) error = nil, want error (escape rejected)")
 	}
@@ -108,28 +109,54 @@ func TestResolveServablePath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "noindex"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "mdonly"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(root, "mdonly", "index.md"), "# hi")
+	if err := os.MkdirAll(filepath.Join(root, "both"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(root, "both", "index.html"), "<html>both-html</html>")
+	mustWriteFile(t, filepath.Join(root, "both", "index.md"), "# both-md")
 
 	tests := []struct {
-		name    string
-		subpath string
-		wantErr bool
+		name        string
+		subpath     string
+		wantErr     bool
+		wantSuffix  string
+		wantViaIdx  bool
+		checkResult bool
 	}{
-		{"root maps to index.html", "", false},
-		{"trailing slash root", "/", false},
-		{"directory with index.html", "withindex", false},
-		{"directory with index.html trailing slash", "withindex/", false},
-		{"directory without index.html 404s", "noindex", true},
-		{"missing file 404s", "does-not-exist.html", true},
+		{name: "root maps to index.html", subpath: "", wantSuffix: "index.html", wantViaIdx: true, checkResult: true},
+		{name: "trailing slash root", subpath: "/", wantSuffix: "index.html", wantViaIdx: true, checkResult: true},
+		{name: "directory with index.html", subpath: "withindex", wantSuffix: filepath.Join("withindex", "index.html"), wantViaIdx: true, checkResult: true},
+		{name: "directory with index.html trailing slash", subpath: "withindex/", wantSuffix: filepath.Join("withindex", "index.html"), wantViaIdx: true, checkResult: true},
+		{name: "directory without index.html or index.md 404s", subpath: "noindex", wantErr: true},
+		{name: "missing file 404s", subpath: "does-not-exist.html", wantErr: true},
+		{name: "directory falls back to index.md when no index.html", subpath: "mdonly", wantSuffix: filepath.Join("mdonly", "index.md"), wantViaIdx: true, checkResult: true},
+		{name: "index.html preferred over index.md when both exist", subpath: "both", wantSuffix: filepath.Join("both", "index.html"), wantViaIdx: true, checkResult: true},
+		{name: "direct index.md request is not viaIndex", subpath: "mdonly/index.md", wantSuffix: filepath.Join("mdonly", "index.md"), wantViaIdx: false, checkResult: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := resolveServablePath(root, tt.subpath)
-			if tt.wantErr && err == nil {
-				t.Fatalf("resolveServablePath(%q) error = nil, want error", tt.subpath)
+			target, viaIndex, err := resolveServablePath(root, tt.subpath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveServablePath(%q) error = nil, want error", tt.subpath)
+				}
+				return
 			}
-			if !tt.wantErr && err != nil {
+			if err != nil {
 				t.Fatalf("resolveServablePath(%q) unexpected error = %v", tt.subpath, err)
+			}
+			if tt.checkResult {
+				if !strings.HasSuffix(target, tt.wantSuffix) {
+					t.Errorf("resolveServablePath(%q) target = %q, want suffix %q", tt.subpath, target, tt.wantSuffix)
+				}
+				if viaIndex != tt.wantViaIdx {
+					t.Errorf("resolveServablePath(%q) viaIndex = %v, want %v", tt.subpath, viaIndex, tt.wantViaIdx)
+				}
 			}
 		})
 	}

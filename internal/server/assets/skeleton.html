@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- scrim:skeleton -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: light dark;
+    --scrim-bg: #ffffff;
+    --scrim-fg: #1a1a1a;
+    --scrim-link: #0b57d0;
+    --scrim-code-bg: rgba(0, 0, 0, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --scrim-bg: #121212;
+      --scrim-fg: #e8e8e8;
+      --scrim-link: #8ab4f8;
+      --scrim-code-bg: rgba(255, 255, 255, 0.08);
+    }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--scrim-bg);
+    color: var(--scrim-fg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+    padding: 2rem;
+    max-width: 48rem;
+    margin: 0 auto;
+  }
+  a { color: var(--scrim-link); }
+  img, video { max-width: 100%; height: auto; }
+  pre {
+    overflow-x: auto;
+    padding: 0.75rem;
+    background: var(--scrim-code-bg);
+    border-radius: 0.375rem;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre code { background: none; }
+</style>
+</head>
+<body>
+__SCRIM_CONTENT__
+</body>
+</html>

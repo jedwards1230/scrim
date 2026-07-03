@@ -21,7 +21,7 @@ Key packages under `internal/`:
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title) |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
 | `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop, version-skew restart |
-| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper, capability-token auth middleware, mDNS advertisement |
+| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, index page, `/api/*`, idle reaper, capability-token auth middleware, mDNS advertisement. Serve-time only (files on disk are never modified): an `index.md` directory-index is rendered via `goldmark`, and a bare HTML fragment (no `<!doctype`/`<html>`) is wrapped -- both in an embedded skeleton (`assets/skeleton.html`: CSS reset, `prefers-color-scheme` theming, viewport meta) before reload-script injection. A complete HTML document passes through unwrapped. |
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
@@ -45,8 +45,9 @@ serves canvases and pushes SSE reloads on file changes (`server`, via
 ### Architecture decisions
 
 - **No CGO**: the binary must be cross-compilable without a C toolchain.
-- **Dependencies stay minimal**: Go stdlib + `fsnotify` + one mDNS library
-  only. Don't add a dependency without a real need.
+- **Dependencies stay minimal**: Go stdlib + `fsnotify` + one mDNS library +
+  `goldmark` (serve-time markdown rendering, see below) only. Don't add a
+  dependency without a real need.
 - **Single binary, self-starting daemon**: no separate install/systemd step —
   the first verb that needs the daemon starts it if it isn't running.
 

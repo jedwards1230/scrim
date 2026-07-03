@@ -579,6 +579,119 @@ fi
 kill "$SSE_CURL_PID10" 2>/dev/null || true
 wait "$SSE_CURL_PID10" 2>/dev/null || true
 
+# --- Scenario 15: index.md renders via the skeleton, and SSE live-reload
+# still fires when the markdown file itself is touched ---
+log "Scenario 15: a canvas with only index.md renders via goldmark + the skeleton, and SSE live-reload works when the .md file is touched"
+DIR11="$WORKDIR/s11"
+OUT11=$("$BIN" add md-test --dir "$DIR11" --idle-timeout 5m 2>&1)
+CANVAS_DIR11=$(echo "$OUT11" | sed -n '1p')
+CANVAS_URL11=$(echo "$OUT11" | sed -n '2p')
+printf '# Hello Markdown\n\nSome *body* text.\n' >"$CANVAS_DIR11/index.md"
+
+BODY11=$(curl -fsS "$CANVAS_URL11" || true)
+if echo "$BODY11" | grep -q "<h1>Hello Markdown</h1>"; then
+  ok "index.md scenario: response contains goldmark-rendered heading"
+else
+  bad "index.md scenario: response contains goldmark-rendered heading"
+fi
+if echo "$BODY11" | grep -q "scrim:skeleton"; then
+  ok "index.md scenario: response is wrapped in scrim's skeleton"
+else
+  bad "index.md scenario: response is wrapped in scrim's skeleton"
+fi
+if echo "$BODY11" | grep -q "__events" && echo "$BODY11" | grep -q "<script>"; then
+  ok "index.md scenario: response contains injected SSE <script>"
+else
+  bad "index.md scenario: response contains injected SSE <script>"
+fi
+
+EVENTS_URL11="$(with_events_path "$CANVAS_URL11")"
+SSE_OUT11="$WORKDIR/sse-md-out.txt"
+: >"$SSE_OUT11"
+curl -fsS -N --max-time 6 "$EVENTS_URL11" >"$SSE_OUT11" 2>/dev/null &
+CURL_PID11=$!
+sleep 0.5 # let the SSE connection register before we touch the file
+printf '# Hello Markdown\n\nUpdated *body* text.\n' >"$CANVAS_DIR11/index.md"
+
+SSE_DEADLINE11=$((SECONDS + 6))
+GOT_RELOAD11=0
+while [ $SECONDS -lt $SSE_DEADLINE11 ]; do
+  if grep -q "event: reload" "$SSE_OUT11" 2>/dev/null; then
+    GOT_RELOAD11=1
+    break
+  fi
+  sleep 0.2
+done
+kill "$CURL_PID11" 2>/dev/null || true
+wait "$CURL_PID11" 2>/dev/null || true
+
+if [ "$GOT_RELOAD11" -eq 1 ]; then
+  ok "index.md scenario: SSE reload event received within 6s of touching the .md file"
+else
+  bad "index.md scenario: SSE reload event received within 6s of touching the .md file"
+fi
+"$BIN" stop --dir "$DIR11" >/dev/null 2>&1 || true
+
+# --- Scenario 16: a bare HTML fragment (no doctype/html tag) is wrapped in
+# the skeleton ---
+log "Scenario 16: an HTML fragment with no doctype/html wrapper renders wrapped in the skeleton"
+DIR12="$WORKDIR/s12"
+OUT12=$("$BIN" add fragment-test --dir "$DIR12" --idle-timeout 5m 2>&1)
+CANVAS_DIR12=$(echo "$OUT12" | sed -n '1p')
+CANVAS_URL12=$(echo "$OUT12" | sed -n '2p')
+printf '<h1>Just a fragment</h1>\n<p>no doctype or html tag here</p>\n' >"$CANVAS_DIR12/index.html"
+
+BODY12=$(curl -fsS "$CANVAS_URL12" || true)
+if echo "$BODY12" | grep -q "Just a fragment"; then
+  ok "fragment scenario: response contains the fragment's original content"
+else
+  bad "fragment scenario: response contains the fragment's original content"
+fi
+if echo "$BODY12" | grep -q 'name="viewport"' && echo "$BODY12" | grep -q "scrim:skeleton"; then
+  ok "fragment scenario: response contains the skeleton's viewport meta tag and marker"
+else
+  bad "fragment scenario: response contains the skeleton's viewport meta tag and marker"
+fi
+"$BIN" stop --dir "$DIR12" >/dev/null 2>&1 || true
+
+# --- Scenario 17: a complete HTML document passes through unwrapped ---
+log "Scenario 17: a complete HTML document (with <!doctype html>) is served byte-equivalent to the original modulo reload-script injection only"
+DIR13="$WORKDIR/s13"
+OUT13=$("$BIN" add complete-test --dir "$DIR13" --idle-timeout 5m 2>&1)
+CANVAS_DIR13=$(echo "$OUT13" | sed -n '1p')
+CANVAS_URL13=$(echo "$OUT13" | sed -n '2p')
+printf '<!doctype html>\n<html><head><title>e2e complete</title></head><body><h1>Complete Doc</h1></body></html>\n' >"$CANVAS_DIR13/index.html"
+
+BODY13=$(curl -fsS "$CANVAS_URL13" || true)
+if echo "$BODY13" | grep -q "<title>e2e complete</title>" && echo "$BODY13" | grep -q "<h1>Complete Doc</h1>"; then
+  ok "complete-document scenario: original document content is present verbatim"
+else
+  bad "complete-document scenario: original document content is present verbatim"
+fi
+if echo "$BODY13" | grep -q "scrim:skeleton"; then
+  bad "complete-document scenario: skeleton must NOT be applied to a complete document (found scrim:skeleton marker)"
+else
+  ok "complete-document scenario: skeleton is not applied (no scrim:skeleton marker)"
+fi
+DOCTYPE_COUNT13=$(echo "$BODY13" | grep -oi "<!doctype" | wc -l | tr -d ' ')
+HTML_TAG_COUNT13=$(echo "$BODY13" | grep -oi "<html" | wc -l | tr -d ' ')
+if [ "$DOCTYPE_COUNT13" = "1" ] && [ "$HTML_TAG_COUNT13" = "1" ]; then
+  ok "complete-document scenario: no double-wrapping (exactly one <!doctype> and one <html> tag)"
+else
+  bad "complete-document scenario: no double-wrapping (found $DOCTYPE_COUNT13 <!doctype>, $HTML_TAG_COUNT13 <html> tags)"
+fi
+if echo "$BODY13" | grep -q 'name="viewport"'; then
+  bad "complete-document scenario: no duplicate viewport tag introduced by the skeleton (found one, original had none)"
+else
+  ok "complete-document scenario: no viewport tag introduced by the skeleton (original had none)"
+fi
+if echo "$BODY13" | grep -q "__events" && echo "$BODY13" | grep -q "<script>"; then
+  ok "complete-document scenario: reload-script injection still applies"
+else
+  bad "complete-document scenario: reload-script injection still applies"
+fi
+"$BIN" stop --dir "$DIR13" >/dev/null 2>&1 || true
+
 # --- Summary ---
 log "Summary"
 echo "passed: $PASS"
