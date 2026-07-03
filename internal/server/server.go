@@ -127,6 +127,11 @@ func (s *Server) initiateShutdown() {
 }
 
 func (s *Server) reap(ctx context.Context) {
+	if s.cfg.IdleTimeout <= 0 {
+		// Reaping is disabled entirely; never start a ticker that can only
+		// ever wake up to find shouldReap false.
+		return
+	}
 	ticker := time.NewTicker(reapCheckInterval(s.cfg.IdleTimeout))
 	defer ticker.Stop()
 	for {

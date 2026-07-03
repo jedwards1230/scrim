@@ -20,11 +20,18 @@ type Client struct {
 	http    *http.Client
 }
 
+// defaultTimeout bounds every request this client makes. These are
+// loopback/LAN control-plane calls (status/create/list/delete/stop), not
+// long-running operations — live reload is a separate SSE connection the
+// browser's EventSource manages directly, so it's unaffected by this
+// timeout. A stuck or unresponsive daemon must not hang the CLI forever.
+const defaultTimeout = 10 * time.Second
+
 // New returns a Client for the daemon at baseURL (e.g. "http://127.0.0.1:7777").
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
-		http:    &http.Client{},
+		http:    &http.Client{Timeout: defaultTimeout},
 	}
 }
 
