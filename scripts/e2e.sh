@@ -410,6 +410,11 @@ if echo "$OPEN_ERR" | grep -q "could not open a browser"; then
 else
   ok "open (default) prints no auto-open notice"
 fi
+if echo "$OPEN_ERR" | grep -q "browser launch is opt-in"; then
+  ok "open (default) prints the opt-in hint on stderr"
+else
+  bad "open (default) prints the opt-in hint on stderr"
+fi
 
 # (b) --browser opts in: same URL on stdout, plus an actual launch attempt.
 if [ -n "$STUB_CMD_NAME" ]; then
@@ -450,6 +455,42 @@ else
 fi
 
 rm -f /tmp/e2e-open-stderr.$$ "$BROWSER_MARKER"
+
+# --- Scenario 11b: link is permanently print-only -- no flag, no env var
+# reaches it (it doesn't even parse --browser), so the only thing worth
+# proving here is that it prints the canonical URL and never attempts a
+# launch, reusing the same PATH-stub trick as scenario 11. ---
+log "Scenario 11b: link prints the canonical URL and never launches a browser"
+if [ -n "$STUB_CMD_NAME" ]; then
+  rm -f "$BROWSER_MARKER"
+  LINK_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" link open-test --dir "$DIR_OPEN" 2>/tmp/e2e-link-stderr.$$)
+  LINK_STATUS=$?
+  LINK_ERR=$(cat /tmp/e2e-link-stderr.$$)
+  if [ "$LINK_STATUS" -eq 0 ]; then
+    ok "link <id> exits 0"
+  else
+    bad "link <id> exits 0 (got $LINK_STATUS)"
+  fi
+  if echo "$LINK_OUT" | grep -q "^http://"; then
+    ok "link <id> prints the canvas URL to stdout"
+  else
+    bad "link <id> prints the canvas URL to stdout"
+  fi
+  if [ -f "$BROWSER_MARKER" ]; then
+    bad "link <id> must NOT launch a browser, even with SCRIM_OPEN_BROWSER=1 set (stub was invoked)"
+  else
+    ok "link <id> does not launch a browser, even with SCRIM_OPEN_BROWSER=1 set"
+  fi
+  if echo "$LINK_ERR" | grep -q "browser launch is opt-in"; then
+    bad "link <id> must not print open's opt-in hint (link has no launch path to hint about)"
+  else
+    ok "link <id> prints no opt-in hint"
+  fi
+  rm -f /tmp/e2e-link-stderr.$$ "$BROWSER_MARKER"
+else
+  printf "  [SKIP] Scenario 11b: no stub command for uname -s=%s\n" "$(uname -s)"
+fi
+
 "$BIN" stop --dir "$DIR_OPEN" >/dev/null 2>&1 || true
 
 # --- Scenario 12: version-skew restart ---

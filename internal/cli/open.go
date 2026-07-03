@@ -9,6 +9,7 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/daemon"
 	"github.com/jedwards1230/scrim/internal/openurl"
 )
@@ -19,12 +20,16 @@ const openBrowserEnvVar = "SCRIM_OPEN_BROWSER"
 
 // cmdOpen implements `scrim open [<id>] [--browser]`. It self-starts the
 // daemon if needed and prints the URL for a canvas (or the dashboard, with
-// no id). Launching that URL in the platform's default browser is opt-in --
-// via --browser or a truthy SCRIM_OPEN_BROWSER -- since scrim's daemon is
+// no id) via resolveAndPrintURLs -- the same resolution logic cmdLink uses.
+// Launching that URL in the platform's default browser is opt-in -- via
+// --browser or a truthy SCRIM_OPEN_BROWSER -- since scrim's daemon is
 // commonly self-started by an agent on the user's behalf, and a browser tab
 // popping up unprompted is a surprise, not a convenience. The printed URL is
 // always there, whether or not auto-open was requested; when it was and it
-// fails, that's reported as a notice, not a command failure.
+// fails, that's reported as a notice, not a command failure. When it wasn't
+// requested at all, a one-line stderr hint points at how to opt in --
+// scrim link is the print-only sibling for anyone (especially an agent) who
+// never wants that hint or the possibility of a launch in the first place.
 func cmdOpen(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("open", stderr)
 	cf := registerCommonFlags(fs)
@@ -38,48 +43,69 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	launch := shouldOpenBrowser(*browserFlag, os.Getenv(openBrowserEnvVar))
 
+	id := ""
+	if len(pos) == 1 {
+		id = pos[0]
+	}
+
 	cfg := cf.toConfig()
+	primary, code, ok := resolveAndPrintURLs(cfg, id, stdout, stderr)
+	if !ok {
+		return code
+	}
+
+	if launch {
+		openBrowser(primary, stderr)
+	} else {
+		outf(stderr, "browser launch is opt-in -- pass --browser or set SCRIM_OPEN_BROWSER=1\n")
+	}
+	return 0
+}
+
+// resolveAndPrintURLs self-starts the daemon, resolves the URL(s) for id --
+// or, when id is "", the dashboard -- against it, and prints them to
+// stdout. It's the single implementation shared by cmdOpen and cmdLink,
+// the only two verbs that print a canvas's URL; they differ only in what
+// they do after this returns (cmdOpen may also launch a browser; cmdLink
+// never does). On failure ok is false and exitCode is the code the caller
+// should return without printing anything further -- an error has already
+// been written to stderr. On success, primary is the URL a caller wanting
+// to auto-launch a browser should hand to openBrowser (see primaryURL).
+func resolveAndPrintURLs(cfg config.Config, id string, stdout, stderr io.Writer) (primary string, exitCode int, ok bool) {
 	st, err := daemon.Ensure(cfg)
 	if err != nil {
 		errOut(stderr, err)
-		return 1
+		return "", 1, false
 	}
-	apiBaseURL := fmt.Sprintf("http://%s:%d", st.Host, st.Port)
 
-	if len(pos) == 0 {
+	if id == "" {
 		url := baseURLFor(st, "/")
 		lines := urlLines(st.Host, url)
 		printURLLines(stdout, lines)
-		if launch {
-			openBrowser(primaryURL(lines, url), stderr)
-		}
-		return 0
+		return primaryURL(lines, url), 0, true
 	}
 
-	id := pos[0]
 	if err := canvas.ValidateID(id); err != nil {
 		errOut(stderr, err)
-		return 2
+		return "", 2, false
 	}
 
+	apiBaseURL := fmt.Sprintf("http://%s:%d", st.Host, st.Port)
 	client := apiclient.NewWithToken(apiBaseURL, st.Token)
 	canvases, err := client.ListCanvases(context.Background())
 	if err != nil {
 		errOut(stderr, err)
-		return 1
+		return "", 1, false
 	}
 	for _, c := range canvases {
 		if c.ID == id {
 			lines := urlLines(st.Host, c.URL)
 			printURLLines(stdout, lines)
-			if launch {
-				openBrowser(primaryURL(lines, c.URL), stderr)
-			}
-			return 0
+			return primaryURL(lines, c.URL), 0, true
 		}
 	}
 	outf(stderr, "error: canvas %q not found\n", id)
-	return 1
+	return "", 1, false
 }
 
 // shouldOpenBrowser reports whether cmdOpen should launch the browser: only

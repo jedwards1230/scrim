@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,8 +105,13 @@ func stubLaunchBrowser(t *testing.T) *[]string {
 	return &calls
 }
 
+// openOptInHint is the stderr hint cmdOpen prints, in both its no-id and
+// with-id branches, when the browser launch was not opted in to.
+const openOptInHint = "browser launch is opt-in"
+
 // TestCmdOpenNoIDBrowserOptIn covers `scrim open` (no id, the dashboard
-// URL): the browser is launched only when explicitly opted in.
+// URL): the browser is launched only when explicitly opted in, and a
+// stderr hint is printed instead whenever it isn't.
 func TestCmdOpenNoIDBrowserOptIn(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -137,12 +143,17 @@ func TestCmdOpenNoIDBrowserOptIn(t *testing.T) {
 			if got := len(*calls) > 0; got != tt.wantLaunch {
 				t.Errorf("cmdOpen(%v) launched browser = %v (calls %v), want %v", args, got, *calls, tt.wantLaunch)
 			}
+			gotHint := strings.Contains(stderr.String(), openOptInHint)
+			if wantHint := !tt.wantLaunch; gotHint != wantHint {
+				t.Errorf("cmdOpen(%v) stderr hint present = %v (stderr: %q), want %v", args, gotHint, stderr.String(), wantHint)
+			}
 		})
 	}
 }
 
 // TestCmdOpenWithIDBrowserOptIn covers `scrim open <id>` (the found-canvas
-// branch) -- the same opt-in gating applies to this second call site.
+// branch) -- the same opt-in gating, and the same stderr hint, apply to
+// this second call site.
 func TestCmdOpenWithIDBrowserOptIn(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -174,6 +185,10 @@ func TestCmdOpenWithIDBrowserOptIn(t *testing.T) {
 			}
 			if got := len(*calls) > 0; got != tt.wantLaunch {
 				t.Errorf("cmdOpen(%v) launched browser = %v (calls %v), want %v", args, got, *calls, tt.wantLaunch)
+			}
+			gotHint := strings.Contains(stderr.String(), openOptInHint)
+			if wantHint := !tt.wantLaunch; gotHint != wantHint {
+				t.Errorf("cmdOpen(%v) stderr hint present = %v (stderr: %q), want %v", args, gotHint, stderr.String(), wantHint)
 			}
 		})
 	}
