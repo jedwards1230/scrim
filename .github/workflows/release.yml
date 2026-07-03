@@ -100,6 +100,15 @@ jobs:
               echo "::notice::no semver:* label on the merged PR — skipping release"
             fi
           fi
+          # Defensive: make sure a future label-parsing bug can't silently
+          # propagate an unexpected value downstream.
+          case "$TYPE" in
+            major | minor | patch | none) ;;
+            *)
+              echo "::error::invalid bump type computed: $TYPE"
+              exit 1
+              ;;
+          esac
           {
             echo "type=$TYPE"
             echo "dry_run=$DRY"
@@ -150,6 +159,8 @@ jobs:
                    -X github.com/jedwards1230/scrim/internal/version.Commit=${COMMIT} \
                    -X github.com/jedwards1230/scrim/internal/version.Date=${DATE}"
           mkdir -p dist
+          # NOTE: if this list changes, update the "Binaries" line in the
+          # "Write workflow summary" step below to match.
           platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
           for platform in "${platforms[@]}"; do
             GOOS="${platform%/*}"; GOARCH="${platform#*/}"
@@ -215,5 +226,6 @@ jobs:
             echo "| Tag | ${TAG} |"
             echo "| Previous | ${PREV} |"
             echo "| Bump | ${BUMP_TYPE} |"
+            # Keep this in sync with the "platforms" list in the build job.
             echo "| Binaries | linux/darwin (amd64 + arm64), windows (amd64) |"
           } >> "$GITHUB_STEP_SUMMARY"
