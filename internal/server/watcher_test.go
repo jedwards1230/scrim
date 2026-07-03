@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,6 +179,64 @@ func TestCloseDuringEventBurst(t *testing.T) {
 
 		close(stopWriting)
 		<-writerDone
+	}
+}
+
+// TestScheduleReloadConcurrentSameID is a regression test for issue #20: a
+// negative-WaitGroup panic caused by scheduleReload calling t.Reset on a
+// timer whose AfterFunc callback had already fired (or was in the process
+// of firing). Firing and callback-cleanup happen on their own goroutine,
+// independent of when a concurrent scheduleReload call for the same ID
+// takes w.mu, so this drives many goroutines hammering scheduleReload for a
+// single shared ID against a debounce interval short enough that timers are
+// firing (and racing scheduleReload) essentially continuously -- the exact
+// conditions that made this reproduce reliably on GitHub's CI runners but
+// not in quick local runs. Run with `-race`: a resurfaced bug would either
+// panic outright (sync: negative WaitGroup counter) or be flagged as a data
+// race on w.timers.
+func TestScheduleReloadConcurrentSameID(t *testing.T) {
+	const (
+		goroutines = 50
+		iterations = 500
+		debounce   = time.Microsecond
+	)
+
+	root := t.TempDir()
+	var reloadCount int64
+	w, err := newCanvasWatcher(root, debounce, func(string) {
+		atomic.AddInt64(&reloadCount, 1)
+	})
+	if err != nil {
+		t.Fatalf("newCanvasWatcher() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				w.scheduleReload("report")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Close must still be a clean quiescence barrier afterward: no panic,
+	// no deadlock, and every in-flight/pending callback accounted for.
+	closeDone := make(chan struct{})
+	go func() {
+		_ = w.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not return (deadlock)")
+	}
+
+	if atomic.LoadInt64(&reloadCount) == 0 {
+		t.Fatal("expected at least one onReload call from the concurrent bursts")
 	}
 }
 
