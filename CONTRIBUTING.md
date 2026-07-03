@@ -63,3 +63,26 @@ the README and any affected docs in the same PR.
 Releases are opt-in. Before merging, add one of `semver:patch`, `semver:minor`,
 or `semver:major` to the PR to cut a release on merge; with no label, merging
 does not release. A release publishes a single immutable `vX.Y.Z` tag.
+
+## Plugin version convention
+
+This repo hosts its own Claude Code plugin marketplace (`.claude-plugin/marketplace.json`,
+`plugins/scrim/`) so `scrim` can be installed via
+`/plugin marketplace add jedwards1230/scrim`. `plugins/scrim`'s
+`.claude-plugin/plugin.json` version tracks the **scrim tool's** version, not
+independent semver — it doesn't bump on every commit, only when the tool's
+functionality changes in a way that changes the plugin-relevant surface (new
+verbs, changed behavior the skill documents).
+
+When that happens:
+
+1. Bump `plugins/scrim/.claude-plugin/plugin.json`'s `version`.
+2. Bump the matching `scrim` entry's `version` in `.claude-plugin/marketplace.json`
+   to the same value.
+3. Bump `.claude-plugin/marketplace.json`'s own `metadata.version`, sized by
+   what changed: major for a plugin added/removed, minor for core marketplace
+   metadata changes, patch for a plugin version change.
+
+`.github/workflows/plugin-version-check.yml` (via `scripts/check-plugin-versions.sh`)
+enforces steps 1 and 2 in CI on any PR touching `plugins/**` or
+`.claude-plugin/marketplace.json`.

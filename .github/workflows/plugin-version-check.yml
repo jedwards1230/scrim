@@ -1,0 +1,36 @@
+name: Plugin Version Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/marketplace.json'
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/marketplace.json'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Check plugin versions
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_REF="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_REF="HEAD~1"
+          fi
+          ./scripts/check-plugin-versions.sh "$BASE_REF"
