@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/jedwards1230/scrim/internal/config"
 )
@@ -34,6 +35,38 @@ type hubConfig struct {
 	pushToken   string
 	readToken   string
 	allowedNets []*net.IPNet
+	// pushLocks serializes concurrent pushes to the same canvas id (see
+	// handlePush's swap sequence); different ids never contend.
+	pushLocks keyedMutex
+}
+
+// keyedMutex hands out a distinct mutex per string key, so callers can
+// serialize work on the same key while letting different keys run in
+// parallel. Entries are created on demand and never reclaimed -- the key
+// space here is canvas ids, which is small and bounded, so the leak is
+// negligible and dropping an entry would reintroduce the very race the lock
+// exists to prevent.
+type keyedMutex struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+// lock acquires (creating if needed) the mutex for key and returns its
+// unlock func for the caller to defer.
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = make(map[string]*sync.Mutex)
+	}
+	mu, ok := k.m[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		k.m[key] = mu
+	}
+	k.mu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
 }
 
 // errMissingPushToken is returned by NewHub when opts.PushToken is empty --

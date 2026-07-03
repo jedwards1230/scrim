@@ -105,7 +105,7 @@ func TestExtractTarRejectsUnsafeEntries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			data := buildTar(t, tt.entries)
-			err := extractTar(bytes.NewReader(data), root, maxPushBytes, maxPushFiles)
+			err := extractTar(bytes.NewReader(data), root, maxPushBytes, maxPushEntries)
 			if err == nil {
 				t.Fatal("extractTar() error = nil, want an error for an unsafe entry")
 			}
@@ -124,7 +124,7 @@ func TestExtractTarRejectsUnsafeEntries(t *testing.T) {
 func TestExtractTarEnforcesSizeCap(t *testing.T) {
 	root := t.TempDir()
 	data := buildTar(t, []tarEntry{regFile("big.txt", strings.Repeat("x", 100))})
-	err := extractTar(bytes.NewReader(data), root, 50, maxPushFiles)
+	err := extractTar(bytes.NewReader(data), root, 50, maxPushEntries)
 	if err == nil {
 		t.Fatal("extractTar() error = nil, want an error when the archive exceeds the byte cap")
 	}
@@ -143,6 +143,24 @@ func TestExtractTarEnforcesFileCountCap(t *testing.T) {
 	}
 }
 
+// TestExtractTarCountsDirEntries proves the entry cap counts directory
+// entries, not just regular files -- an archive of many empty directories
+// must trip the same cap a file-bomb would (regression for the review
+// finding that only regular files were counted, letting a dir-only archive
+// bypass maxPushEntries entirely).
+func TestExtractTarCountsDirEntries(t *testing.T) {
+	root := t.TempDir()
+	entries := make([]tarEntry, 0, 5)
+	for i := 0; i < 5; i++ {
+		entries = append(entries, dirEntry(strings.Repeat("d", i+1)))
+	}
+	data := buildTar(t, entries)
+	err := extractTar(bytes.NewReader(data), root, maxPushBytes, 3)
+	if err == nil {
+		t.Fatal("extractTar() error = nil, want an error when directory entries exceed the entry-count cap")
+	}
+}
+
 func TestExtractTarHappyPath(t *testing.T) {
 	root := t.TempDir()
 	entries := []tarEntry{
@@ -151,7 +169,7 @@ func TestExtractTarHappyPath(t *testing.T) {
 		regFile("assets/app.js", "console.log('hi')"),
 	}
 	data := buildTar(t, entries)
-	if err := extractTar(bytes.NewReader(data), root, maxPushBytes, maxPushFiles); err != nil {
+	if err := extractTar(bytes.NewReader(data), root, maxPushBytes, maxPushEntries); err != nil {
 		t.Fatalf("extractTar() error = %v", err)
 	}
 

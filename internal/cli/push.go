@@ -62,12 +62,19 @@ func cmdPush(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	pushOnce := func() error {
+	// Establish the signal-cancellable context up front so BOTH the initial
+	// one-shot push and any --watch re-pushes honor SIGINT/SIGTERM: an
+	// in-flight push aborts promptly on Ctrl-C rather than running out its
+	// own request timeout.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	pushOnce := func(ctx context.Context) error {
 		data, err := pushclient.Pack(canvasDir)
 		if err != nil {
 			return err
 		}
-		hubURL, err := pushclient.Push(context.Background(), *to, id, *token, info.Title, info.Description, info.Icon, data)
+		hubURL, err := pushclient.Push(ctx, *to, id, *token, info.Title, info.Description, info.Icon, data)
 		if err != nil {
 			return err
 		}
@@ -75,7 +82,7 @@ func cmdPush(args []string, stdout, stderr io.Writer) int {
 		return nil
 	}
 
-	if err := pushOnce(); err != nil {
+	if err := pushOnce(ctx); err != nil {
 		errOut(stderr, err)
 		return 1
 	}
@@ -83,11 +90,8 @@ func cmdPush(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	if err := pushclient.Watch(ctx, canvasDir, func() {
-		if err := pushOnce(); err != nil {
+		if err := pushOnce(ctx); err != nil {
 			errOut(stderr, err)
 		}
 	}); err != nil {

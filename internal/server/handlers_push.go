@@ -18,10 +18,19 @@ const (
 	// so a malicious or buggy client can't exhaust the hub's disk with one
 	// request.
 	maxPushBytes = 50 * 1024 * 1024 // 50 MiB
-	// maxPushFiles bounds the total number of regular-file entries in a
-	// pushed archive, independent of their size (a tar-bomb of many tiny
-	// files is a separate attack from one huge file).
-	maxPushFiles = 1000
+	// maxPushEntries bounds the total number of entries -- regular files AND
+	// directories -- in a pushed archive, independent of their size. A
+	// tar-bomb of many tiny files, or of many empty directories, is a
+	// separate attack from one huge file: every entry costs an inode and a
+	// syscall (MkdirAll/OpenFile) regardless of its content length, so a
+	// directory entry has to count against this cap exactly like a file does.
+	maxPushEntries = 1000
+	// maxPushBodyBytes is a coarse ceiling on the ENTIRE request body (tar
+	// structure + file contents), enforced via http.MaxBytesReader as
+	// defense-in-depth on top of the per-content maxPushBytes and per-entry
+	// maxPushEntries caps that extractTar applies. It's maxPushBytes plus
+	// generous headroom for tar's 512-byte entry headers and padding.
+	maxPushBodyBytes = maxPushBytes + 8*1024*1024 // 50 MiB content + 8 MiB tar overhead
 )
 
 // errPushTooLarge is returned by extractTar when an archive exceeds
@@ -40,16 +49,24 @@ var errPushBadEntry = errors.New("push: unsafe or unsupported tar entry")
 //
 // Extraction always lands in a staging directory under the hub's data dir
 // but OUTSIDE canvasesDir (so the filesystem watcher never fires on
-// individual staged writes), and the swap into place
-// (os.RemoveAll(canvasDir) + os.Rename(staging, canvasDir)) is the one
-// filesystem event the watcher actually observes -- a single clean SSE
-// reload, never a partial-serve of a canvas mid-extraction.
+// individual staged writes), and the swap into place (move any existing
+// canvas aside, rename the staged copy in, then delete the aside copy --
+// see the swap-then-delete sequence below) is what the watcher observes:
+// a single clean SSE reload, never a partial-serve of a canvas
+// mid-extraction, and never a stranded/empty canvas if the critical rename
+// fails. Concurrent pushes to the SAME id are serialized by a per-id lock.
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := canvas.ValidateID(id); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Coarse outer ceiling on the whole request body, independent of the
+	// finer per-content/per-entry caps extractTar enforces: a client can't
+	// stream an unbounded body at the hub even before extractTar gets to
+	// reason about individual entries.
+	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
 	stagingRoot := filepath.Join(s.cfg.Dir, "push-staging")
 	if err := os.MkdirAll(stagingRoot, 0o755); err != nil { //nolint:gosec // staging dir lives under the hub's owner-only data dir
@@ -71,9 +88,10 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if err := extractTar(r.Body, staging, maxPushBytes, maxPushFiles); err != nil {
+	if err := extractTar(r.Body, staging, maxPushBytes, maxPushEntries); err != nil {
 		status := http.StatusBadRequest
-		if errors.Is(err, errPushTooLarge) {
+		var maxErr *http.MaxBytesError
+		if errors.Is(err, errPushTooLarge) || errors.As(err, &maxErr) {
 			status = http.StatusRequestEntityTooLarge
 		}
 		writeJSONError(w, status, err.Error())
@@ -85,18 +103,64 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canvasDir := canvas.Dir(s.canvasesDir, id)
-	if err := os.RemoveAll(canvasDir); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "removing previous canvas contents: "+err.Error())
+
+	// Serialize concurrent pushes to the same canvas id so their swap
+	// sequences can't interleave (two clients racing on the aside/rename/
+	// delete steps would otherwise silently discard one's content). Pushes
+	// to DIFFERENT ids proceed in parallel.
+	unlock := s.hubCfg.pushLocks.lock(id)
+	defer unlock()
+
+	// Swap-then-delete: move any existing canvas aside, rename the freshly
+	// staged copy into place, then delete the aside copy. This ordering
+	// means the one failure-prone step (rename staging -> canvasDir) can be
+	// rolled back by restoring the aside copy, so a failed push can never
+	// leave the canvas stranded as a 404 the way delete-then-rename would if
+	// its second step failed. The aside copy lives under stagingRoot
+	// (outside canvasesDir), so moving it there doesn't itself register a
+	// servable canvas.
+	var aside string
+	if _, err := os.Stat(canvasDir); err == nil {
+		tmp, err := os.MkdirTemp(stagingRoot, id+"-old-*")
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "preparing canvas swap: "+err.Error())
+			return
+		}
+		// os.Rename needs the destination not to exist; MkdirTemp created it
+		// only to reserve a unique name, so remove it before renaming into it.
+		if err := os.RemoveAll(tmp); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "preparing canvas swap: "+err.Error())
+			return
+		}
+		if err := os.Rename(canvasDir, tmp); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "moving previous canvas aside: "+err.Error())
+			return
+		}
+		aside = tmp
+	} else if !errors.Is(err, os.ErrNotExist) {
+		writeJSONError(w, http.StatusInternalServerError, "checking existing canvas: "+err.Error())
 		return
 	}
+
 	if err := os.Rename(staging, canvasDir); err != nil {
+		// Roll back: put the previous canvas back where it was so this failed
+		// push leaves the canvas exactly as it found it rather than missing.
+		if aside != "" {
+			_ = os.Rename(aside, canvasDir)
+		}
 		writeJSONError(w, http.StatusInternalServerError, "swapping staged canvas into place: "+err.Error())
 		return
 	}
-	// The staging directory no longer exists at its original path -- it
-	// (or rather, its contents) now live at canvasDir, so there is nothing
-	// left for the deferred cleanup above to remove.
+	// The staging directory no longer exists at its original path -- its
+	// contents now live at canvasDir, so there is nothing left for the
+	// deferred cleanup above to remove.
 	stagingOwned = false
+	// The new canvas is in place; drop the previous copy. Best-effort: a
+	// failure here leaves an orphan under stagingRoot but doesn't affect the
+	// served canvas.
+	if aside != "" {
+		_ = os.RemoveAll(aside)
+	}
 
 	title := r.URL.Query().Get("title")
 	description := r.URL.Query().Get("description")
@@ -116,17 +180,17 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // extractTar reads an uncompressed tar archive from r and extracts it into
 // root, enforcing maxBytes (total uncompressed size across every regular
-// file) and maxFiles (total regular-file count). Every entry's target path
-// is validated to stay within root (see safeJoin); only regular files and
-// directories are extracted -- symlinks, hardlinks, and device/fifo entries
-// are rejected outright (errPushBadEntry) rather than silently skipped,
-// since a hub is a shared, network-reachable service and any of those entry
-// types could otherwise be used to escape root or clobber an arbitrary
-// path.
-func extractTar(r io.Reader, root string, maxBytes int64, maxFiles int) error {
+// file) and maxEntries (total entry count -- files and directories alike).
+// Every entry's target path is validated to stay within root (see
+// safeJoin); only regular files and directories are extracted -- symlinks,
+// hardlinks, and device/fifo entries are rejected outright (errPushBadEntry)
+// rather than silently skipped, since a hub is a shared, network-reachable
+// service and any of those entry types could otherwise be used to escape
+// root or clobber an arbitrary path.
+func extractTar(r io.Reader, root string, maxBytes int64, maxEntries int) error {
 	tr := tar.NewReader(r)
 	var totalBytes int64
-	var numFiles int
+	var numEntries int
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -134,6 +198,15 @@ func extractTar(r io.Reader, root string, maxBytes int64, maxFiles int) error {
 		}
 		if err != nil {
 			return fmt.Errorf("reading tar entry: %w", err)
+		}
+
+		// Count every entry, not just regular files: an archive of a million
+		// empty directories drives a million MkdirAll calls and inodes just
+		// as surely as a million tiny files would, so both count against the
+		// same cap.
+		numEntries++
+		if numEntries > maxEntries {
+			return fmt.Errorf("%w: more than %d entries", errPushTooLarge, maxEntries)
 		}
 
 		target, err := safeJoin(root, hdr.Name)
@@ -147,10 +220,6 @@ func extractTar(r io.Reader, root string, maxBytes int64, maxFiles int) error {
 				return fmt.Errorf("creating directory %q: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			numFiles++
-			if numFiles > maxFiles {
-				return fmt.Errorf("%w: more than %d files", errPushTooLarge, maxFiles)
-			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // target is validated by safeJoin to stay within root
 				return fmt.Errorf("creating parent directory for %q: %w", hdr.Name, err)
 			}
