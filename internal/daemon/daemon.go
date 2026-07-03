@@ -83,7 +83,13 @@ func Stop(cfg config.Config) (found bool, err error) {
 		return false, nil
 	}
 
-	client := apiclient.NewWithToken(cfg.BaseURL(), st.Token)
+	// Use st's own Host/Port (where the daemon actually bound), not cfg's --
+	// a running daemon can legitimately differ from the caller's config
+	// (different --host/--port than it was started with, or an
+	// auto-assigned port), and sending the stop request to the wrong
+	// endpoint would silently no-op against whatever happens to be
+	// listening there instead.
+	client := apiclient.NewWithToken(st.BaseURL(), st.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 	defer cancel()
 	if err := client.Stop(ctx); err != nil {
@@ -124,7 +130,7 @@ func healthyState(cfg config.Config) (*state.State, bool) {
 		return nil, false
 	}
 
-	client := apiclient.NewWithToken(fmt.Sprintf("http://%s:%d", st.Host, st.Port), st.Token)
+	client := apiclient.NewWithToken(st.BaseURL(), st.Token)
 	for i := 0; i < healthCheckRetries; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
 		_, err := client.Status(ctx)

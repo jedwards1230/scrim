@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -38,6 +40,17 @@ type State struct {
 // truth other packages should use instead of re-deriving the answer from
 // Token/NoAuth themselves.
 func (s *State) AuthEnabled() bool { return !s.NoAuth }
+
+// BaseURL is the HTTP base URL of the daemon that wrote this state, i.e.
+// where it is actually bound and listening (Host/Port), as opposed to a
+// caller-supplied config that may target a different address. Callers that
+// have already loaded a State (e.g. via a health check) should build their
+// API client from this rather than from a Config's BaseURL, since the two
+// can legitimately differ (the daemon was started with different flags/env
+// than the current invocation, or an auto-assigned port).
+func (s *State) BaseURL() string {
+	return "http://" + net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
+}
 
 // Load reads and parses the state file at path. A missing file returns
 // ErrNotFound. A present-but-corrupt file is treated the same as "no daemon

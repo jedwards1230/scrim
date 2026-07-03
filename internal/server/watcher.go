@@ -140,8 +140,22 @@ func (w *canvasWatcher) scheduleReload(id string) {
 // Close stops the watcher and waits for its event loop to exit, as well as
 // for any debounce callback that was already firing at the time of the call
 // to finish (see fireWG).
+//
+// Ordering matters here: loop() must be provably finished before this
+// touches fireWG at all. close(w.done) alone doesn't guarantee that --
+// loop()'s select is also watching w.fsw.Events/Errors, and select can pick
+// a ready Events case over the done case, calling handleEvent ->
+// scheduleReload -> fireWG.Add(1) for a not-yet-seen canvas ID. If that
+// raced with fireWG.Wait() below (before fsw.Close()/wg.Wait() had run),
+// it would be an Add concurrent with Wait -- sync.WaitGroup explicitly
+// documents that as a panic risk. Closing fsw (which closes its Events/
+// Errors channels and makes loop()'s select take the !ok branches) and then
+// joining wg makes loop()'s exit a hard fact before fireWG is ever touched.
 func (w *canvasWatcher) Close() error {
 	close(w.done)
+	err := w.fsw.Close() // closes Events/Errors: unblocks loop()'s select
+	w.wg.Wait()          // loop() has now returned; no more scheduleReload calls possible
+
 	w.mu.Lock()
 	for _, t := range w.timers {
 		if t.Stop() {
@@ -156,8 +170,6 @@ func (w *canvasWatcher) Close() error {
 	}
 	w.mu.Unlock()
 	w.fireWG.Wait()
-	err := w.fsw.Close()
-	w.wg.Wait()
 	return err
 }
 
