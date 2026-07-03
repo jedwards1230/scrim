@@ -406,6 +406,63 @@ fi
 "$BIN2" stop --dir "$DIR8" >/dev/null 2>&1 || true
 rm -f "$BIN2"
 
+# --- Scenario 13: stop succeeds promptly despite an open SSE connection ---
+# Regression test for issue #11: a browser tab left open on a canvas holds
+# its SSE connection open indefinitely, which used to block
+# http.Server.Shutdown from completing until its own 5s internal deadline --
+# often racing past `stop`'s own ~5s wait window and reporting a spurious
+# timeout even though the daemon went on to exit anyway.
+log "Scenario 13: stop succeeds within a few seconds despite an open SSE connection (issue #11)"
+DIR9="$WORKDIR/s9"
+OUT9=$("$BIN" add sse-stop-test --dir "$DIR9" --idle-timeout 5m 2>&1)
+CANVAS_DIR9=$(echo "$OUT9" | sed -n '1p')
+CANVAS_URL9=$(echo "$OUT9" | sed -n '2p')
+echo '<html><body>sse-stop e2e</body></html>' >"$CANVAS_DIR9/index.html"
+
+EVENTS_URL9="$(with_events_path "$CANVAS_URL9")"
+SSE_OUT9="$WORKDIR/sse-stop-out.txt"
+: >"$SSE_OUT9"
+# --max-time is a generous safety net against a leaked process if an
+# assertion below fails partway through -- it's well beyond how long this
+# scenario should ever actually take, and the connection is explicitly
+# killed right after use regardless of pass/fail.
+curl -fsS -N --max-time 60 "$EVENTS_URL9" >"$SSE_OUT9" 2>/dev/null &
+SSE_CURL_PID=$!
+
+sleep 0.5 # let the SSE connection register before we stop
+if kill -0 "$SSE_CURL_PID" 2>/dev/null; then
+  ok "sse-stop scenario: SSE connection is open before stop"
+else
+  bad "sse-stop scenario: SSE connection is open before stop"
+fi
+
+STOP_START=$SECONDS
+STOP_OUT9=$("$BIN" stop --dir "$DIR9" 2>&1)
+STOP_STATUS=$?
+STOP_ELAPSED=$((SECONDS - STOP_START))
+
+if [ "$STOP_STATUS" -eq 0 ]; then
+  ok "sse-stop scenario: stop exits 0 despite an open SSE connection (was: timed out waiting for daemon to stop)"
+else
+  bad "sse-stop scenario: stop exits 0 despite an open SSE connection (exit $STOP_STATUS: $STOP_OUT9)"
+fi
+if [ "$STOP_ELAPSED" -le 4 ]; then
+  ok "sse-stop scenario: stop completed in ${STOP_ELAPSED}s (bounded well under the old ~5s timeout)"
+else
+  bad "sse-stop scenario: stop completed in ${STOP_ELAPSED}s, want <= 4s"
+fi
+if wait_for_file_gone "$DIR9/daemon.json" 5; then
+  ok "sse-stop scenario: state file removed after stop"
+else
+  bad "sse-stop scenario: state file removed after stop"
+fi
+
+# Clean up the SSE connection regardless of how the assertions above went --
+# by now the daemon should already have closed it on its way out, but kill
+# it explicitly rather than relying on that.
+kill "$SSE_CURL_PID" 2>/dev/null || true
+wait "$SSE_CURL_PID" 2>/dev/null || true
+
 # --- Summary ---
 log "Summary"
 echo "passed: $PASS"

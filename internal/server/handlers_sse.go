@@ -53,6 +53,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.hub.done():
+			// The server is shutting down: return promptly instead of
+			// waiting for this client to disconnect on its own, so a
+			// graceful http.Server.Shutdown isn't blocked on a browser tab
+			// left open indefinitely (see initiateShutdown).
+			return
 		case <-ch:
 			if _, err := fmt.Fprint(w, "event: reload\ndata: reload\n\n"); err != nil {
 				return
