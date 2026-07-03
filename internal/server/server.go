@@ -145,9 +145,15 @@ func (s *Server) Run(ctx context.Context) error {
 
 // initiateShutdown asks Run to stop, exactly once. Safe to call from
 // multiple goroutines (the /api/stop handler and the idle reaper both call
-// it).
+// it). It also tells every open SSE connection to return promptly, so
+// http.Server.Shutdown in Run doesn't sit blocked waiting on a long-lived
+// handler that has no reason to return on its own (e.g. a browser tab left
+// open on a canvas) -- see hub.closeAll.
 func (s *Server) initiateShutdown() {
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		s.hub.closeAll()
+		close(s.stopCh)
+	})
 }
 
 func (s *Server) reap(ctx context.Context) {

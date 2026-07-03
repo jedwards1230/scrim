@@ -8,10 +8,16 @@ import "sync"
 type hub struct {
 	mu      sync.Mutex
 	clients map[string]map[chan struct{}]struct{}
+
+	closeOnce sync.Once
+	closed    chan struct{}
 }
 
 func newHub() *hub {
-	return &hub{clients: make(map[string]map[chan struct{}]struct{})}
+	return &hub{
+		clients: make(map[string]map[chan struct{}]struct{}),
+		closed:  make(chan struct{}),
+	}
 }
 
 // register adds a new client for canvas id and returns its notification
@@ -68,4 +74,22 @@ func (h *hub) canvasClientCount(id string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.clients[id])
+}
+
+// closeAll signals every currently- and future-registered SSE handler to
+// return promptly, so a graceful http.Server.Shutdown isn't left waiting on
+// a client that keeps its connection open indefinitely (e.g. a browser tab
+// left open on a canvas). Safe to call more than once and concurrently with
+// register/unregister; handlers already selecting on done pick it up
+// immediately, and any handler that calls register afterward gets a channel
+// that's already closed.
+func (h *hub) closeAll() {
+	h.closeOnce.Do(func() { close(h.closed) })
+}
+
+// done returns the channel that's closed by closeAll. SSE handlers select
+// on it alongside the request context and their own reload channel, so a
+// shutdown unblocks them the same way a client disconnect would.
+func (h *hub) done() <-chan struct{} {
+	return h.closed
 }
