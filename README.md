@@ -35,6 +35,9 @@ scrim serve         # Run the daemon in the foreground
 The daemon self-starts on first use of any verb that needs it (`add`,
 `open`, etc.) and idles down after `--idle-timeout` of inactivity.
 
+An `index.md` is rendered to HTML at serve time; raw HTML embedded in it is
+passed through unsanitized, the same trust model as a `.html` canvas.
+
 ## Flags & environment variables
 
 | Flag             | Env var             | Default     | Description                        |

@@ -99,6 +99,38 @@ func TestResolveServablePathSymlinkedIndexRejected(t *testing.T) {
 	}
 }
 
+func TestResolveServablePathSymlinkedIndexMdRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on windows")
+	}
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	mustWriteFile(t, secret, "top secret")
+
+	canvasDir := filepath.Join(root, "escape-dir-md")
+	if err := os.MkdirAll(canvasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// index.md is itself a symlink pointing outside canvasRoot. The
+	// directory path ("escape-dir-md") is legitimate; only the file the
+	// index.md fallback synthesizes escapes -- mirrors the index.html
+	// symlink-escape regression test above for the index.md fallback path
+	// added alongside it.
+	if err := os.Symlink(secret, filepath.Join(canvasDir, "index.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := resolveServablePath(root, "escape-dir-md")
+	if err == nil {
+		t.Fatal("resolveServablePath(symlinked index.md) error = nil, want error (escape rejected)")
+	}
+	if !errors.Is(err, errOutsideRoot) {
+		t.Fatalf("resolveServablePath(symlinked index.md) error = %v, want errOutsideRoot", err)
+	}
+}
+
 func TestResolveServablePath(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "index.html"), "<html>root</html>")

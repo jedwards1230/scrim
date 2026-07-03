@@ -55,10 +55,12 @@ func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
 	case ext == ".html" || ext == ".htm":
 		s.serveHTML(w, r, id, target)
 		return
-	case viaIndex && (ext == ".md" || ext == ".markdown"):
+	case viaIndex && ext == ".md":
 		// Only the index.md-as-directory-index case renders markdown; a
 		// directly-requested notes.md falls through to raw static serving
-		// below, same as any other non-HTML file.
+		// below, same as any other non-HTML file. indexFileNames (see
+		// staticpath.go) only ever yields "index.html"/"index.md", never
+		// "index.markdown", so there's no ".markdown" case to handle here.
 		s.serveMarkdownIndex(w, r, id, target)
 		return
 	}
