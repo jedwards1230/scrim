@@ -106,6 +106,10 @@ scrim serve             Run the daemon in the foreground (containers/systemd;
                         not for normal use)
 ```
 
+> The `hub` (central-store server) and `push` (send a local canvas to a hub)
+> verbs also exist, but they're out of scope for agent use — hub operation is a
+> human/CI concern. Keep using the local `add`/`link` loop above.
+
 ## Daemon self-start behavior
 
 - **Self-starts the daemon if needed**: `add`, `list`, `link`, `open`.

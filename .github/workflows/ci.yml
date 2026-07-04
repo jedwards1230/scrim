@@ -31,7 +31,11 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+        # -coverpkg=./internal/... instruments every internal package across all
+        # test binaries, so the reported total reflects cross-package coverage
+        # (e.g. a cli test that exercises server code) honestly, not just each
+        # package's coverage of its own in-package tests.
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./internal/... ./...
 
       - name: Check coverage
         run: |

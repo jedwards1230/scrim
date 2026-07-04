@@ -27,7 +27,7 @@ Key packages under `internal/`:
 | `logging` | Sole sanctioned logging surface for `server`/`daemon`: category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog` |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `pushclient` | Client side of `scrim push`: packs a local canvas directory into an uncompressed tar archive, POSTs it to a hub's push endpoint, and (via `Watch`) debounced-re-pushes on local changes. Self-contained -- does not import `internal/server`, and is imported only by `cli`'s push verb. |
-| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
+| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
 
 Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
 advertisement) and Phase 4 (`open` launching a browser, version-skew

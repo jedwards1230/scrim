@@ -33,6 +33,19 @@ const (
 	maxPushBodyBytes = maxPushBytes + 8*1024*1024 // 50 MiB content + 8 MiB tar overhead
 )
 
+// renameStagedSwap performs the one failure-prone step of handlePush's swap
+// sequence: renaming the freshly staged canvas directory into place over the
+// (already moved-aside) previous one. It's a package-level seam -- os.Rename
+// in production -- solely so a test can force that rename to fail and exercise
+// the rollback path that restores the moved-aside canvas. That failure can't
+// be provoked portably through the filesystem alone: the aside-move and the
+// staged-swap renames operate within the same parent directory, so no
+// permission or path-collision setup fails the swap without also failing the
+// aside move that must succeed first. The rollback restore itself deliberately
+// stays on os.Rename (not this seam), so the rollback exercises the real
+// filesystem.
+var renameStagedSwap = os.Rename
+
 // errPushTooLarge is returned by extractTar when an archive exceeds
 // maxPushBytes or maxPushFiles.
 var errPushTooLarge = errors.New("push: archive exceeds the hub's size or file-count limit")
@@ -142,7 +155,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.Rename(staging, canvasDir); err != nil {
+	if err := renameStagedSwap(staging, canvasDir); err != nil {
 		// Roll back: put the previous canvas back where it was so this failed
 		// push leaves the canvas exactly as it found it rather than missing.
 		if aside != "" {
