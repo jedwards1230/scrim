@@ -21,12 +21,13 @@ Key packages under `internal/`:
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title, description, icon) stored externally under `config.Config.MetaDir()`, and deterministic default icon/color derivation from a canvas's ID |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
 | `daemon` | CLI-side lifecycle: health-check, self-start (with a spawn lock), stop, version-skew restart |
-| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, the card-gallery index page, `/api/*`, per-canvas favicon (agent-authored or generated from the canvas's icon), idle reaper, capability-token auth middleware (redirects a valid query token to a token-stripped URL), mDNS advertisement (opt-out via --no-mdns). Serve-time only (files on disk are never modified): an `index.md` directory-index is rendered via `goldmark`, and a bare HTML fragment (no `<!doctype`/`<html>`) is wrapped -- both in an embedded skeleton (`assets/skeleton.html`: CSS reset, `prefers-color-scheme` theming, viewport meta) before reload-script injection. A complete HTML document passes through unwrapped. |
+| `server` | The daemon itself: HTTP server, static canvas serving + SSE injection, per-canvas SSE, the card-gallery index page, `/api/*`, per-canvas favicon (agent-authored or generated from the canvas's icon), idle reaper, capability-token auth middleware (redirects a valid query token to a token-stripped URL), mDNS advertisement (opt-out via --no-mdns). Serve-time only (files on disk are never modified): an `index.md` directory-index is rendered via `goldmark`, and a bare HTML fragment (no `<!doctype`/`<html>`) is wrapped -- both in an embedded skeleton (`assets/skeleton.html`: CSS reset, `prefers-color-scheme` theming, viewport meta) before reload-script injection. A complete HTML document passes through unwrapped. Also implements **hub mode** (`NewHub`/`HubOptions`, `hubgate.go`, `handlers_push.go`): the same engine, plus `POST /api/push/<id>` (tar extraction into a staged-then-renamed canvas dir) and `withHubGate`, a method-based gate that replaces `withAuth` in hub mode only -- writes need a push-token bearer credential, reads need a CIDR-allowlist match plus an optional read token. `hub.go` itself (no relation to hub *mode*) is the unrelated SSE client tracker. |
 | `snapshot` | Canvas versioning: copy a canvas directory's current contents into a timestamped snapshot, list them, and revert a canvas back to one -- a pure filesystem operation against `config.Config.VersionsDir()`, independent of the daemon |
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
 | `logging` | Sole sanctioned logging surface for `server`/`daemon`: category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog` |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
-| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms) |
+| `pushclient` | Client side of `scrim push`: packs a local canvas directory into an uncompressed tar archive, POSTs it to a hub's push endpoint, and (via `Watch`) debounced-re-pushes on local changes. Self-contained -- does not import `internal/server`, and is imported only by `cli`'s push verb. |
+| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
 
 Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
 advertisement) and Phase 4 (`open` launching a browser, version-skew
@@ -52,6 +53,30 @@ serves canvases and pushes SSE reloads on file changes (`server`, via
   dependency without a real need.
 - **Single binary, self-starting daemon**: no separate install/systemd step —
   the first verb that needs the daemon starts it if it isn't running.
+
+### Hub (Phase 1)
+
+`scrim hub` is the same serving engine as `scrim serve`, run at its own data
+directory (`~/.scrim-hub` by default) and port (`7788`), with
+`server.HubOptions`/`withHubGate` replacing the default daemon's
+capability-token auth: writes (`POST /api/push/<id>` and friends) require a
+push-token bearer credential, reads require a CIDR-allowlist match
+(loopback-only by default) plus an optional read token. `scrim push <id>
+--to URL --token TOKEN` (backed by `internal/pushclient`) tars a local
+canvas and POSTs it to a hub, which extracts it into a staged temp dir
+(outside the servable canvases tree) and atomically swaps it into place --
+one clean filesystem event, one SSE reload, never a partial-serve. A
+`Dockerfile` at the repo root packages `scrim hub` as a container
+(`gcr.io/distroless/static-debian12:nonroot`, `/data` volume). This is
+Phase 1 (CLI + container image only) -- no Kubernetes manifests, Traefik
+routing, or release automation for the hub yet.
+
+**Hard invariant**: the default daemon path (`scrim add`/`serve`/...) gets
+zero new behavior, dependencies, or HTTP surface from hub mode --
+`server.New`'s `hubCfg` is always nil, the push route is only ever
+registered when `NewHub` was used, and `withAuth` (not `withHubGate`, and
+no CIDR check) still gates the default daemon exactly as before. Enforced
+by `internal/server/hub_test.go`.
 
 ## Conventions
 

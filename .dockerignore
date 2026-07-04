@@ -1,0 +1,11 @@
+.git
+worktrees/
+.e2e-*
+scrim
+*.exe
+dist/
+coverage.out
+.github
+.claude
+.claude-plugin
+plugins

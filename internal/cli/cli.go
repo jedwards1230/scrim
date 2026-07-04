@@ -1,9 +1,13 @@
 // Package cli implements scrim's verb parsing and dispatch: add, path, list,
-// link, open, rm, snap, snaps, revert, status, stop, and serve. Each verb is
-// a thin wrapper that either talks to a running daemon over its local HTTP
-// API (self-starting it first if needed) or, for path/rm's fallback/snap/
-// snaps/revert/status/stop, works directly against the filesystem/daemon
-// state.
+// link, open, rm, snap, snaps, revert, status, stop, serve, hub, and push.
+// Each verb is a thin wrapper that either talks to a running daemon over its
+// local HTTP API (self-starting it first if needed) or, for path/rm's
+// fallback/snap/snaps/revert/status/stop, works directly against the
+// filesystem/daemon state. hub and push are the two exceptions: hub runs
+// the same serving engine in a separate, network-reachable central-store
+// mode (see internal/server's hub mode), and push is a standalone client
+// that tars a local canvas and POSTs it to a hub -- neither self-starts or
+// talks to a local daemon at all.
 package cli
 
 import (
@@ -39,8 +43,16 @@ Verbs:
   status                  Show daemon status (does not self-start)
   stop                    Stop the daemon (does not self-start)
   serve                   Run the daemon in the foreground
+  hub                     Run a hub: the same serving engine at its own data
+                          dir + port, with a push/read-token + CIDR gate in
+                          place of the local daemon's auth (see "scrim hub
+                          --help"). Foreground only, like serve.
+  push <id> --to URL --token TOKEN [--watch]
+                          Tar a LOCAL canvas and POST it to a hub's push
+                          endpoint (see "scrim push --help"). Never
+                          self-starts or talks to a local daemon.
 
-Flags (all verbs):
+Flags (all verbs except hub/push, which have their own -- see their --help):
   --dir DIR              Directory for canvases + daemon state (env SCRIM_DIR, default ~/.scrim)
   --host HOST            Host the daemon binds to (env SCRIM_HOST, default 127.0.0.1)
   --port PORT            Port the daemon listens on (env SCRIM_PORT, default 7777)
@@ -89,6 +101,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdStop(rest, stdout, stderr)
 	case "serve":
 		return cmdServe(rest, stdout, stderr)
+	case "hub":
+		return cmdHub(rest, stdout, stderr)
+	case "push":
+		return cmdPush(rest, stdout, stderr)
 	case "--version", "-v", "version":
 		outln(stdout, "scrim", version.Info())
 		return 0

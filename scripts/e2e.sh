@@ -1049,6 +1049,106 @@ run_privacy_scenario() {
 run_privacy_scenario 1
 run_privacy_scenario 2
 
+# --- Scenario 22: hub central store -- push, curl-served canvas, wrong/
+# missing push token rejected on writes, CIDR-denied hub returns 403 on
+# reads ---
+# Every hub instance here uses its own isolated --data dir under $WORKDIR
+# (so the existing cleanup() trap's daemon.json glob finds and kills it if
+# anything below fails) and a dedicated high port -- never the default
+# daemon's ~/.scrim or port 7777.
+log "Scenario 22: hub central store (push, curl-served canvas, push-token gate, CIDR gate)"
+HUB1_DATA="$WORKDIR/hub1-data"
+HUB1_PORT=19291
+HUB_PUSH_TOKEN="e2e-hub-push-token"
+DIR_PUSH_SRC="$WORKDIR/push-src"
+
+# A local canvas that will be pushed to the hub. It's never served from
+# here in this scenario -- `scrim push` reads it straight off disk -- so the
+# local daemon that `add` self-started is stopped again immediately.
+OUT_PUSH=$("$BIN" add hub-push-test --dir "$DIR_PUSH_SRC" --port 19292 --idle-timeout 5m --title "Hub Push Test" 2>&1)
+PUSH_SRC_CANVAS_DIR=$(echo "$OUT_PUSH" | sed -n '1p')
+echo '<html><body><h1>hub e2e content</h1></body></html>' >"$PUSH_SRC_CANVAS_DIR/index.html"
+"$BIN" stop --dir "$DIR_PUSH_SRC" >/dev/null 2>&1 || true
+
+"$BIN" hub --data "$HUB1_DATA" --port "$HUB1_PORT" --push-token "$HUB_PUSH_TOKEN" --allow 127.0.0.0/8 >"$WORKDIR/hub1.log" 2>&1 &
+HUB1_PID=$!
+if wait_for_file "$HUB1_DATA/daemon.json" 10; then
+  ok "hub scenario: hub 1 started"
+else
+  bad "hub scenario: hub 1 started"
+fi
+
+PUSH_OUT=$("$BIN" push hub-push-test --to "http://127.0.0.1:$HUB1_PORT" --token "$HUB_PUSH_TOKEN" --dir "$DIR_PUSH_SRC" 2>&1)
+if echo "$PUSH_OUT" | grep -q "^http://127.0.0.1:$HUB1_PORT/c/hub-push-test/"; then
+  ok "hub scenario: push reports the hub canvas URL"
+else
+  bad "hub scenario: push reports the hub canvas URL (got: $PUSH_OUT)"
+fi
+
+HUB_BODY=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/c/hub-push-test/" || true)
+if echo "$HUB_BODY" | grep -q "hub e2e content"; then
+  ok "hub scenario: hub serves the pushed canvas HTML"
+else
+  bad "hub scenario: hub serves the pushed canvas HTML"
+fi
+if echo "$HUB_BODY" | grep -q "__events" && echo "$HUB_BODY" | grep -q "<script>"; then
+  ok "hub scenario: hub-served canvas has the injected SSE reload script"
+else
+  bad "hub scenario: hub-served canvas has the injected SSE reload script"
+fi
+
+# A write (push) with no bearer token at all -> 401.
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$HUB1_PORT/api/push/hub-push-test" --data-binary "")
+if [ "$STATUS" = "401" ]; then
+  ok "hub scenario: push with no bearer token gets 401"
+else
+  bad "hub scenario: push with no bearer token gets 401 (got $STATUS)"
+fi
+# A write (push) with the wrong bearer token -> 401.
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer wrong-token" "http://127.0.0.1:$HUB1_PORT/api/push/hub-push-test" --data-binary "")
+if [ "$STATUS" = "401" ]; then
+  ok "hub scenario: push with wrong bearer token gets 401"
+else
+  bad "hub scenario: push with wrong bearer token gets 401 (got $STATUS)"
+fi
+
+# A second hub, with a CIDR allowlist that deliberately excludes loopback --
+# a 127.0.0.1 read against it must be refused (403), not merely
+# unauthenticated (401).
+HUB2_DATA="$WORKDIR/hub2-data"
+HUB2_PORT=19391
+"$BIN" hub --data "$HUB2_DATA" --port "$HUB2_PORT" --push-token "e2e-hub2-push-token" --allow 10.0.0.0/8 >"$WORKDIR/hub2.log" 2>&1 &
+HUB2_PID=$!
+if wait_for_file "$HUB2_DATA/daemon.json" 10; then
+  ok "hub scenario: hub 2 (10.0.0.0/8-only allowlist) started"
+else
+  bad "hub scenario: hub 2 (10.0.0.0/8-only allowlist) started"
+fi
+
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HUB2_PORT/")
+if [ "$STATUS" = "403" ]; then
+  ok "hub scenario: a 127.0.0.1 read against a 10.0.0.0/8-only allowlist gets 403"
+else
+  bad "hub scenario: a 127.0.0.1 read against a 10.0.0.0/8-only allowlist gets 403 (got $STATUS)"
+fi
+
+# Stop both hubs. A hub's own /api/stop is gated behind the push token as a
+# write (not exposed via `scrim stop`'s query-token apiclient call), so it's
+# stopped the way a container runtime/systemd actually would: a signal to
+# the process, same as Scenario 14's SIGTERM-to-the-daemon path.
+kill -TERM "$HUB1_PID" 2>/dev/null || true
+kill -TERM "$HUB2_PID" 2>/dev/null || true
+if wait_for_file_gone "$HUB1_DATA/daemon.json" 5; then
+  ok "hub scenario: hub 1 stopped cleanly on SIGTERM"
+else
+  bad "hub scenario: hub 1 stopped cleanly on SIGTERM"
+fi
+if wait_for_file_gone "$HUB2_DATA/daemon.json" 5; then
+  ok "hub scenario: hub 2 stopped cleanly on SIGTERM"
+else
+  bad "hub scenario: hub 2 stopped cleanly on SIGTERM"
+fi
+
 # --- Summary ---
 log "Summary"
 echo "passed: $PASS"

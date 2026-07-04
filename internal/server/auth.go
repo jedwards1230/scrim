@@ -52,38 +52,52 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if queryToken := r.URL.Query().Get(tokenQueryParam); queryToken != "" {
-			// A present-but-wrong "?t=" is a hard 401, even if the request
-			// also carries a valid session cookie from an earlier hit: an
-			// explicit bad token in the query string is deliberately not
-			// silently ignored in favor of falling back to cookie auth.
-			if !constantTimeEqual(queryToken, s.token) {
-				http.Error(w, "unauthorized: invalid token", http.StatusUnauthorized)
-				return
-			}
-			http.SetCookie(w, &http.Cookie{
-				Name:     authCookieName,
-				Value:    s.token,
-				Path:     "/",
-				MaxAge:   int(authCookieMaxAge.Seconds()),
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-			})
-			if strings.HasPrefix(r.URL.Path, apiRoutePrefix) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			http.Redirect(w, r, urlWithoutToken(r.URL), http.StatusFound)
+		checkToken(w, r, next, s.token)
+	})
+}
+
+// checkToken implements the capability-token check shared by withAuth (the
+// default daemon's own token) and withHubGate's read gate (the hub's
+// separate, optional read token, see hubgate.go): a valid "?t=" hit against
+// a browser-facing route sets the cookie and redirects to a token-stripped
+// URL (see withAuth's doc comment for the full rationale); an "?api/*" hit
+// serves directly instead, since a redirect would silently turn a
+// POST/DELETE into a GET; a valid cookie with no query token serves
+// directly; anything else is a 401. It's factored out purely so both
+// callers reuse this exact battle-tested logic against a different expected
+// token, not because the two auth models are otherwise related.
+func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expectedToken string) {
+	if queryToken := r.URL.Query().Get(tokenQueryParam); queryToken != "" {
+		// A present-but-wrong "?t=" is a hard 401, even if the request also
+		// carries a valid session cookie from an earlier hit: an explicit
+		// bad token in the query string is deliberately not silently
+		// ignored in favor of falling back to cookie auth.
+		if !constantTimeEqual(queryToken, expectedToken) {
+			http.Error(w, "unauthorized: invalid token", http.StatusUnauthorized)
 			return
 		}
-
-		if cookie, err := r.Cookie(authCookieName); err == nil && constantTimeEqual(cookie.Value, s.token) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     authCookieName,
+			Value:    expectedToken,
+			Path:     "/",
+			MaxAge:   int(authCookieMaxAge.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		if strings.HasPrefix(r.URL.Path, apiRoutePrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}
+		http.Redirect(w, r, urlWithoutToken(r.URL), http.StatusFound)
+		return
+	}
 
-		http.Error(w, "unauthorized: missing or invalid token", http.StatusUnauthorized)
-	})
+	if cookie, err := r.Cookie(authCookieName); err == nil && constantTimeEqual(cookie.Value, expectedToken) {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	http.Error(w, "unauthorized: missing or invalid token", http.StatusUnauthorized)
 }
 
 // urlWithoutToken returns the path (and any other query parameters) of u,

@@ -37,6 +37,13 @@ type Server struct {
 
 	port  int    // actual bound port, set once in Run before any handler starts
 	token string // capability token; empty when cfg.NoAuth is set, set once in Run
+
+	// hubCfg is non-nil only for a server constructed via NewHub: it carries
+	// the push/read tokens and the parsed read-CIDR allowlist that
+	// distinguish hub mode (see routes.go and hubgate.go). It is nil for the
+	// default daemon (server.New), which is what routes() and withHubGate's
+	// callers use as the hub-mode discriminator instead of a separate bool.
+	hubCfg *hubConfig
 }
 
 // New returns a Server configured from cfg. Call Run to start it.
@@ -52,6 +59,9 @@ func New(cfg config.Config) *Server {
 		port:        cfg.Port,
 	}
 }
+
+// isHub reports whether this Server was constructed via NewHub.
+func (s *Server) isHub() bool { return s.hubCfg != nil }
 
 // Run starts the HTTP server, filesystem watcher, and idle reaper, and
 // blocks until the daemon is asked to stop: via ctx being canceled (e.g. a

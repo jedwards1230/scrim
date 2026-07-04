@@ -35,6 +35,11 @@ scrim revert <id> [<snap>]    # Restore a canvas from a snapshot (latest by defa
 scrim status                  # Show daemon status
 scrim stop                    # Stop the daemon
 scrim serve                   # Run the daemon in the foreground
+
+scrim hub --push-token TOKEN [--data DIR] [--host HOST] [--port PORT] [--allow CIDR,...]
+                               # Run a hub: a shared, network-reachable central store
+scrim push <id> --to URL --token TOKEN [--watch]
+                               # Tar a LOCAL canvas and push it to a hub
 ```
 
 `link` is the recommended everyday verb for getting a canvas's URL --
@@ -143,6 +148,58 @@ printed first — not the plain `ip:port` fallback — so it still works when
 the daemon is bound to an unaddressable host like `0.0.0.0`. If the launch
 is requested but fails (e.g. no browser installed, headless environment),
 `open` prints a one-line notice on stderr and still exits `0`.
+
+## Hub: a shared central store
+
+`scrim hub` runs the exact same serving engine as `scrim serve`, but at its
+own data directory and port, with a push/read-token + CIDR gate in place of
+the local daemon's capability-token auth. It serves its own durable storage
+at its own root (`/c/<id>/`), so every URL it produces (SSE, favicon,
+redirects, relative paths) is correct with zero rewriting -- clients `push`
+canvases to it rather than the hub reading from a remote filesystem.
+
+```bash
+scrim hub --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
+```
+
+- `--data DIR` (env `SCRIM_HUB_DATA`, default `~/.scrim-hub`) -- deliberately
+  separate from the local daemon's `~/.scrim`, so both can run on one box.
+- `--host` defaults to `0.0.0.0` -- a hub binds beyond loopback by design;
+  the CIDR allowlist below is the read security, not the bind address.
+- `--port` (env `SCRIM_PORT`) defaults to `7788` -- distinct from the local
+  daemon's `7777`.
+- `--push-token TOKEN` (env `SCRIM_PUSH_TOKEN`) is **required**: a hub fails
+  closed (refuses to start) with no push token, rather than ever running a
+  write-accepting server with no write gate.
+- `--read-token TOKEN` (env `SCRIM_READ_TOKEN`) is optional, and additionally
+  gates reads once the CIDR check below passes.
+- `--allow CIDR[,CIDR...]` (env `SCRIM_HUB_ALLOW`) is the read allowlist,
+  checked against the client's `RemoteAddr` (never `X-Forwarded-For` --
+  that's trivially spoofable; a trusted-proxy layer is a later phase).
+  Defaults to loopback-only (`127.0.0.0/8,::1/128`) when unset.
+- Writes (`POST /api/push/<id>`, and any other non-GET/HEAD `/api/*` call)
+  are gated by the push token as a standard bearer credential
+  (`Authorization: Bearer <token>`) -- not by the CIDR allowlist, since a
+  legitimate push client is commonly outside the read allowlist entirely
+  (e.g. a laptop pushing to a homelab hub it isn't itself permitted to
+  browse from).
+- The hub is long-lived by default (`--idle-timeout` defaults to disabled)
+  and doesn't advertise over mDNS by default (`--no-mdns` defaults to true).
+
+`scrim push <id> --to URL --token TOKEN [--watch]` tars a **local** canvas
+directory (read straight off disk via `--dir`/`SCRIM_DIR` -- it never talks
+to a local daemon) and POSTs it to a hub's push endpoint, printing the
+hub's canvas URL on success. `--watch` re-pushes on every local change
+(200ms debounce) until interrupted. `push` never launches a browser.
+
+A container image is also provided (`Dockerfile`) that runs `scrim hub` as
+its entrypoint against a `/data` volume:
+
+```bash
+docker build -t scrim-hub .
+docker run -p 7788:7788 -v scrim-hub-data:/data scrim-hub \
+  --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
+```
 
 ## Version-skew restart
 
