@@ -6,11 +6,14 @@
 # default). When a release is warranted it delegates version compute, tag
 # creation, and AI release notes to the shared
 # jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1, then
-# cross-builds the Go binaries (5 platforms) and publishes the GitHub Release.
+# cross-builds the Go binaries (5 platforms), builds and pushes a multi-arch
+# container image to GHCR, and publishes the GitHub Release.
 #
-# The git tag is the single source of truth: the build job checks out the TAGGED
-# commit and stamps the computed version into the binaries via -ldflags
-# (internal/version) — no file edit, nothing pushed back to main.
+# The git tag is the single source of truth: the build/image jobs check out the
+# TAGGED commit and stamp the computed version into the binaries (via -ldflags)
+# and the image (via Docker build-args) — no file edit, nothing pushed back to
+# main. The image job runs in parallel with build (it needs only detect +
+# prepare), so a slow image push never blocks the GitHub Release.
 name: Release
 
 run-name: >-
@@ -143,7 +146,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -172,11 +175,101 @@ jobs:
           ls -lh dist/
 
       - name: Upload binary artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: scrim-binaries
           path: dist/*
           if-no-files-found: error
+
+  image:
+    name: Build & push container image
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Scoped to this job (not the workflow) — the repo's default GITHUB_TOKEN
+      # is read-only, so pushing to GHCR needs packages:write here. contents:read
+      # is enough to check out the tagged source for the image build.
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Compute build metadata
+        id: buildmeta
+        run: |
+          set -euo pipefail
+          {
+            echo "commit=$(git rev-parse --short HEAD)"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/jedwards1230/scrim
+          # This job runs on push:main, so github.ref is a branch, not the tag —
+          # feed metadata-action the computed release tag explicitly so it can
+          # derive the semver labels (X.Y.Z, X.Y) from it.
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=latest
+          # org.opencontainers.image.source links the GHCR package to the repo
+          # (Packages UI + provenance). metadata-action would derive it anyway,
+          # but pin it explicitly so the link never depends on autodetection.
+          labels: |
+            org.opencontainers.image.source=https://github.com/jedwards1230/scrim
+            org.opencontainers.image.title=scrim
+            org.opencontainers.image.description=scrim hub — a shared canvas host that serves agent-authored HTML with SSE live-reload
+
+      - name: Build & push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            COMMIT=${{ steps.buildmeta.outputs.commit }}
+            DATE=${{ steps.buildmeta.outputs.date }}
+          # No provenance/SBOM attestations: they add an extra "unknown/unknown"
+          # manifest entry to the multi-arch index that clutters the GHCR
+          # package listing without value for this internal image.
+          provenance: false
+
+      - name: Write workflow summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "## Container image"
+            echo ""
+            echo "Pushed \`ghcr.io/jedwards1230/scrim\` (linux/amd64, linux/arm64):"
+            echo ""
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
     name: Create GitHub Release
@@ -187,7 +280,7 @@ jobs:
       contents: write
     steps:
       - name: Download binary artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: scrim-binaries
           path: dist
@@ -202,7 +295,7 @@ jobs:
           echo "$BODY_B64" | base64 -d > /tmp/release_body.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Release ${{ needs.prepare.outputs.version }}

@@ -1,7 +1,8 @@
 # .github/dependabot.yml — Dependabot version updates
 #
 # Opt-in, per-repo. Only the ecosystems this repo actually has manifests for:
-# Go modules (go.mod) and GitHub Actions (.github/workflows/*.yml).
+# Go modules (go.mod), GitHub Actions (.github/workflows/*.yml), and the
+# hub-image Dockerfile at the repo root (base-image bumps).
 version: 2
 updates:
   # --- CI actions ---
@@ -30,4 +31,18 @@ updates:
       prefix: "deps(gomod)"
     groups:
       go:
+        patterns: ["*"]
+
+  # --- Docker (hub image base) ---
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      docker:
         patterns: ["*"]
