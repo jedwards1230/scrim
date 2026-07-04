@@ -1,6 +1,6 @@
 {
   "name": "scrim",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Live HTML/CSS/JS projection surface for showing the user something visual -- write plain files into a scrim canvas and a self-starting daemon serves them with instant live-reload, a card gallery, and snapshots",
   "author": {
     "name": "jedwards1230"

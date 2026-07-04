@@ -60,6 +60,8 @@ Flags (all verbs except hub/push, which have their own -- see their --help):
                          0 or negative disables idle exit entirely (the daemon
                          only stops via "scrim stop" or a signal)
   --no-auth              Disable the local auth token (env SCRIM_NO_AUTH)
+  --no-mdns              Don't advertise the daemon over mDNS, even when --host
+                         binds beyond loopback (env SCRIM_NO_MDNS)
 
   -h, --help             Show this help
   -v, --version          Show version

@@ -33,6 +33,9 @@ the browser reloads itself → always surface the canvas URL back to the user
 via `link` (never `open`, which is reserved for the human's own explicit
 browser-launch opt-in).
 
+The `hub` and `push` verbs (central-store server + canvas upload) also exist
+but are out of scope for agent use — hub operation is a human/CI concern.
+
 It also covers:
 
 - The card-gallery dashboard and per-canvas metadata (`--title`/`--desc`/`--icon`).
