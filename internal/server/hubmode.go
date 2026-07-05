@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/logging"
+	"github.com/jedwards1230/scrim/internal/oidc"
 )
 
 // HubOptions configures a Server constructed via NewHub -- the hub-specific
@@ -24,8 +27,18 @@ type HubOptions struct {
 	ReadToken string
 	// AllowCIDRs is the read allowlist, as a slice of CIDR strings (e.g.
 	// "127.0.0.0/8"). Every entry must parse; a malformed one is a hard
-	// startup error.
+	// startup error. When OIDC is configured, it is not consulted for reads --
+	// see OIDC below.
 	AllowCIDRs []string
+	// OIDC, when non-nil, turns on native OIDC login for hub READS: reads then
+	// require a valid OIDC session cookie (redirect-to-login for browsers, 401
+	// otherwise) instead of the CIDR/read-token check, and the /auth/* login
+	// routes are registered. Nil (the default) leaves the hub exactly as it
+	// was -- CIDR-allowlisted reads. NewHub performs OIDC discovery here and
+	// FAILS CLOSED if it errors, so a hub either enforces OIDC fully or does
+	// not advertise it at all. Writes (the push token) are unaffected either
+	// way.
+	OIDC *oidc.Config
 }
 
 // hubConfig is HubOptions after validation: PushToken/ReadToken carried
@@ -93,6 +106,30 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		pushToken:   opts.PushToken,
 		readToken:   opts.ReadToken,
 		allowedNets: nets,
+	}
+
+	// OIDC discovery happens here so NewHub fails closed: a hub with OIDC
+	// configured but an unreachable/misconfigured issuer refuses to start
+	// rather than silently falling back to the CIDR gate. The discovery call
+	// is bounded internally (see oidc.New); context.Background is fine as its
+	// parent -- this is one-shot startup work with no request lifetime to tie
+	// it to.
+	if opts.OIDC != nil {
+		oc := *opts.OIDC
+		// Wire coarse auth-failure logging to the daemon's scrubbed logging
+		// surface here (rather than in the CLI) so the server package owns its
+		// own logging. The reasons oidc passes are static, PII-free strings;
+		// CategoryAuth keeps them greppable.
+		if oc.LogAuthFailure == nil {
+			oc.LogAuthFailure = func(reason string) {
+				logging.Error(logging.CategoryAuth, errors.New(reason))
+			}
+		}
+		auth, err := oidc.New(context.Background(), oc)
+		if err != nil {
+			return nil, err
+		}
+		s.oidcAuth = auth
 	}
 	return s, nil
 }
