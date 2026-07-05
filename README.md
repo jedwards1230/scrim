@@ -186,24 +186,48 @@ is requested but fails (e.g. no browser installed, headless environment),
 
 `scrim mcp` exposes scrim's verbs as [MCP](https://modelcontextprotocol.io)
 tools, so an agent drives scrim natively instead of shelling out. Tools:
-`add`, `list`, `link`, `path`, `rm`, `snap`, `snaps`, `revert`, `status`,
-`push`. Each is the same code path as the matching verb — so the same safety
-invariants hold: `link` returns a URL as data and **never** launches a
-browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot (no
-`--watch`).
+`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
+`read_file`, `write_file`, `push` (plus `path` in local mode only — a
+server-local directory has no remote meaning). Each maps to the same code
+path as the matching verb, so the same
+safety invariants hold: `link` returns a URL as data and **never** launches a
+browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot.
 
-Transport is stdio by default (the usual way an MCP client launches it):
+Transport is stdio by default; pass `--http ADDR` for streamable HTTP. The
+HTTP endpoint is unauthenticated for now (remote auth tracked in
+[#33](https://github.com/jedwards1230/scrim/issues/33)), so it fails closed:
+a non-loopback bind is refused unless you pass `--allow-lan`.
+`scrim mcp --http 127.0.0.1:9797` is the safe default.
 
 ```jsonc
-// e.g. an MCP client config
+// e.g. an MCP client config — local mode
 { "command": "scrim", "args": ["mcp"] }
 ```
 
-Pass `--http ADDR` for streamable HTTP (unlocks remote clients). It fails
-closed: the HTTP endpoint is unauthenticated for now (remote auth is tracked
-in [#33](https://github.com/jedwards1230/scrim/issues/33)), so a non-loopback
-bind is refused unless you pass `--allow-lan`. `scrim mcp --http 127.0.0.1:9797`
-is the safe default; `--http :9797` (all interfaces) needs `--allow-lan`.
+### Local vs hub mode
+
+- **Local mode** (default): tools operate on the local daemon and the local
+  canvas directory on disk. `add`/`path` return server-local filesystem
+  paths, and `write_file`/`read_file` act on that directory — the right model
+  when the agent and scrim share a machine.
+- **Hub mode** (`--hub URL`): the same tool surface operates on a **remote**
+  hub over its bearer-authenticated machine API — for a scrim mcp hosted away
+  from the agent (e.g. in-cluster). Since there's no shared disk, authoring is
+  done entirely through `write_file`/`read_file` (inline content, ~2 MiB cap);
+  `path` is absent (a server-local path is meaningless remotely). The push
+  token authenticates every call — from `SCRIM_PUSH_TOKEN` or
+  `--hub-token-file PATH`; `scrim mcp --hub` fails closed with no token.
+
+```jsonc
+// hub mode — SCRIM_PUSH_TOKEN in the environment
+{ "command": "scrim", "args": ["mcp", "--hub", "https://scrim-hub.example"] }
+```
+
+The tradeoff is disk vs token: local mode trusts the shared filesystem; hub
+mode trusts the bearer token and moves bytes over HTTP. The hub's machine API
+(canvas list/add/rm/status, per-file GET/PUT, snapshot create/list/revert) is
+gated by the push token on **every** call, reads included — separate from the
+browser read gate (CIDR/read-token).
 
 ## Hub: a shared central store
 
@@ -233,12 +257,17 @@ scrim hub --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
   checked against the client's `RemoteAddr` (never `X-Forwarded-For` --
   that's trivially spoofable; a trusted-proxy layer is a later phase).
   Defaults to loopback-only (`127.0.0.0/8,::1/128`) when unset.
-- Writes (`POST /api/push/<id>`, and any other non-GET/HEAD `/api/*` call)
-  are gated by the push token as a standard bearer credential
-  (`Authorization: Bearer <token>`) -- not by the CIDR allowlist, since a
-  legitimate push client is commonly outside the read allowlist entirely
-  (e.g. a laptop pushing to a homelab hub it isn't itself permitted to
-  browse from).
+- The push token is a standard bearer credential (`Authorization: Bearer
+  <token>`) and is **not** subject to the CIDR allowlist, since a legitimate
+  machine client is commonly outside the read allowlist entirely (e.g. a
+  laptop or in-cluster MCP server pushing to a homelab hub it isn't itself
+  permitted to browse from).
+- **The push token is now read+write, not write-only.** It authenticates the
+  whole machine API (`scrim mcp --hub`): a holder can read canvas content and
+  file bytes (`GET /api/canvases/{id}/files/...`), list, and snapshot — not
+  just push. Size its trust accordingly when you distribute it (e.g. to an
+  in-cluster MCP deployment) and rotate it as a read-capable secret. Browser
+  reads remain separately gated by the CIDR allowlist (+ optional read token).
 - The hub is long-lived by default (`--idle-timeout` defaults to disabled)
   and doesn't advertise over mDNS by default (`--no-mdns` defaults to true).
 

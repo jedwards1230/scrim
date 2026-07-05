@@ -53,8 +53,8 @@ func IsLoopbackAddr(addr string) bool {
 // exposing it as a streamable-HTTP MCP endpoint at /mcp plus a GET /healthz
 // liveness probe. It reuses NewServer, so the tool set (and thus behaviour) is
 // identical to the stdio transport.
-func newHTTPHandler(cfg config.Config, ver string) http.Handler {
-	srv := NewServer(cfg, ver)
+func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget) http.Handler {
+	srv := NewServer(cfg, ver, hub)
 	mux := http.NewServeMux()
 	mux.Handle(mcpPath, mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
@@ -102,8 +102,8 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 // This transport is UNAUTHENTICATED — OAuth for remote clients is tracked in
 // scrim#33. The caller (cli.cmdMcp) is responsible for gating a non-loopback
 // bind behind --allow-lan via IsLoopbackAddr before calling this.
-func ServeHTTP(ctx context.Context, addr string, cfg config.Config, ver string, stderr io.Writer) error {
-	httpSrv := newHTTPServer(addr, newHTTPHandler(cfg, ver))
+func ServeHTTP(ctx context.Context, addr string, cfg config.Config, ver string, hub *HubTarget, stderr io.Writer) error {
+	httpSrv := newHTTPServer(addr, newHTTPHandler(cfg, ver, hub))
 
 	// Bind synchronously up front so a bind failure (port in use, bad addr)
 	// is returned to the caller BEFORE the "serving on ..." banner prints —

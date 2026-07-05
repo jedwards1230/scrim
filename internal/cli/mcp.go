@@ -5,32 +5,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/jedwards1230/scrim/internal/mcpserver"
 	"github.com/jedwards1230/scrim/internal/version"
 )
 
-// cmdMcp implements `scrim mcp [--http ADDR] [--allow-lan]`. It runs an MCP
-// server exposing scrim's verbs as tools, driving the same primitives the CLI
-// verbs do. The default transport is stdio (stdout is the MCP protocol
-// channel); --http switches to streamable HTTP.
+// hubTokenEnv is the environment variable the hub push token is read from when
+// --hub-token-file isn't given. It's the same token `scrim push` and the hub
+// itself use.
+const hubTokenEnv = "SCRIM_PUSH_TOKEN"
+
+// cmdMcp implements `scrim mcp [--http ADDR] [--allow-lan] [--hub URL]
+// [--hub-token-file PATH]`. It runs an MCP server exposing scrim's verbs as
+// tools. The default transport is stdio (stdout is the MCP protocol channel);
+// --http switches to streamable HTTP. The default mode is local (drive the
+// local daemon + on-disk canvases); --hub drives a remote hub's machine API
+// over HTTP instead. Transport (--http) and mode (--hub) are orthogonal — all
+// four combinations are valid.
 //
 // The HTTP transport is unauthenticated (remote auth is tracked in scrim#33),
 // so it binds loopback by default and refuses a non-loopback bind unless
-// --allow-lan explicitly opts in.
+// --allow-lan explicitly opts in. Hub mode requires a push token (from
+// SCRIM_PUSH_TOKEN or --hub-token-file) and fails closed without one.
 func cmdMcp(args []string, _, stderr io.Writer) int {
 	fs := newFlagSet("mcp", stderr)
 	cf := registerCommonFlags(fs)
 	httpAddr := fs.String("http", "", "serve streamable-HTTP MCP on this addr (e.g. 127.0.0.1:7799); default empty = stdio")
 	allowLAN := fs.Bool("allow-lan", false, "allow a non-loopback --http bind despite the endpoint being unauthenticated (remote auth tracked in scrim#33)")
+	hubURL := fs.String("hub", "", "drive a remote scrim hub's machine API over HTTP instead of the local daemon (e.g. https://scrim-hub.example); default empty = local mode")
+	hubTokenFile := fs.String("hub-token-file", "", "read the hub push token from this file (overrides SCRIM_PUSH_TOKEN); only meaningful with --hub")
 	if err := parseArgs(fs, args); err != nil {
 		return exitForParseErr(err)
 	}
 	if fs.NArg() != 0 {
-		return usageError(stderr, "usage: scrim mcp [--http ADDR] [--allow-lan]")
+		return usageError(stderr, "usage: scrim mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-token-file PATH]")
 	}
 
 	plan, err := planMcp(*httpAddr, *allowLAN)
@@ -41,6 +54,17 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 		outf(stderr, "scrim mcp: warning: --allow-lan has no effect without --http (stdio has no network bind to gate)\n")
 	}
 
+	hub, warnTokenFileNoHub, err := resolveHubTarget(*hubURL, *hubTokenFile, os.Getenv(hubTokenEnv))
+	if err != nil {
+		return usageError(stderr, "%s", err.Error())
+	}
+	if warnTokenFileNoHub {
+		outf(stderr, "scrim mcp: warning: --hub-token-file has no effect without --hub (local mode uses no hub token)\n")
+	}
+	if hub != nil && hubBearerInsecure(hub.BaseURL) {
+		outf(stderr, "scrim mcp: warning: --hub uses plain http to a non-loopback host — the push token is sent unencrypted; prefer https\n")
+	}
+
 	cfg := cf.toConfig()
 
 	// A signal-cancellable context so Ctrl-C (SIGINT) or SIGTERM stops the
@@ -49,9 +73,56 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 	defer cancel()
 
 	if plan.http {
-		return serveResult(mcpserver.ServeHTTP(ctx, *httpAddr, cfg, version.Short(), stderr), stderr)
+		return serveResult(mcpserver.ServeHTTP(ctx, *httpAddr, cfg, version.Short(), hub, stderr), stderr)
 	}
-	return serveResult(mcpserver.Serve(ctx, cfg, version.Short(), stderr), stderr)
+	return serveResult(mcpserver.Serve(ctx, cfg, version.Short(), hub, stderr), stderr)
+}
+
+// resolveHubTarget derives the hub-mode selection from the --hub URL, the
+// --hub-token-file path, and the ambient SCRIM_PUSH_TOKEN value. It returns:
+//   - a nil target for local mode (no --hub), plus warnTokenFileNoHub=true when
+//     --hub-token-file was pointlessly given without --hub (a no-op worth a
+//     warning, not a hard error — mirroring --allow-lan-without-http);
+//   - a populated target for hub mode, with the token resolved from the file
+//     (which overrides the env) or else the env;
+//   - a fail-closed error when --hub is set but no token resolves.
+//
+// The only I/O is reading --hub-token-file when set, so tests exercise every
+// branch with a temp file (or none).
+func resolveHubTarget(hubURL, tokenFile, envToken string) (*mcpserver.HubTarget, bool, error) {
+	if hubURL == "" {
+		return nil, tokenFile != "", nil
+	}
+
+	token := strings.TrimSpace(envToken)
+	if tokenFile != "" {
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading --hub-token-file: %w", err)
+		}
+		token = strings.TrimSpace(string(data))
+	}
+	if token == "" {
+		return nil, false, fmt.Errorf(
+			"scrim mcp --hub requires a push token, but none was found "+
+				"(set %s or pass --hub-token-file PATH); refusing to start hub mode without one", hubTokenEnv)
+	}
+	return &mcpserver.HubTarget{BaseURL: hubURL, Token: token}, false, nil
+}
+
+// hubBearerInsecure reports whether the hub base URL would send the bearer
+// token in cleartext to a non-loopback host (plain http off-machine). Loopback
+// http is fine — it never leaves the host.
+func hubBearerInsecure(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "http" {
+		return false // https (or unparseable, which fails later anyway)
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return false
+	}
+	return true
 }
 
 // mcpPlan is the decision planMcp derives from the mcp verb's transport flags,

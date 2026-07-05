@@ -1,8 +1,18 @@
 // Package mcpserver exposes scrim's CLI surface as MCP tools over stdio
-// (default) or streamable-HTTP. Every tool drives the SAME reusable primitives
-// the matching CLI verb calls (config/daemon/apiclient/canvas/snapshot/
-// pushclient), so behaviour — and the safety invariants below — are identical
-// from both faces.
+// (default) or streamable-HTTP, in either of two modes:
+//
+//   - LOCAL mode (default): tools drive the local scrim daemon and on-disk
+//     canvas directory via the SAME primitives the matching CLI verb calls
+//     (config/daemon/apiclient/canvas/snapshot/pushclient).
+//   - HUB mode (`scrim mcp --hub URL`): tools drive a remote hub's
+//     bearer-authenticated machine API over HTTP (internal/server's hub mode),
+//     so a remotely-hosted scrim mcp can author canvas content over the wire
+//     with no shared disk.
+//
+// The two modes are unified behind the unexported backend interface; the tool
+// handlers are transport-agnostic. The tool surface is self-describing per
+// mode: read_file/write_file (inline content) exist in both, `path` (a
+// server-local directory lookup) is local-only.
 //
 // Invariants this package upholds:
 //   - On the stdio transport stdout is the MCP protocol channel: nothing here
@@ -11,15 +21,15 @@
 //   - No tool ever launches a browser or execs open/xdg-open. The `link` tool
 //     returns URLs as DATA; it is the print-only sibling of `scrim link`, and
 //     this package deliberately does not import internal/openurl.
-//   - Canvas URLs, canvas content, and capability tokens are never logged.
+//   - Canvas URLs, canvas content, and capability/push tokens are never logged.
 package mcpserver
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"time"
+	"unicode/utf8"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -28,16 +38,26 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/daemon"
 	"github.com/jedwards1230/scrim/internal/pushclient"
-	"github.com/jedwards1230/scrim/internal/snapshot"
 	"github.com/jedwards1230/scrim/internal/state"
 )
 
-// server holds the resolved config every tool handler needs to target (or
-// self-start) the right daemon and compute on-disk paths, plus the scrim
-// version reported in the MCP implementation handshake.
+// HubTarget selects hub mode for a scrim MCP server: the remote hub's
+// externally-reachable base URL and its push token (the machine-API bearer
+// credential). A nil *HubTarget selects local mode.
+type HubTarget struct {
+	BaseURL string
+	Token   string
+}
+
+// server holds the backend every tool handler delegates to, the resolved
+// config that path (local-only) and push (both modes, reads local disk) need, the scrim version
+// reported in the MCP handshake, and whether this is a local-mode server (which
+// tools are registered depends on it).
 type server struct {
-	cfg config.Config
-	ver string
+	backend backend
+	cfg     config.Config
+	ver     string
+	local   bool
 }
 
 // resolveDaemon returns an apiclient plus the daemon state for cfg. When
@@ -48,8 +68,7 @@ type server struct {
 //
 // It is a package-level variable purely so tests can override it with an
 // httptest-backed client + synthetic state, exercising the daemon-backed
-// handlers (add/list/link/status/rm) without spawning a real detached daemon
-// process. This mirrors cli.launchBrowser's test seam idiom.
+// localBackend methods without spawning a real detached daemon process.
 var resolveDaemon = func(cfg config.Config, selfStart bool) (client *apiclient.Client, st *state.State, running bool, err error) {
 	if selfStart {
 		st, err = daemon.Ensure(cfg)
@@ -67,55 +86,85 @@ var resolveDaemon = func(cfg config.Config, selfStart bool) (client *apiclient.C
 	return client, st, true, nil
 }
 
-// NewServer builds the MCP server registering all 10 scrim tools against cfg.
-// A blank ver is reported as "dev" in the implementation handshake.
-func NewServer(cfg config.Config, ver string) *mcp.Server {
+// NewServer builds the scrim MCP server for cfg. hub selects the backend: nil
+// = local mode (localBackend), non-nil = hub mode (hubBackend). A blank ver is
+// reported as "dev" in the implementation handshake.
+func NewServer(cfg config.Config, ver string, hub *HubTarget) *mcp.Server {
 	if ver == "" {
 		ver = "dev"
 	}
-	s := &server{cfg: cfg, ver: ver}
+	if hub != nil {
+		return newServer(newHubBackend(hub.BaseURL, hub.Token), cfg, ver, false)
+	}
+	return newServer(newLocalBackend(cfg), cfg, ver, true)
+}
+
+// newServer registers the tool set against b. local decides whether the
+// local-only `path` tool is registered: in hub mode a server-local path is
+// meaningless to a remote client, so the tool is simply absent and the surface
+// is self-describing.
+func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server {
+	s := &server{backend: b, cfg: cfg, ver: ver, local: local}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "scrim", Version: ver}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add",
-		Description: "Register a canvas (self-starts the scrim daemon). Returns its on-disk directory and view URL.",
+		Description: "Register a canvas. Returns its view URL. In local mode self-starts the scrim daemon; in hub mode creates it on the remote hub.",
 	}, s.handleAdd)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list",
-		Description: "List registered canvases (self-starts the scrim daemon).",
+		Description: "List registered canvases.",
 	}, s.handleList)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "link",
-		Description: "Return the view URL for a canvas, or the dashboard URL when no id is given (self-starts the scrim daemon). URLs are returned as data — this never launches a browser.",
+		Description: "Return the view URL for a canvas, or the dashboard URL when no id is given. URLs are returned as data — this never launches a browser.",
 	}, s.handleLink)
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "path",
-		Description: "Return the on-disk directory for a canvas. Pure filesystem lookup — does not talk to or start the daemon.",
-	}, s.handlePath)
-	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "rm",
-		Description: "Remove a canvas (via the daemon when one is running, otherwise directly on disk).",
+		Description: "Remove a canvas.",
 	}, s.handleRm)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "snap",
-		Description: "Snapshot a canvas's current contents. Pure filesystem operation — does not start the daemon.",
+		Description: "Snapshot a canvas's current contents.",
 	}, s.handleSnap)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "snaps",
-		Description: "List a canvas's snapshots, newest first. Pure filesystem read — does not start the daemon.",
+		Description: "List a canvas's snapshots, newest first.",
 	}, s.handleSnaps)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "revert",
-		Description: "Restore a canvas from a snapshot (latest by default), taking a safety snapshot of the current contents first. Pure filesystem operation — does not start the daemon.",
+		Description: "Restore a canvas from a snapshot (latest by default), taking a safety snapshot of the current contents first.",
 	}, s.handleRevert)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "status",
-		Description: "Report scrim daemon status. Does not self-start; returns running=false when no daemon is healthy.",
+		Description: "Report scrim daemon/hub status.",
 	}, s.handleStatus)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "read_file",
+		Description: "Read one file from a canvas and return its text content inline. The file must be UTF-8 text and at most ~2 MiB.",
+	}, s.handleReadFile)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "write_file",
+		Description: "Write one file into an existing canvas from inline text content (create the canvas first with add). Content is capped at ~2 MiB.",
+	}, s.handleWriteFile)
+
+	// push is local-only whole-canvas push to an external hub, reading the
+	// canvas straight off local disk — unchanged from single-mode. It stays
+	// registered in both modes: it operates on the mcp process's own --dir,
+	// independent of the backend.
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "push",
 		Description: "Tar a local canvas and push it to a hub once. Reads the canvas straight off disk; never launches a browser.",
 	}, s.handlePush)
+
+	// path is a server-local directory lookup — meaningless to a remote hub
+	// client, so it's registered in local mode only.
+	if local {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "path",
+			Description: "Return the on-disk directory for a canvas. Pure local filesystem lookup — does not talk to or start the daemon. Local mode only.",
+		}, s.handlePath)
+	}
 
 	return srv
 }
@@ -125,9 +174,9 @@ func NewServer(cfg config.Config, ver string) *mcp.Server {
 // symmetry with ServeHTTP and as the sanctioned diagnostics channel, but the
 // stdio path stays deliberately silent: stdout carries the MCP protocol and
 // emitting anything unprompted would only add noise for the MCP host.
-func Serve(ctx context.Context, cfg config.Config, ver string, stderr io.Writer) error {
+func Serve(ctx context.Context, cfg config.Config, ver string, hub *HubTarget, stderr io.Writer) error {
 	_ = stderr
-	srv := NewServer(cfg, ver)
+	srv := NewServer(cfg, ver, hub)
 	return srv.Run(ctx, &mcp.StdioTransport{})
 }
 
@@ -137,7 +186,7 @@ type addInput struct {
 	ID          string `json:"id" jsonschema:"canvas id to create (required)"`
 	Title       string `json:"title,omitempty" jsonschema:"optional canvas title"`
 	Description string `json:"description,omitempty" jsonschema:"optional canvas description"`
-	Icon        string `json:"icon,omitempty" jsonschema:"optional emoji icon; the daemon derives a default from the id when omitted"`
+	Icon        string `json:"icon,omitempty" jsonschema:"optional emoji icon; a default is derived from the id when omitted"`
 }
 
 type addOutput struct {
@@ -150,11 +199,7 @@ func (s *server) handleAdd(ctx context.Context, _ *mcp.CallToolRequest, in addIn
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), addOutput{}, nil
 	}
-	client, _, _, err := resolveDaemon(s.cfg, true)
-	if err != nil {
-		return errorResult(err.Error()), addOutput{}, nil
-	}
-	info, err := client.CreateCanvas(ctx, in.ID, in.Title, in.Description, in.Icon)
+	info, err := s.backend.Add(ctx, in.ID, in.Title, in.Description, in.Icon)
 	if err != nil {
 		return errorResult(err.Error()), addOutput{}, nil
 	}
@@ -182,26 +227,15 @@ type listOutput struct {
 }
 
 func (s *server) handleList(ctx context.Context, _ *mcp.CallToolRequest, _ listInput) (*mcp.CallToolResult, listOutput, error) {
-	client, _, _, err := resolveDaemon(s.cfg, true)
-	if err != nil {
-		return errorResult(err.Error()), listOutput{}, nil
-	}
-	canvases, err := client.ListCanvases(ctx)
+	canvases, err := s.backend.List(ctx)
 	if err != nil {
 		return errorResult(err.Error()), listOutput{}, nil
 	}
 	out := listOutput{Canvases: make([]canvasSummary, 0, len(canvases))}
 	for _, c := range canvases {
-		out.Canvases = append(out.Canvases, canvasSummary{
-			ID:         c.ID,
-			Title:      c.Title,
-			URL:        c.URL,
-			Dir:        c.Dir,
-			Icon:       c.Icon,
-			Color:      c.Color,
-			ModifiedAt: c.ModifiedAt,
-			SSEClients: c.SSEClients,
-		})
+		// canvasSummary is CanvasInfo's wire shape -- identical fields, JSON
+		// tags added -- so a direct conversion is exact.
+		out.Canvases = append(out.Canvases, canvasSummary(c))
 	}
 	return textResult(fmt.Sprintf("%d canvas(es)", len(out.Canvases))), out, nil
 }
@@ -217,40 +251,27 @@ type linkOutput struct {
 }
 
 func (s *server) handleLink(ctx context.Context, _ *mcp.CallToolRequest, in linkInput) (*mcp.CallToolResult, linkOutput, error) {
-	// Validate before self-starting so a bad id never spins up a daemon.
+	// Validate before anything else so a bad id never reaches the backend.
 	if in.ID != "" {
 		if err := canvas.ValidateID(in.ID); err != nil {
 			return errorResult(err.Error()), linkOutput{}, nil
 		}
 	}
-
-	client, st, _, err := resolveDaemon(s.cfg, true)
+	urls, err := s.backend.Link(ctx, in.ID)
 	if err != nil {
 		return errorResult(err.Error()), linkOutput{}, nil
 	}
-
-	if in.ID == "" {
-		url := dashboardURL(st)
-		return textResult(url), linkOutput{URLs: []string{url}}, nil
+	summary := ""
+	if len(urls) > 0 {
+		summary = urls[0]
 	}
-
-	canvases, err := client.ListCanvases(ctx)
-	if err != nil {
-		return errorResult(err.Error()), linkOutput{}, nil
-	}
-	for _, c := range canvases {
-		if c.ID == in.ID {
-			// c.URL already carries the ?t=<token> query when auth is enabled
-			// (the daemon bakes it in server-side).
-			return textResult(c.URL), linkOutput{URLs: []string{c.URL}}, nil
-		}
-	}
-	return errorResult(fmt.Sprintf("canvas %q not found", in.ID)), linkOutput{}, nil
+	return textResult(summary), linkOutput{URLs: urls}, nil
 }
 
 // dashboardURL builds the token-qualified dashboard URL for the daemon
 // described by st: http://host:port/ plus a ?t=<token> query when the daemon
-// has auth enabled. It mirrors cli.baseURLFor for the "/" (no-id) case.
+// has auth enabled. It mirrors cli.baseURLFor for the "/" (no-id) case. Used by
+// localBackend.Link.
 func dashboardURL(st *state.State) string {
 	url := st.BaseURL() + "/"
 	if st.AuthEnabled() {
@@ -259,7 +280,7 @@ func dashboardURL(st *state.State) string {
 	return url
 }
 
-// ── tool: path ───────────────────────────────────────────────────────────--
+// ── tool: path (local mode only) ────────────────────────────────────────────
 
 type pathInput struct {
 	ID string `json:"id" jsonschema:"canvas id (required)"`
@@ -291,18 +312,8 @@ func (s *server) handleRm(ctx context.Context, _ *mcp.CallToolRequest, in rmInpu
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), rmOutput{}, nil
 	}
-	// rm never self-starts: delete via the daemon when one is already healthy,
-	// otherwise straight off disk (mirrors cli.cmdRm).
-	client, _, running, err := resolveDaemon(s.cfg, false)
-	if err != nil {
+	if err := s.backend.Remove(ctx, in.ID); err != nil {
 		return errorResult(err.Error()), rmOutput{}, nil
-	}
-	if running {
-		if delErr := client.DeleteCanvas(ctx, in.ID); delErr != nil {
-			return errorResult(delErr.Error()), rmOutput{}, nil
-		}
-	} else if delErr := canvas.Delete(s.cfg.CanvasesDir(), s.cfg.MetaDir(), in.ID); delErr != nil {
-		return errorResult(delErr.Error()), rmOutput{}, nil
 	}
 	return textResult(fmt.Sprintf("removed %s", in.ID)), rmOutput{Removed: in.ID}, nil
 }
@@ -319,11 +330,11 @@ type snapOutput struct {
 	Dir  string `json:"dir"`
 }
 
-func (s *server) handleSnap(_ context.Context, _ *mcp.CallToolRequest, in snapInput) (*mcp.CallToolResult, snapOutput, error) {
+func (s *server) handleSnap(ctx context.Context, _ *mcp.CallToolRequest, in snapInput) (*mcp.CallToolResult, snapOutput, error) {
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), snapOutput{}, nil
 	}
-	entry, err := snapshot.Create(canvas.Dir(s.cfg.CanvasesDir(), in.ID), s.cfg.VersionsDir(), in.ID, in.Label)
+	entry, err := s.backend.Snap(ctx, in.ID, in.Label)
 	if err != nil {
 		return errorResult(err.Error()), snapOutput{}, nil
 	}
@@ -347,24 +358,17 @@ type snapsOutput struct {
 	Snapshots []snapshotSummary `json:"snapshots"`
 }
 
-func (s *server) handleSnaps(_ context.Context, _ *mcp.CallToolRequest, in snapsInput) (*mcp.CallToolResult, snapsOutput, error) {
+func (s *server) handleSnaps(ctx context.Context, _ *mcp.CallToolRequest, in snapsInput) (*mcp.CallToolResult, snapsOutput, error) {
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), snapsOutput{}, nil
 	}
-	entries, err := snapshot.List(s.cfg.VersionsDir(), in.ID)
+	entries, err := s.backend.Snaps(ctx, in.ID)
 	if err != nil {
 		return errorResult(err.Error()), snapsOutput{}, nil
 	}
-	// snapshot.List returns oldest-first; present newest-first, matching
-	// cli.cmdSnaps.
 	out := snapsOutput{Snapshots: make([]snapshotSummary, 0, len(entries))}
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		out.Snapshots = append(out.Snapshots, snapshotSummary{
-			Name:      e.Name,
-			Timestamp: e.Timestamp,
-			Label:     e.Label,
-		})
+	for _, e := range entries {
+		out.Snapshots = append(out.Snapshots, snapshotSummary{Name: e.Name, Timestamp: e.Timestamp, Label: e.Label})
 	}
 	return textResult(fmt.Sprintf("%d snapshot(s) for %s", len(out.Snapshots), in.ID)), out, nil
 }
@@ -381,40 +385,16 @@ type revertOutput struct {
 	Snapshot string `json:"snapshot"`
 }
 
-func (s *server) handleRevert(_ context.Context, _ *mcp.CallToolRequest, in revertInput) (*mcp.CallToolResult, revertOutput, error) {
+func (s *server) handleRevert(ctx context.Context, _ *mcp.CallToolRequest, in revertInput) (*mcp.CallToolResult, revertOutput, error) {
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), revertOutput{}, nil
 	}
-	canvasDir := canvas.Dir(s.cfg.CanvasesDir(), in.ID)
-	versionsDir := s.cfg.VersionsDir()
-
-	// Replicate cli.cmdRevert exactly: resolve the target BEFORE taking the
-	// safety snapshot, so a bare revert doesn't restore the canvas to its own
-	// current state.
-	target := in.Snapshot
-	if target == "" {
-		latest, ok, err := snapshot.Latest(versionsDir, in.ID)
-		if err != nil {
-			return errorResult(err.Error()), revertOutput{}, nil
-		}
-		if !ok {
-			return errorResult(fmt.Sprintf("no snapshots for canvas %s", in.ID)), revertOutput{}, nil
-		}
-		target = latest.Name
-	}
-
-	if fi, statErr := os.Stat(canvasDir); statErr == nil && fi.IsDir() {
-		if _, err := snapshot.Create(canvasDir, versionsDir, in.ID, "prerevert"); err != nil {
-			return errorResult(err.Error()), revertOutput{}, nil
-		}
-	}
-
-	entry, err := snapshot.Revert(canvasDir, versionsDir, in.ID, target)
+	info, err := s.backend.Revert(ctx, in.ID, in.Snapshot)
 	if err != nil {
 		return errorResult(err.Error()), revertOutput{}, nil
 	}
-	return textResult(fmt.Sprintf("reverted %s to snapshot %s (pre-revert state saved as a new snapshot)", in.ID, entry.Name)),
-		revertOutput{Reverted: in.ID, Snapshot: entry.Name}, nil
+	return textResult(fmt.Sprintf("reverted %s to snapshot %s (pre-revert state saved as a new snapshot)", info.Reverted, info.Snapshot)),
+		revertOutput(info), nil
 }
 
 // ── tool: status ─────────────────────────────────────────────────────────--
@@ -435,34 +415,96 @@ type statusOutput struct {
 }
 
 func (s *server) handleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ statusInput) (*mcp.CallToolResult, statusOutput, error) {
-	// status is the daemon health-check; it must never self-start one.
-	client, _, running, err := resolveDaemon(s.cfg, false)
+	info, err := s.backend.Status(ctx)
 	if err != nil {
 		return errorResult(err.Error()), statusOutput{}, nil
 	}
-	if !running {
+	if !info.Running {
 		return textResult("no daemon running"), statusOutput{Running: false}, nil
-	}
-	resp, err := client.Status(ctx)
-	if err != nil {
-		return errorResult(err.Error()), statusOutput{}, nil
 	}
 	out := statusOutput{
 		Running:            true,
-		PID:                resp.PID,
-		Host:               resp.Host,
-		Port:               resp.Port,
-		Version:            resp.Version,
-		UptimeSeconds:      resp.UptimeSeconds,
-		CanvasCount:        resp.CanvasCount,
-		SSEClients:         resp.SSEClients,
-		IdleSeconds:        resp.IdleSeconds,
-		IdleTimeoutSeconds: resp.IdleTimeoutSeconds,
+		PID:                info.PID,
+		Host:               info.Host,
+		Port:               info.Port,
+		Version:            info.Version,
+		UptimeSeconds:      info.UptimeSeconds,
+		CanvasCount:        info.CanvasCount,
+		SSEClients:         info.SSEClients,
+		IdleSeconds:        info.IdleSeconds,
+		IdleTimeoutSeconds: info.IdleTimeoutSeconds,
 	}
-	return textResult(fmt.Sprintf("daemon running (pid %d, %d canvas(es))", resp.PID, resp.CanvasCount)), out, nil
+	return textResult(fmt.Sprintf("daemon running (pid %d, %d canvas(es))", info.PID, info.CanvasCount)), out, nil
 }
 
-// ── tool: push ───────────────────────────────────────────────────────────--
+// ── tool: read_file ────────────────────────────────────────────────────────
+
+type readFileInput struct {
+	ID   string `json:"id" jsonschema:"canvas id (required)"`
+	Path string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
+}
+
+type readFileOutput struct {
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func (s *server) handleReadFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, readFileOutput, error) {
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), readFileOutput{}, nil
+	}
+	if in.Path == "" {
+		return errorResult("path is required"), readFileOutput{}, nil
+	}
+	data, err := s.backend.ReadFile(ctx, in.ID, in.Path)
+	if err != nil {
+		return errorResult(err.Error()), readFileOutput{}, nil
+	}
+	// Content rides inline as text; a non-UTF-8 file can't be represented
+	// without corruption, so refuse it rather than mangle binary bytes.
+	if !utf8.Valid(data) {
+		return errorResult(fmt.Sprintf("file %q in canvas %q is not UTF-8 text (read_file returns text only)", in.Path, in.ID)),
+			readFileOutput{}, nil
+	}
+	out := readFileOutput{ID: in.ID, Path: in.Path, Content: string(data)}
+	return textResult(string(data)), out, nil
+}
+
+// ── tool: write_file ───────────────────────────────────────────────────────
+
+type writeFileInput struct {
+	ID      string `json:"id" jsonschema:"canvas id (required); the canvas must already exist"`
+	Path    string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
+	Content string `json:"content" jsonschema:"full file content to write (capped at ~2 MiB)"`
+}
+
+type writeFileOutput struct {
+	ID           string `json:"id"`
+	Path         string `json:"path"`
+	BytesWritten int    `json:"bytes_written"`
+}
+
+func (s *server) handleWriteFile(ctx context.Context, _ *mcp.CallToolRequest, in writeFileInput) (*mcp.CallToolResult, writeFileOutput, error) {
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), writeFileOutput{}, nil
+	}
+	if in.Path == "" {
+		return errorResult("path is required"), writeFileOutput{}, nil
+	}
+	content := []byte(in.Content)
+	if len(content) > maxFileBytes {
+		return errorResult(fmt.Sprintf("content is %d bytes, over the %d-byte (2 MiB) per-file limit", len(content), maxFileBytes)),
+			writeFileOutput{}, nil
+	}
+	if err := s.backend.WriteFile(ctx, in.ID, in.Path, content); err != nil {
+		return errorResult(err.Error()), writeFileOutput{}, nil
+	}
+	out := writeFileOutput{ID: in.ID, Path: in.Path, BytesWritten: len(content)}
+	return textResult(fmt.Sprintf("wrote %d bytes to %s/%s", len(content), in.ID, in.Path)), out, nil
+}
+
+// ── tool: push (local disk → external hub, both modes) ───────────────────────
 
 type pushInput struct {
 	ID    string `json:"id" jsonschema:"local canvas id to push (required)"`
@@ -488,12 +530,9 @@ func (s *server) handlePush(ctx context.Context, _ *mcp.CallToolRequest, in push
 	// Read the canvas straight off disk from cfg, exactly like cli.cmdPush —
 	// push uses only --dir, never a daemon host/port.
 	canvasDir := canvas.Dir(s.cfg.CanvasesDir(), in.ID)
-	if fi, err := os.Stat(canvasDir); err != nil || !fi.IsDir() {
-		return errorResult(fmt.Sprintf("canvas %q not found at %s", in.ID, canvasDir)), pushOutput{}, nil
-	}
 	info, err := canvas.Get(s.cfg.CanvasesDir(), s.cfg.MetaDir(), in.ID)
 	if err != nil {
-		return errorResult(err.Error()), pushOutput{}, nil
+		return errorResult(fmt.Sprintf("canvas %q not found at %s", in.ID, canvasDir)), pushOutput{}, nil
 	}
 
 	data, err := pushclient.Pack(canvasDir)

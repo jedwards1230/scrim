@@ -25,7 +25,7 @@ import (
 func testServer(t *testing.T) *server {
 	t.Helper()
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
-	return &server{cfg: cfg, ver: "test"}
+	return &server{backend: newLocalBackend(cfg), cfg: cfg, ver: "test", local: true}
 }
 
 // writeCanvasFile creates a canvas directory for id under cfg and drops a file
@@ -390,7 +390,7 @@ func TestServeStdioReturnsOnCancel(t *testing.T) {
 	cancel() // already cancelled: Run should observe it and return promptly.
 
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, cfg, "test", io.Discard) }()
+	go func() { done <- Serve(ctx, cfg, "test", nil, io.Discard) }()
 	select {
 	case <-done:
 		// Returned (nil or a context error) — either is a clean stop.
@@ -594,7 +594,7 @@ func connectInMemory(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 
 func TestNewServerRegistersAllTools(t *testing.T) {
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
-	srv := NewServer(cfg, "test")
+	srv := NewServer(cfg, "test", nil) // local mode
 	session := connectInMemory(t, srv)
 
 	got := map[string]bool{}
@@ -607,19 +607,56 @@ func TestNewServerRegistersAllTools(t *testing.T) {
 		}
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"add", "list", "link", "path", "rm", "snap", "snaps", "revert", "status", "push"} {
+	// Local mode registers every tool, including path (local-only).
+	for _, want := range []string{"add", "list", "link", "path", "rm", "snap", "snaps", "revert", "status", "read_file", "write_file", "push"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
 		}
 	}
-	if len(got) != 10 {
-		t.Errorf("registered %d tools, want 10: %v", len(got), got)
+	if len(got) != 12 {
+		t.Errorf("registered %d tools, want 12: %v", len(got), got)
+	}
+}
+
+// TestToolSurfacePerMode asserts the self-describing tool surface: `path` is
+// present in local mode and ABSENT in hub mode, while read_file/write_file are
+// present in both.
+func TestToolSurfacePerMode(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	cases := []struct {
+		name     string
+		hub      *HubTarget
+		wantPath bool
+	}{
+		{"local", nil, true},
+		{"hub", &HubTarget{BaseURL: "http://127.0.0.1:7788", Token: "tok"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer(cfg, "test", tc.hub)
+			session := connectInMemory(t, srv)
+			got := map[string]bool{}
+			for tool, err := range session.Tools(context.Background(), nil) {
+				if err != nil {
+					t.Fatalf("Tools iteration: %v", err)
+				}
+				got[tool.Name] = true
+			}
+			if got["path"] != tc.wantPath {
+				t.Errorf("path present = %v, want %v (%s mode)", got["path"], tc.wantPath, tc.name)
+			}
+			for _, want := range []string{"read_file", "write_file"} {
+				if !got[want] {
+					t.Errorf("tool %q missing in %s mode", want, tc.name)
+				}
+			}
+		})
 	}
 }
 
 func TestCallToolPathEndToEnd(t *testing.T) {
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
-	srv := NewServer(cfg, "test")
+	srv := NewServer(cfg, "test", nil)
 	session := connectInMemory(t, srv)
 
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
@@ -649,7 +686,7 @@ func TestCallToolPathEndToEnd(t *testing.T) {
 
 func TestCallToolInvalidIDIsToolError(t *testing.T) {
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
-	srv := NewServer(cfg, "test")
+	srv := NewServer(cfg, "test", nil)
 	session := connectInMemory(t, srv)
 
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{

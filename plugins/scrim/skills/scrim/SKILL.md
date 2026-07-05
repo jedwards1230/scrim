@@ -52,11 +52,18 @@ verified it renders.
 ## MCP-first: prefer the tools when they're present
 
 If a `scrim` MCP server is wired into your session, scrim's verbs show up as
-MCP tools (`add`, `list`, `link`, `path`, `rm`, `snap`, `snaps`, `revert`,
-`status`, `push`). **Prefer those tools over shelling out to the `scrim`
-CLI** — they're the same code path, return structured results, and don't
-depend on `scrim` being on `PATH`. Fall back to the shell verbs (the rest of
-this skill) only when the MCP tools aren't available.
+MCP tools (`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
+`read_file`, `write_file`, plus `path` and `push` in local mode).
+**Prefer those tools over shelling out to the `scrim` CLI** — they're the same
+code path, return structured results, and don't depend on `scrim` being on
+`PATH`. Fall back to the shell verbs (the rest of this skill) only when the
+MCP tools aren't available.
+
+A hub-mode server (`scrim mcp --hub URL`) exposes the same surface against a
+**remote** hub instead of the local machine — so `add` then `write_file`
+(inline content) is how you author a canvas when scrim runs somewhere you
+can't reach on disk. `read_file`/`write_file` work in both modes; `path` is
+local-only.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which

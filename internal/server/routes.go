@@ -27,6 +27,19 @@ func (s *Server) routes() http.Handler {
 	gate := s.withAuth
 	if s.isHub() {
 		mux.HandleFunc("POST /api/push/{id}", s.handlePush)
+
+		// Machine-API surface for a remote MCP client (see mcpserver's
+		// hubBackend): per-file read/write and per-canvas snapshot control,
+		// so a client with no shared disk can author canvas content over the
+		// wire. All bearer-gated via withHubGate (reads included -- the push
+		// token authorizes any method). Registered ONLY in hub mode so the
+		// default daemon gets zero new surface (hub_test.go invariant).
+		mux.HandleFunc("GET /api/canvases/{id}/files/{path...}", s.handleReadCanvasFile)
+		mux.HandleFunc("PUT /api/canvases/{id}/files/{path...}", s.handleWriteCanvasFile)
+		mux.HandleFunc("GET /api/canvases/{id}/snapshots", s.handleListSnapshots)
+		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
+		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)
+
 		gate = s.withHubGate
 	}
 

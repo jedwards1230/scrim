@@ -29,12 +29,17 @@ const bearerPrefix = "Bearer "
 // isn't itself permitted to browse from).
 func (s *Server) withHubGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			if !s.hasValidPushToken(r) {
-				http.Error(w, "unauthorized: missing or invalid push token", http.StatusUnauthorized)
-				return
-			}
+		// A valid push token authorizes ANY method, reads included -- it's the
+		// machine-API credential (MCP client / push), distinct from the browser
+		// read gate (CIDR/read-token) below.
+		if s.hasValidPushToken(r) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		// Reaching here means the bearer check above already failed, so any
+		// write is unauthorized -- no second token check.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "unauthorized: missing or invalid push token", http.StatusUnauthorized)
 			return
 		}
 

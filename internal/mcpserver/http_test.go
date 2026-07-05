@@ -56,7 +56,7 @@ func TestNewHTTPServerTimeouts(t *testing.T) {
 
 func TestNewHTTPHandlerHealthz(t *testing.T) {
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
-	ts := httptest.NewServer(newHTTPHandler(cfg, "test"))
+	ts := httptest.NewServer(newHTTPHandler(cfg, "test", nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + healthPath)
@@ -88,7 +88,7 @@ func TestServeHTTPLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- ServeHTTP(ctx, addr, cfg, "test", io.Discard) }()
+	go func() { errCh <- ServeHTTP(ctx, addr, cfg, "test", nil, io.Discard) }()
 
 	// Poll /healthz until the server is up (or give up).
 	var up bool
