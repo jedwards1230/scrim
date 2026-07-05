@@ -40,7 +40,7 @@ version is the "dev" sentinel (unset `Version` and no VCS revision, e.g. a
 binary built outside a git checkout) -- otherwise every unversioned dev
 build would restart any real daemon it found on every single invocation.
 
-Planned data flow: `main.go` dispatches a verb → `cli` either talks to a
+Data flow: `main.go` dispatches a verb → `cli` either talks to a
 running daemon over its local HTTP API or starts one (`daemon`) → the daemon
 serves canvases and pushes SSE reloads on file changes (`server`, via
 `fsnotify`) → a browser (human) or an agent (`add`/`path`) is the other end.
@@ -67,9 +67,11 @@ canvas and POSTs it to a hub, which extracts it into a staged temp dir
 (outside the servable canvases tree) and atomically swaps it into place --
 one clean filesystem event, one SSE reload, never a partial-serve. A
 `Dockerfile` at the repo root packages `scrim hub` as a container
-(`gcr.io/distroless/static-debian12:nonroot`, `/data` volume). This is
-Phase 1 (CLI + container image only) -- no Kubernetes manifests, Traefik
-routing, or release automation for the hub yet.
+(`gcr.io/distroless/static-debian12:nonroot`, `/data` volume);
+`release.yml` publishes it multi-arch (amd64/arm64) to
+`ghcr.io/jedwards1230/scrim` on every semver-labeled release. Deployment
+(Kubernetes manifests, ingress/Traefik routing) deliberately lives outside
+this repo -- the hub itself must stay fully usable standalone.
 
 **Hard invariant**: the default daemon path (`scrim add`/`serve`/...) gets
 zero new behavior, dependencies, or HTTP surface from hub mode --

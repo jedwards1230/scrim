@@ -106,9 +106,24 @@ scrim serve             Run the daemon in the foreground (containers/systemd;
                         not for normal use)
 ```
 
-> The `hub` (central-store server) and `push` (send a local canvas to a hub)
-> verbs also exist, but they're out of scope for agent use — hub operation is a
-> human/CI concern. Keep using the local `add`/`link` loop above.
+### Local vs. hub — where each verb belongs
+
+The local `add`/`link` loop above is the default experience and is always
+enough on its own. Two more verbs bridge to a **hub** (a deployed,
+network-reachable central store — durable, shared, browsable by others):
+
+- `scrim push <id> --to URL --token TOKEN` **is agent-usable, on request**:
+  when the user asks to publish/share/persist a canvas to their hub, push it
+  and surface the hub URL it prints (it's a different URL than `link`'s).
+  The hub URL and token come from the user or environment
+  (`SCRIM_PUSH_TOKEN`) — never invent them. `push` reads the canvas straight
+  off disk, never talks to the local daemon, and never launches a browser.
+  Pushing is explicit per-canvas publishing — don't auto-push.
+- `scrim hub` (running the server itself) stays out of agent scope — that's
+  a human/CI/deployment concern.
+
+Local file-saves keep live-reloading the local tab regardless; a hub copy
+only updates when pushed again.
 
 ## Daemon self-start behavior
 
