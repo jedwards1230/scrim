@@ -27,7 +27,8 @@ Key packages under `internal/`:
 | `logging` | Sole sanctioned logging surface for `server`/`daemon`: category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog` |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `pushclient` | Client side of `scrim push`: packs a local canvas directory into an uncompressed tar archive, POSTs it to a hub's push endpoint, and (via `Watch`) debounced-re-pushes on local changes. Self-contained -- does not import `internal/server`, and is imported only by `cli`'s push verb. |
-| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
+| `mcpserver` | The `scrim mcp` server (`github.com/modelcontextprotocol/go-sdk`): exposes the CLI verbs as MCP tools (`add`, `list`, `link`, `path`, `rm`, `snap`, `snaps`, `revert`, `status`, `push`) over stdio (default) or streamable HTTP (`--http ADDR`). Each handler calls the SAME primitives the matching CLI verb does (`daemon`/`apiclient`/`canvas`/`snapshot`/`pushclient`), so behavior and safety invariants are identical: `link` returns URLs as data (never a browser), nothing logs URLs/content/tokens, `push` is one-shot. The HTTP transport binds 127.0.0.1 by default and refuses a non-loopback bind unless `--allow-lan` (it's unauthenticated pending #33). |
+| `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`, `mcp`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
 
 Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
 advertisement) and Phase 4 (`open` launching a browser, version-skew
@@ -49,8 +50,9 @@ serves canvases and pushes SSE reloads on file changes (`server`, via
 
 - **No CGO**: the binary must be cross-compilable without a C toolchain.
 - **Dependencies stay minimal**: Go stdlib + `fsnotify` + one mDNS library +
-  `goldmark` (serve-time markdown rendering, see below) only. Don't add a
-  dependency without a real need.
+  `goldmark` (serve-time markdown rendering) + the MCP SDK
+  (`github.com/modelcontextprotocol/go-sdk`, for `scrim mcp` only) only. Don't
+  add a dependency without a real need.
 - **Single binary, self-starting daemon**: no separate install/systemd step —
   the first verb that needs the daemon starts it if it isn't running.
 

@@ -36,6 +36,7 @@ scrim revert <id> [<snap>]    # Restore a canvas from a snapshot (latest by defa
 scrim status                  # Show daemon status
 scrim stop                    # Stop the daemon
 scrim serve                   # Run the daemon in the foreground
+scrim mcp [--http ADDR]       # Serve scrim's verbs as MCP tools (stdio; --http for streamable HTTP)
 
 # Hub (optional, additive — a deployed central store; see "Local vs. hub")
 scrim hub --push-token TOKEN [--data DIR] [--host HOST] [--port PORT] [--allow CIDR,...]
@@ -180,6 +181,29 @@ printed first — not the plain `ip:port` fallback — so it still works when
 the daemon is bound to an unaddressable host like `0.0.0.0`. If the launch
 is requested but fails (e.g. no browser installed, headless environment),
 `open` prints a one-line notice on stderr and still exits `0`.
+
+## MCP server
+
+`scrim mcp` exposes scrim's verbs as [MCP](https://modelcontextprotocol.io)
+tools, so an agent drives scrim natively instead of shelling out. Tools:
+`add`, `list`, `link`, `path`, `rm`, `snap`, `snaps`, `revert`, `status`,
+`push`. Each is the same code path as the matching verb — so the same safety
+invariants hold: `link` returns a URL as data and **never** launches a
+browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot (no
+`--watch`).
+
+Transport is stdio by default (the usual way an MCP client launches it):
+
+```jsonc
+// e.g. an MCP client config
+{ "command": "scrim", "args": ["mcp"] }
+```
+
+Pass `--http ADDR` for streamable HTTP (unlocks remote clients). It fails
+closed: the HTTP endpoint is unauthenticated for now (remote auth is tracked
+in [#33](https://github.com/jedwards1230/scrim/issues/33)), so a non-loopback
+bind is refused unless you pass `--allow-lan`. `scrim mcp --http 127.0.0.1:9797`
+is the safe default; `--http :9797` (all interfaces) needs `--allow-lan`.
 
 ## Hub: a shared central store
 
