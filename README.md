@@ -23,6 +23,7 @@ go install github.com/jedwards1230/scrim@latest
 ## Usage
 
 ```bash
+# Local (the default experience — loopback daemon, zero setup)
 scrim add <id> [--title T] [--desc D] [--icon I]  # Register a canvas
 scrim path <id>               # Print the filesystem path for a canvas
 scrim list                    # List registered canvases
@@ -36,6 +37,7 @@ scrim status                  # Show daemon status
 scrim stop                    # Stop the daemon
 scrim serve                   # Run the daemon in the foreground
 
+# Hub (optional, additive — a deployed central store; see "Local vs. hub")
 scrim hub --push-token TOKEN [--data DIR] [--host HOST] [--port PORT] [--allow CIDR,...]
                                # Run a hub: a shared, network-reachable central store
 scrim push <id> --to URL --token TOKEN [--watch]
@@ -51,6 +53,31 @@ The daemon self-starts on first use of any verb that needs it (`add`,
 `link`, `open`, etc.) and idles down after `--idle-timeout` of inactivity.
 `snap`/`snaps`/`revert` are pure filesystem operations (like `path`/`rm`'s
 fallback) and never self-start the daemon.
+
+## Local vs. hub
+
+scrim has two modes, and the local one is the product — the hub is an
+optional, additive layer for sharing. A localhost-only user never runs
+`hub`/`push` and sees zero difference; the default daemon path gets no new
+behavior, dependencies, or HTTP surface from hub mode (enforced by
+`internal/server/hub_test.go`).
+
+|                | Local daemon                      | Hub                                    |
+|----------------|-----------------------------------|----------------------------------------|
+| Purpose        | Live preview on *this* machine    | Durable, shared store for many machines |
+| Starts         | Self-starts on first verb         | Run explicitly (`scrim hub`, container) |
+| Data dir       | `~/.scrim`                        | `~/.scrim-hub` (`--data`, `/data` in the container) |
+| Bind / port    | `127.0.0.1:7777`                  | `0.0.0.0:7788`                          |
+| Reads gated by | Capability token → cookie         | CIDR allowlist (+ optional read token)  |
+| Writes gated by| Same token                        | Push bearer token (required, fail-closed) |
+| Content source | Files you edit on disk (live)     | Whatever was last `push`ed              |
+| Lifecycle      | Idles out after `--idle-timeout`  | Long-lived (idle-exit disabled)         |
+| mDNS           | On when bound beyond loopback     | Off by default                          |
+
+Both run happily on one box — separate data dirs and ports by design. Local
+file-saves live-reload a local tab exactly as always, with or without a hub
+anywhere in your life; `push` is the only bridge between the two, and it's
+explicit per-canvas.
 
 ## Gallery dashboard & canvas metadata
 
@@ -82,6 +109,11 @@ An `index.md` is rendered to HTML at serve time; raw HTML embedded in it is
 passed through unsanitized, the same trust model as a `.html` canvas.
 
 ## Flags & environment variables
+
+These are the **local daemon's** flags and defaults; the hub deliberately
+overrides several (data dir, host, port, idle timeout, mDNS — see
+[Hub](#hub-a-shared-central-store), and note `--no-auth` doesn't exist
+there: hub auth is the push-token/CIDR gate instead).
 
 | Flag             | Env var             | Default     | Description                        |
 |------------------|----------------------|-------------|-------------------------------------|
@@ -192,14 +224,15 @@ to a local daemon) and POSTs it to a hub's push endpoint, printing the
 hub's canvas URL on success. `--watch` re-pushes on every local change
 (200ms debounce) until interrupted. `push` never launches a browser.
 
-A container image is also provided (`Dockerfile`) that runs `scrim hub` as
-its entrypoint against a `/data` volume:
+A multi-arch (amd64/arm64) container image running `scrim hub` against a
+`/data` volume is published to GHCR on every release:
 
 ```bash
-docker build -t scrim-hub .
-docker run -p 7788:7788 -v scrim-hub-data:/data scrim-hub \
+docker run -p 7788:7788 -v scrim-hub-data:/data ghcr.io/jedwards1230/scrim:latest \
   --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
 ```
+
+(Or build it yourself from the repo's `Dockerfile`: `docker build -t scrim-hub .`)
 
 ## Version-skew restart
 

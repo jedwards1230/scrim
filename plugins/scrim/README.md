@@ -33,8 +33,10 @@ the browser reloads itself → always surface the canvas URL back to the user
 via `link` (never `open`, which is reserved for the human's own explicit
 browser-launch opt-in).
 
-The `hub` and `push` verbs (central-store server + canvas upload) also exist
-but are out of scope for agent use — hub operation is a human/CI concern.
+The skill also draws the local-vs-hub line: the local loop is the default
+experience; `push` (upload a canvas to a deployed hub) is agent-usable when
+the user asks to publish/share, while running `scrim hub` itself stays a
+human/CI concern.
 
 It also covers:
 
