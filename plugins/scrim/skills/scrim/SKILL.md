@@ -49,6 +49,37 @@ you're independently confirming the canvas works with your own tools, and
 the user still needs the URL to look for themselves even after you've
 verified it renders.
 
+## MCP-first: prefer the tools when they're present
+
+If a `scrim` MCP server is wired into your session, scrim's verbs show up as
+MCP tools (`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
+`read_file`, `write_file`, `edit_file`, `push`, plus `path` in local mode
+only).
+**Prefer those tools over shelling out to the `scrim` CLI** — they're the same
+code path, return structured results, and don't depend on `scrim` being on
+`PATH`. Fall back to the shell verbs (the rest of this skill) only when the
+MCP tools aren't available.
+
+A hub-mode server (`scrim mcp --hub URL`) exposes the same surface against a
+**remote** hub instead of the local machine — so `add` then `write_file`
+(inline content) is how you author a canvas when scrim runs somewhere you
+can't reach on disk. `read_file`/`write_file`/`edit_file` work in both modes,
+and so does `push` — it reads the MCP process's own local disk either way;
+only `path` is local-only. Prefer `edit_file` over `write_file` for changes
+to an existing file — it replaces an exact string server-side, so it costs
+tokens proportional to the change, not the whole file.
+
+The tools honor every rule below unchanged: there is **no** `open` tool and
+no browser-launch anywhere — the `link` tool only ever returns the URL, which
+you still must surface to the user (see the critical rules above). `push`
+targets a hub and stays a human/CI concern; the everyday loop is still
+`add` → write files → `link`.
+
+The server is started with `scrim mcp` (stdio by default; `--http ADDR` for a
+remote/streamable-HTTP endpoint, which fails closed on a non-loopback bind
+unless `--allow-lan` is passed). Wiring it up is a user/config step — surface
+the command, don't start a long-running server yourself.
+
 ## Workflow
 
 1. **Before authoring content**: check for and load the `artifact-design`
@@ -104,6 +135,9 @@ scrim status            Show daemon status (does not self-start)
 scrim stop              Stop the daemon (canvas files persist on disk)
 scrim serve             Run the daemon in the foreground (containers/systemd;
                         not for normal use)
+scrim mcp [--http ADDR] Serve scrim's verbs as MCP tools (stdio by default).
+                        Prefer the MCP tools over these shell verbs when the
+                        server is wired into your session (see "MCP-first").
 ```
 
 ### Local vs. hub — where each verb belongs

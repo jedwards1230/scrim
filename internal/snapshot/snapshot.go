@@ -39,6 +39,18 @@ var labelPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{0,64}$`)
 // not safe to use as a single path component.
 var errInvalidName = errors.New("snapshot: invalid snapshot name")
 
+// ErrNotFound is the sentinel wrapped by every "the thing you named does not
+// exist" failure: a missing canvas directory (Create), a missing or unknown
+// snapshot (Revert with a name that doesn't exist), or no snapshots at all
+// (revert-to-latest with none). Callers translating snapshot errors into
+// HTTP statuses (the hub machine API) match it with errors.Is to tell a
+// client's 404 from a server-side 500.
+var ErrNotFound = errors.New("snapshot: not found")
+
+// ErrInvalidLabel is the sentinel wrapped when Create rejects a label that
+// fails labelPattern -- pure client input, distinct from a server fault.
+var ErrInvalidLabel = errors.New("snapshot: invalid label")
+
 // errSnapshotEscape mirrors server/staticpath.go's errOutsideRoot for the
 // same class of problem on the snapshot side: a resolved snapshot path that
 // falls outside its canvas's versions directory.
@@ -90,11 +102,16 @@ func resolveSnapshotDir(versionsDir, id, name string) (string, error) {
 
 	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// No versions dir at all means no snapshots for this canvas -- the
+			// named one certainly doesn't exist.
+			return "", fmt.Errorf("%w: %s: no such snapshot for canvas %s", ErrNotFound, name, id)
+		}
 		return "", fmt.Errorf("snapshot: resolving versions dir for canvas %s: %w", id, err)
 	}
 	resolvedTarget, err := filepath.EvalSymlinks(target)
 	if err != nil {
-		return "", fmt.Errorf("snapshot: %s: no such snapshot for canvas %s", name, id)
+		return "", fmt.Errorf("%w: %s: no such snapshot for canvas %s", ErrNotFound, name, id)
 	}
 	if resolvedTarget != resolvedRoot && !strings.HasPrefix(resolvedTarget, resolvedRoot+string(os.PathSeparator)) {
 		return "", fmt.Errorf("%w: %q", errSnapshotEscape, name)
@@ -128,10 +145,10 @@ func Create(canvasDir, versionsDir, id, label string) (entry Entry, err error) {
 		return Entry{}, err
 	}
 	if !labelPattern.MatchString(label) {
-		return Entry{}, fmt.Errorf("snapshot: invalid label %q (must match %s)", label, labelPattern.String())
+		return Entry{}, fmt.Errorf("%w %q (must match %s)", ErrInvalidLabel, label, labelPattern.String())
 	}
 	if fi, statErr := os.Stat(canvasDir); statErr != nil || !fi.IsDir() {
-		return Entry{}, fmt.Errorf("snapshot: canvas %s: no such directory", id)
+		return Entry{}, fmt.Errorf("%w: canvas %s: no such directory", ErrNotFound, id)
 	}
 
 	now := time.Now().UTC()
@@ -221,7 +238,7 @@ func Revert(canvasDir, versionsDir, id, name string) (Entry, error) {
 			return Entry{}, err
 		}
 		if !ok {
-			return Entry{}, fmt.Errorf("snapshot: no snapshots for canvas %s", id)
+			return Entry{}, fmt.Errorf("%w: no snapshots for canvas %s", ErrNotFound, id)
 		}
 		entry = latest
 	} else {
@@ -230,14 +247,14 @@ func Revert(canvasDir, versionsDir, id, name string) (Entry, error) {
 		}
 		parsed, ok := parseName(name)
 		if !ok {
-			return Entry{}, fmt.Errorf("snapshot: invalid snapshot name %q", name)
+			return Entry{}, fmt.Errorf("%w %q", errInvalidName, name)
 		}
 		dir, err := resolveSnapshotDir(versionsDir, id, name)
 		if err != nil {
 			return Entry{}, err
 		}
 		if fi, statErr := os.Stat(dir); statErr != nil || !fi.IsDir() {
-			return Entry{}, fmt.Errorf("snapshot: %s: no such snapshot for canvas %s", name, id)
+			return Entry{}, fmt.Errorf("%w: %s: no such snapshot for canvas %s", ErrNotFound, name, id)
 		}
 		parsed.Dir = dir
 		entry = parsed
@@ -275,6 +292,68 @@ func Revert(canvasDir, versionsDir, id, name string) (Entry, error) {
 	}
 	_ = os.RemoveAll(oldDir)
 	return entry, nil
+}
+
+// RevertWithSafety is the shared revert protocol every scrim surface (the
+// revert CLI verb, the MCP local backend, the hub machine API) runs: resolve
+// the target snapshot FIRST, then take a labeled "prerevert" safety snapshot
+// of the canvas's current contents, then Revert. The ordering carries two
+// guarantees:
+//
+//   - An empty name resolves "latest" BEFORE the safety snapshot exists --
+//     otherwise the safety snapshot would immediately become latest and a
+//     bare revert would restore the canvas to its own current state.
+//   - A named target is verified to exist BEFORE the safety snapshot is
+//     taken -- otherwise a typo'd name would leave a spurious prerevert
+//     behind as the newest snapshot, poisoning a later bare
+//     revert-to-latest.
+//
+// A missing named snapshot (or an empty name with no snapshots at all) is
+// reported as an error wrapping ErrNotFound.
+func RevertWithSafety(canvasDir, versionsDir, id, name string) (Entry, error) {
+	if err := canvas.ValidateID(id); err != nil {
+		return Entry{}, err
+	}
+
+	target := name
+	if target == "" {
+		latest, ok, err := Latest(versionsDir, id)
+		if err != nil {
+			return Entry{}, err
+		}
+		if !ok {
+			return Entry{}, fmt.Errorf("%w: no snapshots for canvas %s", ErrNotFound, id)
+		}
+		target = latest.Name
+	} else {
+		// Validate and resolve the named target now, before any snapshot is
+		// taken -- Revert repeats these same checks, but by then the safety
+		// snapshot would already exist.
+		if err := validateName(target); err != nil {
+			return Entry{}, err
+		}
+		if _, ok := parseName(target); !ok {
+			return Entry{}, fmt.Errorf("%w %q", errInvalidName, target)
+		}
+		dir, err := resolveSnapshotDir(versionsDir, id, target)
+		if err != nil {
+			return Entry{}, err
+		}
+		if fi, statErr := os.Stat(dir); statErr != nil || !fi.IsDir() {
+			return Entry{}, fmt.Errorf("%w: %s: no such snapshot for canvas %s", ErrNotFound, target, id)
+		}
+	}
+
+	// Safety snapshot of the live contents, so the revert is itself undoable
+	// -- but only if the canvas dir actually exists (a revert onto a
+	// never-created canvas has nothing to preserve).
+	if fi, statErr := os.Stat(canvasDir); statErr == nil && fi.IsDir() {
+		if _, err := Create(canvasDir, versionsDir, id, "prerevert"); err != nil {
+			return Entry{}, err
+		}
+	}
+
+	return Revert(canvasDir, versionsDir, id, target)
 }
 
 // parseName parses a snapshot directory name back into an Entry (without

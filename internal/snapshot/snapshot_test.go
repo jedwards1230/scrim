@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,6 +65,8 @@ func TestCreateRejectsInvalidLabel(t *testing.T) {
 
 	if _, err := Create(canvasDir, versionsDir, "report", "../escape"); err == nil {
 		t.Error("Create() with a path-traversal label should error")
+	} else if !errors.Is(err, ErrInvalidLabel) {
+		t.Errorf("Create() invalid-label error = %v, want errors.Is(err, ErrInvalidLabel)", err)
 	}
 }
 
@@ -112,6 +115,8 @@ func TestCreateMissingCanvasDirErrors(t *testing.T) {
 	versionsDir := t.TempDir()
 	if _, err := Create(filepath.Join(t.TempDir(), "does-not-exist"), versionsDir, "report", ""); err == nil {
 		t.Error("Create() of a missing canvas dir should error")
+	} else if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Create() missing-canvas error = %v, want errors.Is(err, ErrNotFound)", err)
 	}
 }
 
@@ -247,6 +252,8 @@ func TestRevertUnknownSnapshotErrors(t *testing.T) {
 
 	if _, err := Revert(canvasDir, versionsDir, "report", "20200101-000000.000000000-nope"); err == nil {
 		t.Error("Revert() with an unknown snapshot name should error")
+	} else if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Revert() unknown-snapshot error = %v, want errors.Is(err, ErrNotFound)", err)
 	}
 }
 
@@ -467,6 +474,8 @@ func TestRevertNoSnapshotsErrors(t *testing.T) {
 
 	if _, err := Revert(canvasDir, versionsDir, "report", ""); err == nil {
 		t.Error("Revert() with no snapshots at all should error")
+	} else if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Revert() no-snapshots error = %v, want errors.Is(err, ErrNotFound)", err)
 	}
 }
 
@@ -542,5 +551,81 @@ func TestTimestampLayoutIsFixedWidth(t *testing.T) {
 		if len(formatted) != len(timestampLayout) {
 			t.Errorf("time.Format(timestampLayout) for %v = %q (len %d), want len %d", tm, formatted, len(formatted), len(timestampLayout))
 		}
+	}
+}
+
+// TestRevertWithSafetyBareRevert proves the shared helper preserves the
+// resolve-before-snapshot semantic: a bare revert (empty name) restores the
+// canvas to the latest PRE-EXISTING snapshot -- never to its own current
+// state via the prerevert safety snapshot -- and the prerevert snapshot of
+// the pre-revert contents exists afterwards.
+func TestRevertWithSafetyBareRevert(t *testing.T) {
+	canvasDir := filepath.Join(t.TempDir(), "canvas")
+	versionsDir := t.TempDir()
+
+	writeCanvasFile(t, canvasDir, "index.html", "v1")
+	if _, err := Create(canvasDir, versionsDir, "report", ""); err != nil {
+		t.Fatal(err)
+	}
+	writeCanvasFile(t, canvasDir, "index.html", "v2")
+
+	entry, err := RevertWithSafety(canvasDir, versionsDir, "report", "")
+	if err != nil {
+		t.Fatalf("RevertWithSafety() error = %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(canvasDir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "v1" {
+		t.Errorf("reverted index.html = %q, want v1 (bare revert must not restore the canvas to its own current state)", got)
+	}
+	if entry.Label == "prerevert" {
+		t.Errorf("RevertWithSafety() reverted to %q -- the safety snapshot itself", entry.Name)
+	}
+
+	entries, err := List(versionsDir, "report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("List() after revert = %d entries, want 2 (original + prerevert)", len(entries))
+	}
+	if newest := entries[len(entries)-1]; newest.Label != "prerevert" {
+		t.Errorf("newest snapshot label = %q, want prerevert", newest.Label)
+	}
+}
+
+// TestRevertWithSafetyUnknownNameLeavesNoPrerevert is the regression test for
+// the prerevert-before-validation bug: a revert to a nonexistent snapshot
+// name must fail with ErrNotFound AND leave no new prerevert snapshot behind
+// -- otherwise the typo'd revert would poison a later bare revert-to-latest.
+func TestRevertWithSafetyUnknownNameLeavesNoPrerevert(t *testing.T) {
+	canvasDir := filepath.Join(t.TempDir(), "canvas")
+	versionsDir := t.TempDir()
+
+	writeCanvasFile(t, canvasDir, "index.html", "v1")
+	if _, err := Create(canvasDir, versionsDir, "report", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := RevertWithSafety(canvasDir, versionsDir, "report", "20200101-000000.000000000-nope")
+	if err == nil {
+		t.Fatal("RevertWithSafety() with an unknown snapshot name should error")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevertWithSafety() unknown-name error = %v, want errors.Is(err, ErrNotFound)", err)
+	}
+
+	entries, err := List(versionsDir, "report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List() after failed revert = %d entries, want 1 (no prerevert debris)", len(entries))
+	}
+	if entries[0].Label == "prerevert" {
+		t.Error("failed revert left a prerevert snapshot behind")
 	}
 }

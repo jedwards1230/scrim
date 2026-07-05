@@ -63,6 +63,15 @@ func New(cfg config.Config) *Server {
 // isHub reports whether this Server was constructed via NewHub.
 func (s *Server) isHub() bool { return s.hubCfg != nil }
 
+// Handler returns the server's fully-wrapped HTTP handler (routes plus the
+// auth/hub gate and security headers) -- the identical handler Run builds and
+// serves. It is exposed for in-process use (tests, embedding a hub behind
+// another server) and does NOT start the filesystem watcher, idle reaper, or
+// permission hardening: callers that want the full daemon lifecycle use Run
+// instead. It does not widen the hub-mode surface -- a default-mode server's
+// Handler registers no hub routes, exactly as routes() always has.
+func (s *Server) Handler() http.Handler { return s.routes() }
+
 // Run starts the HTTP server, filesystem watcher, and idle reaper, and
 // blocks until the daemon is asked to stop: via ctx being canceled (e.g. a
 // signal), the /api/stop handler, or the idle reaper. It always cleans up
