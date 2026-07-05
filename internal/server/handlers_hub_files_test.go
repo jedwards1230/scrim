@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -75,6 +76,7 @@ func TestHubMachineAPIBearerGated(t *testing.T) {
 		{"list canvases", http.MethodGet, "/api/canvases", nil, http.StatusOK},
 		{"read file", http.MethodGet, "/api/canvases/c1/files/index.html", nil, http.StatusOK},
 		{"write file", http.MethodPut, "/api/canvases/c1/files/notes.txt", []byte("x"), http.StatusNoContent},
+		{"edit file", http.MethodPatch, "/api/canvases/c1/files/notes.txt", []byte(`{"old_string":"x","new_string":"y"}`), http.StatusOK},
 		{"list snapshots", http.MethodGet, "/api/canvases/c1/snapshots", nil, http.StatusOK},
 		{"create snapshot", http.MethodPost, "/api/canvases/c1/snapshots", []byte(`{}`), http.StatusCreated},
 		{"revert snapshot", http.MethodPost, "/api/canvases/c1/snapshots/" + snapName + "/revert", nil, http.StatusOK},
@@ -171,6 +173,155 @@ func TestHubWriteSizeCap(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize write status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// TestHubEditFile exercises the PATCH edit endpoint end to end: a unique-hit
+// edit and a replace_all edit both succeed with the right replacement count in
+// the JSON response, and the edited content reads back through the files API.
+func TestHubEditFile(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("<h1>alpha</h1><p>beta beta</p>"))
+	_ = resp.Body.Close()
+
+	// Unique hit, no replace_all.
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken,
+		[]byte(`{"old_string":"alpha","new_string":"gamma"}`))
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("edit status = %d, want 200, body: %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Path         string `json:"path"`
+		Replacements int    `json:"replacements"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode edit response: %v (body: %s)", err, body)
+	}
+	if out.Path != "index.html" || out.Replacements != 1 {
+		t.Errorf("edit response = %+v, want path index.html, 1 replacement", out)
+	}
+
+	// replace_all replaces both occurrences and reports the count.
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken,
+		[]byte(`{"old_string":"beta","new_string":"delta","replace_all":true}`))
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("replace_all edit status = %d, want 200, body: %s", resp.StatusCode, body)
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode replace_all response: %v", err)
+	}
+	if out.Replacements != 2 {
+		t.Errorf("replace_all replacements = %d, want 2", out.Replacements)
+	}
+
+	// The edited content reads back.
+	got := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", hubToken, nil)
+	gotBody, _ := io.ReadAll(got.Body)
+	_ = got.Body.Close()
+	if want := "<h1>gamma</h1><p>delta delta</p>"; string(gotBody) != want {
+		t.Errorf("edited content = %q, want %q", gotBody, want)
+	}
+}
+
+// TestHubEditFileNotFound asserts the two 404 shapes: a canvas that was never
+// added, and a file that doesn't exist in an existing canvas (an edit never
+// creates a file).
+func TestHubEditFileNotFound(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	editBody := []byte(`{"old_string":"a","new_string":"b"}`)
+
+	resp := hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/ghost/files/index.html", hubToken, editBody)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("edit in missing canvas status = %d, want 404", resp.StatusCode)
+	}
+
+	resp = hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/nope.html", hubToken, editBody)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("edit of missing file status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestHubEditFileConflicts asserts the 409 outcomes carry fileedit's helpful,
+// path-free messages: old_string absent, and old_string ambiguous without
+// replace_all (naming the occurrence count).
+func TestHubEditFileConflicts(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("dup dup"))
+	_ = resp.Body.Close()
+
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantMsg  string
+		wantCode int
+	}{
+		{"old_string absent", `{"old_string":"absent","new_string":"x"}`, "old_string not found in file", http.StatusConflict},
+		{"ambiguous without replace_all", `{"old_string":"dup","new_string":"x"}`, "old_string occurs 2 times; set replace_all or use a more unique string", http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte(tc.body))
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.wantCode {
+				t.Fatalf("status = %d, want %d, body: %s", resp.StatusCode, tc.wantCode, body)
+			}
+			var je struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(body, &je); err != nil {
+				t.Fatalf("decode error body: %v (body: %s)", err, body)
+			}
+			if je.Error != tc.wantMsg {
+				t.Errorf("error = %q, want %q", je.Error, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestHubEditFileOversizeBody asserts a PATCH body over maxEditBodyBytes is a
+// 413, enforced by http.MaxBytesReader before any decode work.
+func TestHubEditFileOversizeBody(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("x"))
+	_ = resp.Body.Close()
+
+	big := append([]byte(`{"old_string":"`), bytes.Repeat([]byte("a"), maxEditBodyBytes)...)
+	big = append(big, []byte(`","new_string":"b"}`)...)
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken, big)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversize edit body status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// TestHubEditFilePathTraversalOverWire mirrors the GET/PUT traversal test for
+// PATCH: a "..%2f"-encoded payload reaches the handler intact and is rejected
+// by safeJoin with a 400.
+func TestHubEditFilePathTraversalOverWire(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/..%2f..%2fescape.txt", hubToken,
+		[]byte(`{"old_string":"a","new_string":"b"}`))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("PATCH ..%%2f traversal status = %d, want 400", resp.StatusCode)
 	}
 }
 

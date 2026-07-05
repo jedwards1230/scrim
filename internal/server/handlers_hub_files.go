@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/fileedit"
 )
 
 // maxFileBytes bounds a single file written through PUT
@@ -18,6 +20,11 @@ import (
 // far below maxPushBytes (a whole-canvas archive), since this endpoint writes
 // exactly one file per call.
 const maxFileBytes = 2 * 1024 * 1024 // 2 MiB
+
+// maxEditBodyBytes bounds a PATCH edit's JSON body: old/new strings can
+// legitimately approach a whole file's size (maxFileBytes), plus modest
+// headroom for JSON escaping and the envelope.
+const maxEditBodyBytes = maxFileBytes + 64*1024
 
 // verifyResolvedWithin defends the file endpoints against symlinks planted
 // inside a canvas directory: safeJoin's containment check is lexical only, so
@@ -208,6 +215,119 @@ func (s *Server) handleWriteCanvasFile(w http.ResponseWriter, r *http.Request) {
 	// 204: the write succeeded and the fsnotify watcher will broadcast the
 	// SSE reload; no body.
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleEditCanvasFile serves PATCH /api/canvases/{id}/files/{path...} (hub
+// mode only): it applies an exact-string replacement (fileedit.Apply) to one
+// EXISTING file server-side, so a remote MCP client's edit costs bytes
+// proportional to the change, not the file. Same guards as the PUT handler
+// (canvas-must-exist 404, safeJoin + resolved re-check), plus file-must-exist
+// 404 -- an edit never creates a file. The write is the same atomic
+// temp+rename, so fsnotify observes one clean event and broadcasts a single
+// SSE reload. Conflict outcomes (old_string absent / ambiguous) are 409s with
+// fileedit's path-free messages.
+func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := canvas.ValidateID(id); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rel := r.PathValue("path")
+	if rel == "" {
+		writeJSONError(w, http.StatusBadRequest, "file path is required")
+		return
+	}
+
+	root := canvas.Dir(s.canvasesDir, id)
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id)
+		return
+	}
+
+	target, err := safeJoin(root, rel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+	if err := verifyResolvedWithin(root, target); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxEditBodyBytes)
+	var body struct {
+		OldString  string `json:"old_string"`
+		NewString  string `json:"new_string"`
+		ReplaceAll bool   `json:"replace_all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmtFileTooLarge())
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	fi, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSONError(w, http.StatusNotFound, "file not found")
+			return
+		}
+		// Generic message on purpose: raw os errors can embed absolute
+		// server-side paths, and this surface hides paths everywhere else.
+		writeJSONError(w, http.StatusInternalServerError, "stat file failed")
+		return
+	}
+	if fi.IsDir() {
+		writeJSONError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Mirror the read/write cap on the edit source: the whole file is read
+	// into memory to apply the replacement.
+	if fi.Size() > maxFileBytes {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, fmtFileTooLarge())
+		return
+	}
+
+	data, err := os.ReadFile(target) //nolint:gosec // target is validated by safeJoin to stay within the canvas root
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "reading file failed")
+		return
+	}
+	edited, replacements, err := fileedit.Apply(data, body.OldString, body.NewString, body.ReplaceAll, maxFileBytes)
+	if err != nil {
+		// fileedit messages are path-free by construction, so they are safe
+		// to serve verbatim.
+		writeJSONError(w, editApplyStatus(err), err.Error())
+		return
+	}
+
+	if err := atomicWriteFile(target, filepath.Dir(target), edited); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "writing file failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "replacements": replacements})
+}
+
+// editApplyStatus maps a fileedit.Apply failure to its HTTP status: 409 for
+// an edit conflict (old_string absent, or ambiguous without replace_all), 413
+// when the edited result would exceed the per-file cap, and 400 for the pure
+// input errors (empty old_string, old_string == new_string).
+func editApplyStatus(err error) int {
+	var multi *fileedit.MultipleMatchesError
+	var large *fileedit.TooLargeError
+	switch {
+	case errors.Is(err, fileedit.ErrNotFound), errors.As(err, &multi):
+		return http.StatusConflict
+	case errors.As(err, &large):
+		return http.StatusRequestEntityTooLarge
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // atomicWriteFile writes data to a temp file created in dir (the target's own

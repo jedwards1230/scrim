@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,6 +146,55 @@ func TestHubBackendRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHubBackendEditFileRoundTrip proves write → edit → read over the wire
+// against a real hub, including replace_all, and that conflict errors (409:
+// old_string absent / ambiguous) surface with the hub's path-free message.
+func TestHubBackendEditFileRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+
+	if _, err := b.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := b.WriteFile(ctx, "c1", "index.html", []byte("<h1>alpha</h1><p>beta beta</p>")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	info, err := b.EditFile(ctx, "c1", "index.html", "alpha", "gamma", false)
+	if err != nil {
+		t.Fatalf("EditFile: %v", err)
+	}
+	if info.Path != "index.html" || info.Replacements != 1 {
+		t.Errorf("EditFile = %+v, want path index.html, 1 replacement", info)
+	}
+	info, err = b.EditFile(ctx, "c1", "index.html", "beta", "delta", true)
+	if err != nil {
+		t.Fatalf("EditFile replace_all: %v", err)
+	}
+	if info.Replacements != 2 {
+		t.Errorf("replace_all replacements = %d, want 2", info.Replacements)
+	}
+	got, err := b.ReadFile(ctx, "c1", "index.html")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := "<h1>gamma</h1><p>delta delta</p>"; string(got) != want {
+		t.Errorf("edited content = %q, want %q", got, want)
+	}
+
+	// Conflict errors surface the hub's helpful, path-free 409 messages.
+	if _, err := b.EditFile(ctx, "c1", "index.html", "absent", "x", false); err == nil {
+		t.Error("EditFile with absent old_string error = nil, want an error")
+	} else if !strings.Contains(err.Error(), "old_string not found in file") {
+		t.Errorf("absent old_string error = %q, want it to contain the not-found message", err)
+	}
+	if _, err := b.EditFile(ctx, "c1", "index.html", "delta", "x", false); err == nil {
+		t.Error("EditFile with ambiguous old_string error = nil, want an error")
+	} else if !strings.Contains(err.Error(), "occurs 2 times") {
+		t.Errorf("ambiguous old_string error = %q, want it to name the count", err)
+	}
+}
+
 // TestHubBackendWriteRequiresExistingCanvas confirms the wire error path: a
 // write to a canvas that was never added surfaces the hub's 404 as an error.
 func TestHubBackendWriteRequiresExistingCanvas(t *testing.T) {
@@ -176,6 +226,9 @@ func TestHubBackendClientSideTraversalGuard(t *testing.T) {
 		}
 		if err := b.WriteFile(context.Background(), "c1", p, []byte("x")); err == nil {
 			t.Errorf("WriteFile(%q) error = nil, want a client-side rejection", p)
+		}
+		if _, err := b.EditFile(context.Background(), "c1", p, "a", "b", false); err == nil {
+			t.Errorf("EditFile(%q) error = nil, want a client-side rejection", p)
 		}
 	}
 }

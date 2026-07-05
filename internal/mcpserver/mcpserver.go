@@ -11,8 +11,9 @@
 //
 // The two modes are unified behind the unexported backend interface; the tool
 // handlers are transport-agnostic. The tool surface is self-describing per
-// mode: read_file/write_file (inline content) exist in both, `path` (a
-// server-local directory lookup) is local-only.
+// mode: read_file/write_file (inline content) and edit_file (server-side
+// exact-string replacement) exist in both, `path` (a server-local directory
+// lookup) is local-only.
 //
 // Invariants this package upholds:
 //   - On the stdio transport stdout is the MCP protocol channel: nothing here
@@ -37,6 +38,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/daemon"
+	"github.com/jedwards1230/scrim/internal/fileedit"
 	"github.com/jedwards1230/scrim/internal/pushclient"
 	"github.com/jedwards1230/scrim/internal/state"
 )
@@ -147,6 +149,10 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 		Name:        "write_file",
 		Description: "Write one file into an existing canvas from inline text content (create the canvas first with add). Content is capped at ~2 MiB.",
 	}, s.handleWriteFile)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "edit_file",
+		Description: "Replace an exact string in one canvas file server-side — the token-efficient alternative to write_file for changing an existing file (tokens scale with the diff, not the file). old_string must occur exactly once unless replace_all is set.",
+	}, s.handleEditFile)
 
 	// push is local-only whole-canvas push to an external hub, reading the
 	// canvas straight off local disk — unchanged from single-mode. It stays
@@ -502,6 +508,47 @@ func (s *server) handleWriteFile(ctx context.Context, _ *mcp.CallToolRequest, in
 	}
 	out := writeFileOutput{ID: in.ID, Path: in.Path, BytesWritten: len(content)}
 	return textResult(fmt.Sprintf("wrote %d bytes to %s/%s", len(content), in.ID, in.Path)), out, nil
+}
+
+// ── tool: edit_file ────────────────────────────────────────────────────────
+
+type editFileInput struct {
+	ID         string `json:"id" jsonschema:"canvas id (required)"`
+	Path       string `json:"path" jsonschema:"file path within the canvas, e.g. index.html (required); the file must already exist"`
+	OldString  string `json:"old_string" jsonschema:"exact text to replace (required); must occur exactly once unless replace_all is set"`
+	NewString  string `json:"new_string" jsonschema:"replacement text; must differ from old_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"replace every occurrence of old_string instead of requiring exactly one"`
+}
+
+type editFileOutput struct {
+	Path         string `json:"path"`
+	Replacements int    `json:"replacements"`
+}
+
+func (s *server) handleEditFile(ctx context.Context, _ *mcp.CallToolRequest, in editFileInput) (*mcp.CallToolResult, editFileOutput, error) {
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), editFileOutput{}, nil
+	}
+	if in.Path == "" {
+		return errorResult("path is required"), editFileOutput{}, nil
+	}
+	// Fail the two pure input errors fast (before any file read locally, or
+	// any bytes cross the wire in hub mode) with fileedit's own messages, so
+	// the wording is identical to what the backend would return.
+	if in.OldString == "" {
+		return errorResult(fileedit.ErrOldStringEmpty.Error()), editFileOutput{}, nil
+	}
+	if in.OldString == in.NewString {
+		return errorResult(fileedit.ErrNoChange.Error()), editFileOutput{}, nil
+	}
+	info, err := s.backend.EditFile(ctx, in.ID, in.Path, in.OldString, in.NewString, in.ReplaceAll)
+	if err != nil {
+		return errorResult(err.Error()), editFileOutput{}, nil
+	}
+	// editFileOutput is EditInfo's wire shape -- identical fields, JSON tags
+	// added -- so a direct conversion is exact.
+	return textResult(fmt.Sprintf("made %d replacement(s) in %s/%s", info.Replacements, in.ID, info.Path)),
+		editFileOutput(info), nil
 }
 
 // ── tool: push (local disk → external hub, both modes) ───────────────────────

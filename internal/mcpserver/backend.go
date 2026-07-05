@@ -37,6 +37,11 @@ type backend interface {
 	Revert(ctx context.Context, id, name string) (RevertInfo, error)
 	ReadFile(ctx context.Context, id, path string) ([]byte, error)
 	WriteFile(ctx context.Context, id, path string, content []byte) error
+	// EditFile applies an exact-string replacement (fileedit.Apply semantics)
+	// to one existing file server-side -- the token-efficient alternative to
+	// WriteFile: only the changed strings cross the wire in hub mode, never
+	// the whole file.
+	EditFile(ctx context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error)
 }
 
 // CanvasInfo is one canvas as returned by List/Add. URL is the view URL
@@ -83,6 +88,13 @@ type SnapInfo struct {
 type RevertInfo struct {
 	Reverted string
 	Snapshot string
+}
+
+// EditInfo is the outcome of an EditFile: the edited path and how many
+// replacements were made (1 without replace_all; the occurrence count with).
+type EditInfo struct {
+	Path         string
+	Replacements int
 }
 
 // safeJoinLocal resolves name (a caller-supplied relative file path) against

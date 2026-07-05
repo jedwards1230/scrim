@@ -36,6 +36,9 @@ func (s *Server) routes() http.Handler {
 		// default daemon gets zero new surface (hub_test.go invariant).
 		mux.HandleFunc("GET /api/canvases/{id}/files/{path...}", s.handleReadCanvasFile)
 		mux.HandleFunc("PUT /api/canvases/{id}/files/{path...}", s.handleWriteCanvasFile)
+		// PATCH is non-GET/HEAD, so withHubGate already bearer-gates it like
+		// every other machine-API write -- no extra gate code.
+		mux.HandleFunc("PATCH /api/canvases/{id}/files/{path...}", s.handleEditCanvasFile)
 		mux.HandleFunc("GET /api/canvases/{id}/snapshots", s.handleListSnapshots)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)

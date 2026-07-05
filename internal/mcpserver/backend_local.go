@@ -8,6 +8,7 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/fileedit"
 	"github.com/jedwards1230/scrim/internal/snapshot"
 )
 
@@ -216,6 +217,40 @@ func (b *localBackend) WriteFile(_ context.Context, id, path string, content []b
 		return fmt.Errorf("creating parent directory: %w", err)
 	}
 	return atomicWriteFileLocal(target, dir, content)
+}
+
+func (b *localBackend) EditFile(_ context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
+	root := canvas.Dir(b.cfg.CanvasesDir(), id)
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return EditInfo{}, fmt.Errorf("canvas %q not found", id)
+	}
+	target, err := safeJoinLocal(root, path)
+	if err != nil {
+		return EditInfo{}, err
+	}
+	// Mirror ReadFile's cap on the source: an edit reads the whole file into
+	// memory first, so an oversize file is an error, not a full buffer.
+	if fi, err := os.Stat(target); err == nil && fi.Size() > maxFileBytes {
+		return EditInfo{}, fmt.Errorf("file %q is %d bytes, over the %d-byte edit_file cap", path, fi.Size(), maxFileBytes)
+	}
+	data, err := os.ReadFile(target) //nolint:gosec // target is validated by safeJoinLocal to stay within the canvas root
+	if err != nil {
+		if os.IsNotExist(err) {
+			return EditInfo{}, fmt.Errorf("file %q not found in canvas %q", path, id)
+		}
+		return EditInfo{}, err
+	}
+	edited, replacements, err := fileedit.Apply(data, oldStr, newStr, replaceAll, maxFileBytes)
+	if err != nil {
+		return EditInfo{}, err
+	}
+	// The file exists, so its parent directory does too -- no MkdirAll. The
+	// same atomic temp+rename path WriteFile uses keeps the daemon's fsnotify
+	// watcher seeing one clean event per edit.
+	if err := atomicWriteFileLocal(target, filepath.Dir(target), edited); err != nil {
+		return EditInfo{}, err
+	}
+	return EditInfo{Path: path, Replacements: replacements}, nil
 }
 
 // atomicWriteFileLocal writes content to a temp file in dir and renames it over

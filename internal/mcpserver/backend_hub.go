@@ -245,16 +245,41 @@ func (b *hubBackend) WriteFile(ctx context.Context, id, path string, content []b
 	return nil
 }
 
-// filesURL builds the machine-API files URL for id+path, escaping the id as a
-// single segment and each path segment individually so subdirectories survive
-// while any odd characters are encoded. validateRelPath has already rejected
-// absolute paths and ".." segments before this is reached.
-func (b *hubBackend) filesURL(id, path string) string {
+func (b *hubBackend) EditFile(ctx context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
+	if err := validateRelPath(path); err != nil {
+		return EditInfo{}, err
+	}
+	// The edit itself is applied hub-side (fileedit.Apply behind PATCH), so
+	// only the strings cross the wire -- never the file. Conflict errors (409:
+	// old_string not found / ambiguous) surface via doJSON's hubStatusError
+	// with the hub's path-free message.
+	body := map[string]any{"old_string": oldStr, "new_string": newStr, "replace_all": replaceAll}
+	var resp struct {
+		Path         string `json:"path"`
+		Replacements int    `json:"replacements"`
+	}
+	if err := b.doJSON(ctx, http.MethodPatch, b.filesPath(id, path), body, &resp); err != nil {
+		return EditInfo{}, err
+	}
+	return EditInfo{Path: resp.Path, Replacements: resp.Replacements}, nil
+}
+
+// filesPath builds the machine-API files path for id+path, escaping the id as
+// a single segment and each path segment individually so subdirectories
+// survive while any odd characters are encoded. validateRelPath has already
+// rejected absolute paths and ".." segments before this is reached.
+func (b *hubBackend) filesPath(id, path string) string {
 	segs := strings.Split(strings.TrimLeft(path, "/"), "/")
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
-	return b.baseURL + "/api/canvases/" + url.PathEscape(id) + "/files/" + strings.Join(segs, "/")
+	return "/api/canvases/" + url.PathEscape(id) + "/files/" + strings.Join(segs, "/")
+}
+
+// filesURL is filesPath with the hub base prepended, for the raw-body
+// requests (ReadFile/WriteFile) that don't go through doJSON.
+func (b *hubBackend) filesURL(id, path string) string {
+	return b.baseURL + b.filesPath(id, path)
 }
 
 // newRequest builds an authenticated request with the bearer token attached.

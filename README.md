@@ -187,8 +187,10 @@ is requested but fails (e.g. no browser installed, headless environment),
 `scrim mcp` exposes scrim's verbs as [MCP](https://modelcontextprotocol.io)
 tools, so an agent drives scrim natively instead of shelling out. Tools:
 `add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
-`read_file`, `write_file`, `push` (plus `path` in local mode only — a
-server-local directory has no remote meaning). Each maps to the same code
+`read_file`, `write_file`, `edit_file`, `push` (plus `path` in local mode
+only — a server-local directory has no remote meaning). `edit_file` applies
+an exact-string replacement server-side, so hub-mode edits cost tokens
+proportional to the change, not the file. Each maps to the same code
 path as the matching verb, so the same
 safety invariants hold: `link` returns a URL as data and **never** launches a
 browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot.
@@ -225,7 +227,7 @@ a non-loopback bind is refused unless you pass `--allow-lan`.
 
 The tradeoff is disk vs token: local mode trusts the shared filesystem; hub
 mode trusts the bearer token and moves bytes over HTTP. The hub's machine API
-(canvas list/add/rm/status, per-file GET/PUT, snapshot create/list/revert) is
+(canvas list/add/rm/status, per-file GET/PUT/PATCH, snapshot create/list/revert) is
 gated by the push token on **every** call, reads included — separate from the
 browser read gate (CIDR/read-token).
 

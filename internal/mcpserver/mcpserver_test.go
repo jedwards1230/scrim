@@ -608,19 +608,19 @@ func TestNewServerRegistersAllTools(t *testing.T) {
 		got[tool.Name] = true
 	}
 	// Local mode registers every tool, including path (local-only).
-	for _, want := range []string{"add", "list", "link", "path", "rm", "snap", "snaps", "revert", "status", "read_file", "write_file", "push"} {
+	for _, want := range []string{"add", "list", "link", "path", "rm", "snap", "snaps", "revert", "status", "read_file", "write_file", "edit_file", "push"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
 		}
 	}
-	if len(got) != 12 {
-		t.Errorf("registered %d tools, want 12: %v", len(got), got)
+	if len(got) != 13 {
+		t.Errorf("registered %d tools, want 13: %v", len(got), got)
 	}
 }
 
 // TestToolSurfacePerMode asserts the self-describing tool surface: `path` is
-// present in local mode and ABSENT in hub mode, while read_file/write_file are
-// present in both.
+// present in local mode and ABSENT in hub mode, while
+// read_file/write_file/edit_file are present in both.
 func TestToolSurfacePerMode(t *testing.T) {
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
 	cases := []struct {
@@ -645,7 +645,7 @@ func TestToolSurfacePerMode(t *testing.T) {
 			if got["path"] != tc.wantPath {
 				t.Errorf("path present = %v, want %v (%s mode)", got["path"], tc.wantPath, tc.name)
 			}
-			for _, want := range []string{"read_file", "write_file"} {
+			for _, want := range []string{"read_file", "write_file", "edit_file"} {
 				if !got[want] {
 					t.Errorf("tool %q missing in %s mode", want, tc.name)
 				}
@@ -681,6 +681,51 @@ func TestCallToolPathEndToEnd(t *testing.T) {
 	}
 	if sc["path"] != want {
 		t.Errorf("structured path = %v, want %q", sc["path"], want)
+	}
+}
+
+// TestCallToolEditFileEndToEnd drives edit_file over the in-memory transport
+// in local mode: the replacement lands on disk and the structured result
+// reports {path, replacements}.
+func TestCallToolEditFileEndToEnd(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir canvas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>hello</h1>"), 0o644); err != nil {
+		t.Fatalf("seed canvas file: %v", err)
+	}
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "edit_file",
+		Arguments: map[string]any{
+			"id": "c1", "path": "index.html",
+			"old_string": "hello", "new_string": "goodbye",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("edit_file tool error: %v", res.Content)
+	}
+	sc, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T, want map", res.StructuredContent)
+	}
+	if sc["path"] != "index.html" || sc["replacements"] != float64(1) {
+		t.Errorf("structured content = %v, want path index.html, replacements 1", sc)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "index.html"))
+	if err != nil {
+		t.Fatalf("read edited file: %v", err)
+	}
+	if string(got) != "<h1>goodbye</h1>" {
+		t.Errorf("edited content = %q, want <h1>goodbye</h1>", got)
 	}
 }
 

@@ -125,6 +125,7 @@ func TestLocalDaemonHasNoMachineAPIRoutes(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/canvases/c1/files/index.html"},
 		{http.MethodPut, "/api/canvases/c1/files/index.html"},
+		{http.MethodPatch, "/api/canvases/c1/files/index.html"},
 		{http.MethodGet, "/api/canvases/c1/snapshots"},
 		{http.MethodPost, "/api/canvases/c1/snapshots"},
 		{http.MethodPost, "/api/canvases/c1/snapshots/somesnap/revert"},
