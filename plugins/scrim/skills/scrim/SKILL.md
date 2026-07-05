@@ -53,7 +53,8 @@ verified it renders.
 
 If a `scrim` MCP server is wired into your session, scrim's verbs show up as
 MCP tools (`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
-`read_file`, `write_file`, `edit_file`, plus `path` and `push` in local mode).
+`read_file`, `write_file`, `edit_file`, `push`, plus `path` in local mode
+only).
 **Prefer those tools over shelling out to the `scrim` CLI** — they're the same
 code path, return structured results, and don't depend on `scrim` being on
 `PATH`. Fall back to the shell verbs (the rest of this skill) only when the
@@ -62,10 +63,11 @@ MCP tools aren't available.
 A hub-mode server (`scrim mcp --hub URL`) exposes the same surface against a
 **remote** hub instead of the local machine — so `add` then `write_file`
 (inline content) is how you author a canvas when scrim runs somewhere you
-can't reach on disk. `read_file`/`write_file`/`edit_file` work in both modes;
-`path` is local-only. Prefer `edit_file` over `write_file` for changes to an
-existing file — it replaces an exact string server-side, so it costs tokens
-proportional to the change, not the whole file.
+can't reach on disk. `read_file`/`write_file`/`edit_file` work in both modes,
+and so does `push` — it reads the MCP process's own local disk either way;
+only `path` is local-only. Prefer `edit_file` over `write_file` for changes
+to an existing file — it replaces an exact string server-side, so it costs
+tokens proportional to the change, not the whole file.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which

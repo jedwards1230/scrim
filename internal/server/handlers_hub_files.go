@@ -21,10 +21,12 @@ import (
 // exactly one file per call.
 const maxFileBytes = 2 * 1024 * 1024 // 2 MiB
 
-// maxEditBodyBytes bounds a PATCH edit's JSON body: old/new strings can
-// legitimately approach a whole file's size (maxFileBytes), plus modest
-// headroom for JSON escaping and the envelope.
-const maxEditBodyBytes = maxFileBytes + 64*1024
+// maxEditBodyBytes bounds a PATCH edit's JSON body: old_string and new_string
+// can EACH legitimately approach a whole file's size (maxFileBytes), and JSON
+// string escaping inflates them further -- so budget two file-sized strings
+// plus a whole extra file's worth of escaping/envelope headroom. The cap on
+// the edited RESULT is separate and stays maxFileBytes (fileedit.Apply).
+const maxEditBodyBytes = 3 * maxFileBytes // 6 MiB
 
 // verifyResolvedWithin defends the file endpoints against symlinks planted
 // inside a canvas directory: safeJoin's containment check is lexical only, so
@@ -164,18 +166,9 @@ func (s *Server) handleWriteCanvasFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	root := canvas.Dir(s.canvasesDir, id)
-	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id+" (add it before writing files)")
-		return
-	}
-
-	target, err := safeJoin(root, rel)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid file path")
-		return
-	}
-
+	// Read the body fully BEFORE taking the per-canvas lock (mirroring
+	// handlePush, which extracts the tar into staging first), so a slow
+	// client can't hold the lock across its upload.
 	r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -186,6 +179,26 @@ func (s *Server) handleWriteCanvasFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest, "reading request body: "+err.Error())
+		return
+	}
+
+	// Serialize with handlePush's rename-aside/swap sequence (and the other
+	// mutating machine-API handlers) on the same canvas id: without the lock
+	// a PUT landing between push's two renames would write into a directory
+	// about to be swapped away, leaving the served canvas holding only the
+	// PUT file (or losing the PUT entirely).
+	unlock := s.hubCfg.pushLocks.lock(id)
+	defer unlock()
+
+	root := canvas.Dir(s.canvasesDir, id)
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id+" (add it before writing files)")
+		return
+	}
+
+	target, err := safeJoin(root, rel)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid file path")
 		return
 	}
 
@@ -238,6 +251,32 @@ func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decode the body fully BEFORE taking the per-canvas lock (mirroring
+	// handlePush, which extracts the tar into staging first), so a slow
+	// client can't hold the lock across its upload.
+	r.Body = http.MaxBytesReader(w, r.Body, maxEditBodyBytes)
+	var body struct {
+		OldString  string `json:"old_string"`
+		NewString  string `json:"new_string"`
+		ReplaceAll bool   `json:"replace_all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmtEditBodyTooLarge())
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	// Serialize with handlePush's rename-aside/swap sequence (and the other
+	// mutating machine-API handlers) on the same canvas id, so the
+	// read-modify-write below can't interleave with a push swapping the
+	// canvas directory out from under it.
+	unlock := s.hubCfg.pushLocks.lock(id)
+	defer unlock()
+
 	root := canvas.Dir(s.canvasesDir, id)
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id)
@@ -251,22 +290,6 @@ func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := verifyResolvedWithin(root, target); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid file path")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxEditBodyBytes)
-	var body struct {
-		OldString  string `json:"old_string"`
-		NewString  string `json:"new_string"`
-		ReplaceAll bool   `json:"replace_all"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, fmtFileTooLarge())
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
@@ -369,4 +392,11 @@ func atomicWriteFile(target, dir string, data []byte) (err error) {
 // bytes so the caller can size a retry.
 func fmtFileTooLarge() string {
 	return "file exceeds the 2097152-byte (2 MiB) per-file limit"
+}
+
+// fmtEditBodyTooLarge is the 413 message for an oversize PATCH edit body --
+// deliberately distinct from fmtFileTooLarge: it's the edit REQUEST that blew
+// the maxEditBodyBytes cap, not a file exceeding the per-file limit.
+func fmtEditBodyTooLarge() string {
+	return "edit request body exceeds the 6291456-byte (6 MiB) limit"
 }

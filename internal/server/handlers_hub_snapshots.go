@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
@@ -70,20 +69,38 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Serialize with handlePush's swap sequence (and the other mutating
+	// machine-API handlers) on the same canvas id: snapshotting walks the
+	// canvas directory, and a concurrent push renaming it aside mid-walk
+	// would yield a torn or empty snapshot.
+	unlock := s.hubCfg.pushLocks.lock(id)
+	defer unlock()
+
 	entry, err := snapshot.Create(canvas.Dir(s.canvasesDir, id), s.cfg.VersionsDir(), id, body.Label)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "creating snapshot failed (missing canvas or invalid label)")
+		// Client errors get client statuses; bodies stay generic (raw
+		// snapshot/os errors can embed server paths).
+		switch {
+		case errors.Is(err, snapshot.ErrInvalidLabel):
+			writeJSONError(w, http.StatusBadRequest, "invalid snapshot label")
+		case errors.Is(err, snapshot.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "canvas not found: "+id)
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "creating snapshot failed")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"name": entry.Name, "dir": entry.Dir})
 }
 
 // handleRevertSnapshot serves POST /api/canvases/{id}/snapshots/{name}/revert
-// (hub mode only): it reverts the canvas to the named snapshot, taking a
-// "prerevert" safety snapshot of the current contents first (exactly like
-// cli.cmdRevert and the revert MCP tool). Bearer-gated via withHubGate. The
-// snapshot name is required (it's a path segment); snapshot.Revert validates
-// it as a bare path component before touching the filesystem.
+// (hub mode only): it reverts the canvas to the named snapshot via
+// snapshot.RevertWithSafety -- the same resolve-target-first, then
+// prerevert-safety-snapshot, then revert protocol cli.cmdRevert and the
+// revert MCP tool run, so a typo'd name fails BEFORE any prerevert snapshot
+// is taken. Bearer-gated via withHubGate. The snapshot name is required
+// (it's a path segment); RevertWithSafety validates it as a bare path
+// component before touching the filesystem.
 func (s *Server) handleRevertSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := canvas.ValidateID(id); err != nil {
@@ -96,22 +113,22 @@ func (s *Server) handleRevertSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	canvasDir := canvas.Dir(s.canvasesDir, id)
-	versionsDir := s.cfg.VersionsDir()
+	// Serialize with handlePush's swap sequence (and the other mutating
+	// machine-API handlers) on the same canvas id: the revert's own
+	// rename-aside/rename-in swap must not interleave with a push's.
+	unlock := s.hubCfg.pushLocks.lock(id)
+	defer unlock()
 
-	// Safety snapshot of the live contents first, so the revert is itself
-	// undoable -- but only if the canvas dir actually exists (a revert onto a
-	// never-created canvas has nothing to preserve).
-	if fi, statErr := os.Stat(canvasDir); statErr == nil && fi.IsDir() {
-		if _, err := snapshot.Create(canvasDir, versionsDir, id, "prerevert"); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "prerevert snapshot failed")
+	entry, err := snapshot.RevertWithSafety(canvas.Dir(s.canvasesDir, id), s.cfg.VersionsDir(), id, name)
+	if err != nil {
+		// A missing snapshot is the client's error (404); everything else --
+		// invalid name shapes included -- stays a generic 500 with no server
+		// paths in the body.
+		if errors.Is(err, snapshot.ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "no such snapshot")
 			return
 		}
-	}
-
-	entry, err := snapshot.Revert(canvasDir, versionsDir, id, name)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "revert failed (no such snapshot, or invalid name)")
+		writeJSONError(w, http.StatusInternalServerError, "revert failed (invalid name?)")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"reverted": id, "snapshot": entry.Name})

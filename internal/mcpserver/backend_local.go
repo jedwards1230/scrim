@@ -145,31 +145,11 @@ func (b *localBackend) Snaps(_ context.Context, id string) ([]SnapInfo, error) {
 }
 
 func (b *localBackend) Revert(_ context.Context, id, name string) (RevertInfo, error) {
-	canvasDir := canvas.Dir(b.cfg.CanvasesDir(), id)
-	versionsDir := b.cfg.VersionsDir()
-
-	// Replicate cli.cmdRevert exactly: resolve the target BEFORE taking the
-	// safety snapshot, so a bare revert doesn't restore the canvas to its own
-	// current state.
-	target := name
-	if target == "" {
-		latest, ok, err := snapshot.Latest(versionsDir, id)
-		if err != nil {
-			return RevertInfo{}, err
-		}
-		if !ok {
-			return RevertInfo{}, fmt.Errorf("no snapshots for canvas %s", id)
-		}
-		target = latest.Name
-	}
-
-	if fi, statErr := os.Stat(canvasDir); statErr == nil && fi.IsDir() {
-		if _, err := snapshot.Create(canvasDir, versionsDir, id, "prerevert"); err != nil {
-			return RevertInfo{}, err
-		}
-	}
-
-	entry, err := snapshot.Revert(canvasDir, versionsDir, id, target)
+	// snapshot.RevertWithSafety is the exact protocol cli.cmdRevert runs:
+	// resolve (and verify) the target BEFORE taking the prerevert safety
+	// snapshot, so a bare revert doesn't restore the canvas to its own current
+	// state and a typo'd name leaves no spurious prerevert behind.
+	entry, err := snapshot.RevertWithSafety(canvas.Dir(b.cfg.CanvasesDir(), id), b.cfg.VersionsDir(), id, name)
 	if err != nil {
 		return RevertInfo{}, err
 	}
@@ -177,6 +157,12 @@ func (b *localBackend) Revert(_ context.Context, id, name string) (RevertInfo, e
 }
 
 func (b *localBackend) ReadFile(_ context.Context, id, path string) ([]byte, error) {
+	// cleanRelPath first, so local and hub mode accept and canonicalize the
+	// exact same path shapes (e.g. "./x.html", "a//b").
+	path, err := cleanRelPath(path)
+	if err != nil {
+		return nil, err
+	}
 	root := canvas.Dir(b.cfg.CanvasesDir(), id)
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("canvas %q not found", id)
@@ -201,6 +187,10 @@ func (b *localBackend) ReadFile(_ context.Context, id, path string) ([]byte, err
 }
 
 func (b *localBackend) WriteFile(_ context.Context, id, path string, content []byte) error {
+	path, err := cleanRelPath(path)
+	if err != nil {
+		return err
+	}
 	if len(content) > maxFileBytes {
 		return fmt.Errorf("file exceeds the %d-byte (2 MiB) per-file limit", maxFileBytes)
 	}
@@ -220,6 +210,10 @@ func (b *localBackend) WriteFile(_ context.Context, id, path string, content []b
 }
 
 func (b *localBackend) EditFile(_ context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
+	path, err := cleanRelPath(path)
+	if err != nil {
+		return EditInfo{}, err
+	}
 	root := canvas.Dir(b.cfg.CanvasesDir(), id)
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		return EditInfo{}, fmt.Errorf("canvas %q not found", id)

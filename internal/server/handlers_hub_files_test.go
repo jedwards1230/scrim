@@ -303,9 +303,54 @@ func TestHubEditFileOversizeBody(t *testing.T) {
 	big := append([]byte(`{"old_string":"`), bytes.Repeat([]byte("a"), maxEditBodyBytes)...)
 	big = append(big, []byte(`","new_string":"b"}`)...)
 	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken, big)
+	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize edit body status = %d, want 413", resp.StatusCode)
+	}
+	// The 413 must name the edit REQUEST cap, not misreport the per-FILE
+	// limit (the file here is one byte).
+	if !strings.Contains(string(body), "edit request body") {
+		t.Errorf("oversize edit body message = %s, want it to name the edit request body cap", body)
+	}
+}
+
+// TestHubEditFileBodyBetweenCaps proves the edit body cap really budgets two
+// file-sized strings: a PATCH whose old_string+new_string total ~2.5 MiB --
+// over the per-file cap (2 MiB), under maxEditBodyBytes (6 MiB) -- succeeds,
+// as long as the edited RESULT stays within the per-file cap.
+func TestHubEditFileBodyBetweenCaps(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+
+	oldStr := strings.Repeat("a", 3*maxFileBytes/4) // 1.5 MiB, the whole file
+	newStr := strings.Repeat("b", maxFileBytes/2)   // 1 MiB replacement
+	resp = hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte(oldStr))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("seed write status = %d, want 204", resp.StatusCode)
+	}
+
+	editBody, err := json.Marshal(map[string]any{"old_string": oldStr, "new_string": newStr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(editBody) <= maxFileBytes || len(editBody) >= maxEditBodyBytes {
+		t.Fatalf("test body size %d must sit between maxFileBytes (%d) and maxEditBodyBytes (%d)", len(editBody), maxFileBytes, maxEditBodyBytes)
+	}
+	resp = hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken, editBody)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("between-caps edit status = %d, want 200, body: %s", resp.StatusCode, body[:min(len(body), 200)])
+	}
+
+	resp = hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", hubToken, nil)
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(got) != newStr {
+		t.Errorf("edited file length = %d, want the %d-byte replacement", len(got), len(newStr))
 	}
 }
 

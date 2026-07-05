@@ -51,10 +51,13 @@ Verbs:
                           Tar a LOCAL canvas and POST it to a hub's push
                           endpoint (see "scrim push --help"). Never
                           self-starts or talks to a local daemon.
-  mcp [--http ADDR] [--allow-lan]
+  mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-token-file PATH]
                           Run an MCP server exposing scrim as tools (add, list,
-                          link, path, rm, snap, snaps, revert, status, push);
-                          stdio by default, --http ADDR for streamable HTTP.
+                          link, rm, snap, snaps, revert, status, read_file,
+                          write_file, edit_file, push, plus path in local
+                          mode); stdio by default, --http ADDR for streamable
+                          HTTP, --hub URL to drive a remote hub instead of
+                          the local daemon (see "scrim mcp --help").
 
 Flags (all verbs except hub/push, which have their own -- see their --help):
   --dir DIR              Directory for canvases + daemon state (env SCRIM_DIR, default ~/.scrim)

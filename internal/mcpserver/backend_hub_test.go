@@ -2,7 +2,10 @@ package mcpserver
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -240,5 +243,91 @@ func TestHubBackendWriteSizeCap(t *testing.T) {
 	big := make([]byte, maxFileBytes+1)
 	if err := b.WriteFile(context.Background(), "c1", "big.txt", big); err == nil {
 		t.Fatal("oversize WriteFile error = nil, want a client-side cap rejection")
+	}
+}
+
+// TestBackendsCanonicalizeNonCanonicalPaths is the F-series regression test
+// for the ServeMux-301 trap: a non-canonical path like "./index.html" or
+// "a//b" must behave identically in local and hub mode -- canonicalized by
+// cleanRelPath before it touches disk or a URL, so a hub-mode PUT/PATCH can
+// never be silently degraded into a redirect-followed GET.
+func TestBackendsCanonicalizeNonCanonicalPaths(t *testing.T) {
+	ctx := context.Background()
+
+	localCfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	if err := os.MkdirAll(filepath.Join(localCfg.CanvasesDir(), "c1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	local := newLocalBackend(localCfg)
+
+	hub := newHubBackendAgainstRealHub(t)
+	if _, err := hub.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatalf("hub Add: %v", err)
+	}
+
+	for name, b := range map[string]backend{"local": local, "hub": hub} {
+		t.Run(name, func(t *testing.T) {
+			// write via "./x.html" reads back at the canonical "x.html".
+			if err := b.WriteFile(ctx, "c1", "./x.html", []byte("one")); err != nil {
+				t.Fatalf("WriteFile ./x.html: %v", err)
+			}
+			got, err := b.ReadFile(ctx, "c1", "x.html")
+			if err != nil {
+				t.Fatalf("ReadFile x.html: %v", err)
+			}
+			if string(got) != "one" {
+				t.Errorf("ReadFile x.html = %q, want one", got)
+			}
+
+			// write via "a//b.html" reads back at the canonical "a/b.html".
+			if err := b.WriteFile(ctx, "c1", "a//b.html", []byte("two")); err != nil {
+				t.Fatalf("WriteFile a//b.html: %v", err)
+			}
+			got, err = b.ReadFile(ctx, "c1", "a/b.html")
+			if err != nil {
+				t.Fatalf("ReadFile a/b.html: %v", err)
+			}
+			if string(got) != "two" {
+				t.Errorf("ReadFile a/b.html = %q, want two", got)
+			}
+
+			// edit via the non-canonical spelling really lands (write_file's
+			// silent-GET failure mode would have left "one" untouched), and
+			// reports the canonical path back.
+			info, err := b.EditFile(ctx, "c1", "./x.html", "one", "uno", false)
+			if err != nil {
+				t.Fatalf("EditFile ./x.html: %v", err)
+			}
+			if info.Path != "x.html" || info.Replacements != 1 {
+				t.Errorf("EditFile = %+v, want canonical path x.html with 1 replacement", info)
+			}
+			got, err = b.ReadFile(ctx, "c1", "x.html")
+			if err != nil {
+				t.Fatalf("ReadFile after edit: %v", err)
+			}
+			if string(got) != "uno" {
+				t.Errorf("edited content = %q, want uno", got)
+			}
+		})
+	}
+}
+
+// TestHubBackendRefusesRedirects proves the CheckRedirect guard: a hub (or
+// intermediary) answering with a redirect is an error, never a silently
+// followed body-less GET.
+func TestHubBackendRefusesRedirects(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusMovedPermanently)
+	}))
+	t.Cleanup(ts.Close)
+
+	b := newHubBackend(ts.URL, "tok")
+	if err := b.WriteFile(context.Background(), "c1", "x.html", []byte("x")); err == nil {
+		t.Error("WriteFile through a redirecting hub error = nil, want a refusal")
+	} else if !strings.Contains(err.Error(), "redirect") {
+		t.Errorf("WriteFile redirect error = %q, want it to name the refused redirect", err)
+	}
+	if _, err := b.EditFile(context.Background(), "c1", "x.html", "a", "b", false); err == nil {
+		t.Error("EditFile through a redirecting hub error = nil, want a refusal")
 	}
 }

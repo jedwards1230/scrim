@@ -141,3 +141,60 @@ func TestLocalDaemonHasNoMachineAPIRoutes(t *testing.T) {
 		}
 	}
 }
+
+// TestHubSnapshotClientErrorStatuses pins the client-vs-server error split on
+// the snapshot machine API: invalid label -> 400, missing canvas or missing
+// snapshot -> 404 (never a blanket 500), and a failed revert to a typo'd name
+// leaves NO prerevert snapshot behind.
+func TestHubSnapshotClientErrorStatuses(t *testing.T) {
+	s, ts := newHubTestServer(t, nil, "")
+
+	// Seed a canvas with one file and one snapshot.
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("v1"))
+	_ = resp.Body.Close()
+	resp = hubDo(t, http.MethodPost, ts.URL+"/api/canvases/c1/snapshots", hubToken, []byte(`{"label":"seed"}`))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("seed snapshot status = %d, want 201", resp.StatusCode)
+	}
+
+	t.Run("invalid label is 400", func(t *testing.T) {
+		resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases/c1/snapshots", hubToken, []byte(`{"label":"no spaces allowed"}`))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("invalid label status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("snapshot of missing canvas is 404", func(t *testing.T) {
+		resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases/ghost/snapshots", hubToken, []byte(`{}`))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("missing canvas status = %d, want 404", resp.StatusCode)
+		}
+	})
+
+	t.Run("revert to unknown snapshot is 404 and takes no prerevert", func(t *testing.T) {
+		resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases/c1/snapshots/20200101-000000.000000000-nope/revert", hubToken, nil)
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("unknown snapshot revert status = %d, want 404, body: %s", resp.StatusCode, body)
+		}
+
+		// The failed revert must not have taken a prerevert safety snapshot --
+		// that would poison a later bare revert-to-latest.
+		entries, err := snapshot.List(s.cfg.VersionsDir(), "c1")
+		if err != nil {
+			t.Fatalf("snapshot.List: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("snapshots after failed revert = %d, want 1 (seed only)", len(entries))
+		}
+		if entries[0].Label == "prerevert" {
+			t.Error("failed revert left a prerevert snapshot behind")
+		}
+	})
+}

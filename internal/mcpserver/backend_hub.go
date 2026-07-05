@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,7 +34,17 @@ func newHubBackend(baseURL, token string) *hubBackend {
 	return &hubBackend{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: hubTimeout},
+		http: &http.Client{
+			Timeout: hubTimeout,
+			// Refuse redirects outright. cleanRelPath keeps request paths
+			// canonical so none should ever occur -- but if one did (e.g. a
+			// ServeMux 301 to a cleaned path), Go's client would follow it as
+			// a body-less GET, silently degrading a PUT/PATCH into a read
+			// that "succeeds". Failing loudly beats that.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("hub sent a redirect; refusing to follow it")
+			},
+		},
 	}
 }
 
@@ -195,10 +206,11 @@ func (b *hubBackend) Revert(ctx context.Context, id, name string) (RevertInfo, e
 }
 
 func (b *hubBackend) ReadFile(ctx context.Context, id, path string) ([]byte, error) {
-	if err := validateRelPath(path); err != nil {
+	rel, err := cleanRelPath(path)
+	if err != nil {
 		return nil, err
 	}
-	req, err := b.newRequest(ctx, http.MethodGet, b.filesURL(id, path), nil)
+	req, err := b.newRequest(ctx, http.MethodGet, b.filesURL(id, rel), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -222,13 +234,14 @@ func (b *hubBackend) ReadFile(ctx context.Context, id, path string) ([]byte, err
 }
 
 func (b *hubBackend) WriteFile(ctx context.Context, id, path string, content []byte) error {
-	if err := validateRelPath(path); err != nil {
+	rel, err := cleanRelPath(path)
+	if err != nil {
 		return err
 	}
 	if len(content) > maxFileBytes {
 		return fmt.Errorf("file exceeds the %d-byte (2 MiB) per-file limit", maxFileBytes)
 	}
-	req, err := b.newRequest(ctx, http.MethodPut, b.filesURL(id, path), content)
+	req, err := b.newRequest(ctx, http.MethodPut, b.filesURL(id, rel), content)
 	if err != nil {
 		return err
 	}
@@ -246,7 +259,8 @@ func (b *hubBackend) WriteFile(ctx context.Context, id, path string, content []b
 }
 
 func (b *hubBackend) EditFile(ctx context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
-	if err := validateRelPath(path); err != nil {
+	rel, err := cleanRelPath(path)
+	if err != nil {
 		return EditInfo{}, err
 	}
 	// The edit itself is applied hub-side (fileedit.Apply behind PATCH), so
@@ -258,7 +272,7 @@ func (b *hubBackend) EditFile(ctx context.Context, id, path, oldStr, newStr stri
 		Path         string `json:"path"`
 		Replacements int    `json:"replacements"`
 	}
-	if err := b.doJSON(ctx, http.MethodPatch, b.filesPath(id, path), body, &resp); err != nil {
+	if err := b.doJSON(ctx, http.MethodPatch, b.filesPath(id, rel), body, &resp); err != nil {
 		return EditInfo{}, err
 	}
 	return EditInfo{Path: resp.Path, Replacements: resp.Replacements}, nil
@@ -266,8 +280,9 @@ func (b *hubBackend) EditFile(ctx context.Context, id, path, oldStr, newStr stri
 
 // filesPath builds the machine-API files path for id+path, escaping the id as
 // a single segment and each path segment individually so subdirectories
-// survive while any odd characters are encoded. validateRelPath has already
-// rejected absolute paths and ".." segments before this is reached.
+// survive while any odd characters are encoded. cleanRelPath has already
+// rejected absolute paths and ".." segments and canonicalized the rest
+// before this is reached, so the URL never draws a ServeMux redirect.
 func (b *hubBackend) filesPath(id, path string) string {
 	segs := strings.Split(strings.TrimLeft(path, "/"), "/")
 	for i, s := range segs {

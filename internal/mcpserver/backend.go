@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -112,21 +113,38 @@ func safeJoinLocal(root, name string) (string, error) {
 	return target, nil
 }
 
-// validateRelPath is the client-side traversal guard hubBackend applies before
-// building a request URL, so a traversal payload is refused locally with a
-// clear error rather than relying solely on the hub's safeJoin (defense in
-// depth). It rejects an empty path, an absolute path, or any ".." segment.
-func validateRelPath(name string) error {
+// cleanRelPath is the shared validation/canonicalization layer BOTH backends
+// run on a caller-supplied relative file path before touching disk (local) or
+// building a request URL (hub), so the two use identical canonical paths. It
+// rejects an empty path, an absolute path, or any ".." segment -- the
+// client-side traversal guard, defense in depth alongside the hub's safeJoin
+// -- then canonicalizes with path.Clean (collapsing "./" prefixes and
+// duplicate slashes) and re-verifies the cleaned result.
+//
+// Canonicalizing client-side matters in hub mode: a non-canonical path like
+// "./index.html" or "a//b" embedded in a URL draws a ServeMux 301 to the
+// cleaned path, and Go's HTTP client follows a 301 as a body-less GET --
+// which would silently degrade a PUT/PATCH into a read that "succeeds". The
+// hub client's CheckRedirect refuses redirects outright for the same reason
+// (see newHubBackend), so any future non-canonical case fails loudly.
+func cleanRelPath(name string) (string, error) {
 	if name == "" {
-		return fmt.Errorf("file path is required")
+		return "", fmt.Errorf("file path is required")
 	}
-	if filepath.IsAbs(name) {
-		return fmt.Errorf("invalid file path %q: absolute paths are not allowed", name)
+	slashed := filepath.ToSlash(name)
+	if filepath.IsAbs(name) || strings.HasPrefix(slashed, "/") {
+		return "", fmt.Errorf("invalid file path %q: absolute paths are not allowed", name)
 	}
-	for _, seg := range strings.Split(filepath.ToSlash(name), "/") {
+	for _, seg := range strings.Split(slashed, "/") {
 		if seg == ".." {
-			return fmt.Errorf("invalid file path %q: must not contain %q", name, "..")
+			return "", fmt.Errorf("invalid file path %q: must not contain %q", name, "..")
 		}
 	}
-	return nil
+	cleaned := path.Clean(slashed)
+	// Re-verify after Clean: a path that collapses to the root itself (".",
+	// or all "./" segments) names no file.
+	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("invalid file path %q", name)
+	}
+	return cleaned, nil
 }
