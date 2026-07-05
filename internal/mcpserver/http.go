@@ -101,20 +101,28 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 //
 // This transport is UNAUTHENTICATED — OAuth for remote clients is tracked in
 // scrim#33. The caller (cli.cmdMcp) is responsible for gating a non-loopback
-// bind behind --allow-lan via isLoopbackAddr before calling this.
+// bind behind --allow-lan via IsLoopbackAddr before calling this.
 func ServeHTTP(ctx context.Context, addr string, cfg config.Config, ver string, stderr io.Writer) error {
 	httpSrv := newHTTPServer(addr, newHTTPHandler(cfg, ver))
 
+	// Bind synchronously up front so a bind failure (port in use, bad addr)
+	// is returned to the caller BEFORE the "serving on ..." banner prints —
+	// the banner must never claim success for a listener that never came up.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("mcp http listen on %s: %w", addr, err)
+	}
+
 	if stderr != nil {
-		// Diagnostics only: the bind address and endpoint paths, never a URL,
-		// canvas content, or token.
+		// Diagnostics only: the (now bound) address and endpoint paths, never
+		// a URL, canvas content, or token.
 		_, _ = fmt.Fprintf(stderr, "scrim mcp: serving streamable-HTTP on %s (MCP at %s, health at %s)\n",
-			addr, mcpPath, healthPath)
+			ln.Addr(), mcpPath, healthPath)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := httpSrv.ListenAndServe()
+		err := httpSrv.Serve(ln)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}

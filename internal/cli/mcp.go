@@ -49,9 +49,9 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 	defer cancel()
 
 	if plan.http {
-		return serveResult(mcpserver.ServeHTTP(ctx, *httpAddr, cfg, version.Short(), stderr))
+		return serveResult(mcpserver.ServeHTTP(ctx, *httpAddr, cfg, version.Short(), stderr), stderr)
 	}
-	return serveResult(mcpserver.Serve(ctx, cfg, version.Short(), stderr))
+	return serveResult(mcpserver.Serve(ctx, cfg, version.Short(), stderr), stderr)
 }
 
 // mcpPlan is the decision planMcp derives from the mcp verb's transport flags,
@@ -86,11 +86,14 @@ func planMcp(httpAddr string, allowLAN bool) (mcpPlan, error) {
 
 // serveResult maps a server's exit to a process exit code: 0 for a clean stop
 // (nil, or a ctx-cancelled shutdown that surfaces as nil or context.Canceled),
-// 1 for a genuine serve error.
-func serveResult(err error) int {
+// 1 for a genuine serve error — which it prints to stderr first, like every
+// other verb, so a failed bind or serve isn't silently swallowed behind a bare
+// exit code.
+func serveResult(err error, stderr io.Writer) int {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return 0
 	}
+	errOut(stderr, err)
 	return 1
 }
 
