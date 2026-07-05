@@ -3,5 +3,4 @@
 *.exe
 dist/
 coverage.out
-worktrees/
 .claude/settings.json.tmp
