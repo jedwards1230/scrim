@@ -17,6 +17,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/mdns"
+	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/state"
 	"github.com/jedwards1230/scrim/internal/version"
 )
@@ -44,6 +45,14 @@ type Server struct {
 	// default daemon (server.New), which is what routes() and withHubGate's
 	// callers use as the hub-mode discriminator instead of a separate bool.
 	hubCfg *hubConfig
+
+	// oidcAuth is non-nil only for a hub started with OIDC configured (see
+	// NewHub). When set, it becomes the hub read gate -- reads require a valid
+	// OIDC session cookie instead of the CIDR/read-token check -- and the
+	// /auth/* login routes are registered. Always nil for the default daemon
+	// and for a hub with no OIDC config, so the fail-closed/opt-in contract is
+	// a simple nil check.
+	oidcAuth *oidc.Authenticator
 }
 
 // New returns a Server configured from cfg. Call Run to start it.

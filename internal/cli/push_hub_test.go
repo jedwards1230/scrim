@@ -176,3 +176,23 @@ func TestCmdHubUsageAndTokenGate(t *testing.T) {
 		})
 	}
 }
+
+// TestCmdHubOIDCFailsClosed proves the --oidc-* flags reach server.NewHub and
+// that setting --oidc-issuer with a required field missing fails closed BEFORE
+// any network/discovery -- the client-ID check runs first, so no real issuer
+// is contacted and the test needs no network.
+func TestCmdHubOIDCFailsClosed(t *testing.T) {
+	args := []string{
+		"--data", t.TempDir(),
+		"--push-token", "flagtok",
+		"--oidc-issuer", "https://issuer.invalid",
+		// deliberately no --oidc-client-id / --oidc-client-secret / redirect
+	}
+	var stdout, stderr bytes.Buffer
+	if got := cmdHub(args, &stdout, &stderr); got != 1 {
+		t.Fatalf("cmdHub with a half-configured OIDC = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "client ID is required") {
+		t.Errorf("cmdHub stderr = %q, want it to name the missing OIDC client ID", stderr.String())
+	}
+}

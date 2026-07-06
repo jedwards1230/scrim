@@ -69,7 +69,7 @@ behavior, dependencies, or HTTP surface from hub mode (enforced by
 | Starts         | Self-starts on first verb         | Run explicitly (`scrim hub`, container) |
 | Data dir       | `~/.scrim`                        | `~/.scrim-hub` (`--data`, `/data` in the container) |
 | Bind / port    | `127.0.0.1:7777`                  | `0.0.0.0:7788`                          |
-| Reads gated by | Capability token → cookie         | CIDR allowlist (+ optional read token)  |
+| Reads gated by | Capability token → cookie         | CIDR allowlist (+ optional read token), or OIDC login |
 | Writes gated by| Same token                        | Push bearer token (required, fail-closed) |
 | Content source | Files you edit on disk (live)     | Whatever was last `push`ed              |
 | Lifecycle      | Idles out after `--idle-timeout`  | Long-lived (idle-exit disabled)         |
@@ -288,6 +288,59 @@ docker run -p 7788:7788 -v scrim-hub-data:/data ghcr.io/jedwards1230/scrim:lates
 ```
 
 (Or build it yourself from the repo's `Dockerfile`: `docker build -t scrim-hub .`)
+
+### OIDC login for reads
+
+Setting `--oidc-issuer` turns on native OpenID Connect login for hub **reads**,
+replacing the CIDR/read-token gate with proven identity (so people can browse
+from anywhere with a login, not just the allowlisted network). It's **opt-in
+and fail-closed**: with no `--oidc-issuer` the hub behaves exactly as above;
+with it set the hub performs OIDC discovery at startup and **refuses to start**
+if the issuer is unreachable or a required field is missing, so there's no
+half-configured state. Writes stay push-token only, unaffected.
+
+The flow is a standard authorization-code login with state, nonce, and PKCE;
+the ID token is verified (signature via JWKS, issuer, audience, nonce) before a
+signed, HttpOnly session cookie is minted. Unauthenticated reads redirect a
+browser to `/auth/login` and return `401` to non-browser clients (the SSE
+stream authenticates with the same cookie). Any user the IdP authenticates is
+accepted on first login — identity keys on the standard `sub` claim, there's no
+user list to pre-seed.
+
+```bash
+scrim hub \
+  --push-token "$(openssl rand -hex 32)" \
+  --oidc-issuer https://auth.example.com/application/o/scrim/ \
+  --oidc-client-id scrim-hub \
+  --oidc-client-secret "$CLIENT_SECRET" \
+  --oidc-redirect-url https://scrim.example.com/auth/callback
+```
+
+- `--oidc-issuer` (env `SCRIM_OIDC_ISSUER`) — the single switch that enables OIDC.
+- `--oidc-client-id` / `--oidc-client-secret` (env `SCRIM_OIDC_CLIENT_ID` /
+  `SCRIM_OIDC_CLIENT_SECRET`) — required when OIDC is on.
+- `--oidc-redirect-url` (env `SCRIM_OIDC_REDIRECT_URL`) — the hub's full
+  external `/auth/callback` URL; must match the IdP registration exactly (the
+  hub can't derive it behind a TLS-terminating proxy). Required.
+- `--oidc-scopes` (env `SCRIM_OIDC_SCOPES`, default `openid,profile,email`).
+- `--oidc-session-secret` (env `SCRIM_OIDC_SESSION_SECRET`) — HMAC key for the
+  session cookie; if empty a random one is generated (sessions then reset on
+  restart). Set a stable value (**at least 32 bytes**, else the hub refuses to
+  start) to persist sessions across restarts/replicas.
+- `--oidc-session-ttl` (env `SCRIM_OIDC_SESSION_TTL`, default `12h`). Sessions
+  are **stateless** — there is no server-side session store, so a session can't
+  be revoked before it expires; `/auth/logout` only clears the cookie in that
+  browser. A compromised cookie stays valid until its TTL lapses, so keep the
+  TTL modest (and rotate `--oidc-session-secret` to invalidate all sessions at
+  once in an emergency).
+- `--oidc-secure-cookies` (env `SCRIM_OIDC_SECURE_COOKIES`, default `true`) —
+  leave on in production; pass `=false` only for a plain-HTTP local test hub.
+
+**Authentik gotcha:** Authentik's default scope mapping returns
+`email_verified: false` unless you fix it per-application. scrim does **not**
+gate on `email_verified` — access keys on `sub` alone — so this locks nobody
+out and needs no workaround. (If you rely on `email` elsewhere, set Authentik's
+provider to emit `email_verified: true`.)
 
 ## Version-skew restart
 

@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/jedwards1230/scrim/internal/oidc"
+)
 
 // routes builds the daemon's full HTTP handler: the index page, per-canvas
 // static serving + SSE, and the /api/* control surface, wrapped with
@@ -44,6 +48,17 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)
 
 		gate = s.withHubGate
+
+		// The OIDC login routes exist only when a hub was started with OIDC
+		// configured. They must be reachable WITHOUT a session (that is how a
+		// user logs in), so withHubGate exempts the /auth/ prefix; registering
+		// them only here keeps that exemption inert for a non-OIDC hub, where
+		// the paths simply 404.
+		if s.oidcAuth != nil {
+			mux.HandleFunc("GET "+oidc.LoginPath, s.oidcAuth.HandleLogin)
+			mux.HandleFunc("GET "+oidc.CallbackPath, s.oidcAuth.HandleCallback)
+			mux.HandleFunc("GET "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
+		}
 	}
 
 	return withSecurityHeaders(gate(s.withActivity(mux)))
