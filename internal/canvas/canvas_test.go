@@ -382,3 +382,101 @@ func TestExplicitIconOverridesDefault(t *testing.T) {
 		t.Errorf("Get().Color = %q, want deterministic default %q even with a custom icon", info.Color, DefaultColor("report"))
 	}
 }
+
+func TestFiles(t *testing.T) {
+	canvasesDir := t.TempDir()
+	metaDir := t.TempDir()
+	if _, err := Create(canvasesDir, metaDir, "c1", "", "", ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dir := Dir(canvasesDir, "c1")
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets", "js"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "js", "app.js"), []byte("x=1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := Files(canvasesDir, "c1")
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	// Two regular files, sorted by path, directories omitted, slash-separated.
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2: %+v", len(files), files)
+	}
+	if files[0].Path != "assets/js/app.js" || files[1].Path != "index.html" {
+		t.Errorf("paths = %q, %q; want assets/js/app.js, index.html", files[0].Path, files[1].Path)
+	}
+	if files[1].Size != int64(len("<h1>hi</h1>")) {
+		t.Errorf("index.html size = %d, want %d", files[1].Size, len("<h1>hi</h1>"))
+	}
+	if files[0].ModifiedAt.IsZero() {
+		t.Error("modified_at is zero")
+	}
+}
+
+func TestFilesEmptyCanvas(t *testing.T) {
+	canvasesDir := t.TempDir()
+	if _, err := Create(canvasesDir, t.TempDir(), "c1", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	files, err := Files(canvasesDir, "c1")
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("got %d files, want 0", len(files))
+	}
+}
+
+func TestFilesMissingCanvas(t *testing.T) {
+	if _, err := Files(t.TempDir(), "nope"); err == nil {
+		t.Error("Files on a missing canvas: err = nil, want an error")
+	}
+}
+
+func TestCopyMeta(t *testing.T) {
+	metaDir := t.TempDir()
+	canvasesDir := t.TempDir()
+	// Source has explicit title + icon.
+	if _, err := Create(canvasesDir, metaDir, "from", "My Title", "desc", "🎯"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyMeta(metaDir, "from", "to"); err != nil {
+		t.Fatalf("CopyMeta: %v", err)
+	}
+	// The target must exist to read Info; create its dir.
+	if _, err := Create(canvasesDir, metaDir, "to", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Get(canvasesDir, metaDir, "to")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != "My Title" || info.Icon != "🎯" || info.Description != "desc" {
+		t.Errorf("copied meta = %+v, want title/desc/icon carried", info)
+	}
+}
+
+func TestCopyMetaNoSourceMetaClearsTarget(t *testing.T) {
+	metaDir := t.TempDir()
+	canvasesDir := t.TempDir()
+	// Source has NO explicit meta; target has stale meta.
+	if _, err := Create(canvasesDir, metaDir, "from", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(canvasesDir, metaDir, "to", "Stale", "", "📌"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyMeta(metaDir, "from", "to"); err != nil {
+		t.Fatalf("CopyMeta: %v", err)
+	}
+	// The stale metadata file must be gone.
+	if _, err := os.Stat(metaPath(metaDir, "to")); !os.IsNotExist(err) {
+		t.Errorf("target meta file still exists (err=%v), want it cleared", err)
+	}
+}

@@ -11,7 +11,24 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jedwards1230/scrim/internal/fileedit"
+	"github.com/jedwards1230/scrim/internal/gzipx"
 )
+
+// gzipWireMinBytes is the file-size floor below which the hub backend sends a
+// PUT body (and expects a GET response) uncompressed: below ~1 KiB, gzip's
+// framing overhead outweighs the saving. It matches the hub read handler's own
+// gzipReadMinBytes so both hops make the same call.
+const gzipWireMinBytes = 1024
+
+// maxCompressedReadBytes bounds the COMPRESSED bytes read from a hub GET
+// response. The hub gzips any file over gzipReadMinBytes even when it doesn't
+// shrink, so an at-cap incompressible file (a ~2 MiB image) comes back gzip-
+// EXPANDED slightly past maxFileBytes; this cap allows deflate's worst-case
+// expansion (well under 0.1% + a few framing bytes) so the stream isn't
+// truncated. The DECODED size is still held to maxFileBytes by gzipx.Inflate.
+const maxCompressedReadBytes = maxFileBytes + maxFileBytes/1000 + 64
 
 // hubTimeout bounds a single hub machine-API call. These are control-plane and
 // per-file operations against a hub the operator controls (commonly in-cluster
@@ -205,6 +222,32 @@ func (b *hubBackend) Revert(ctx context.Context, id, name string) (RevertInfo, e
 	return RevertInfo{Reverted: resp.Reverted, Snapshot: resp.Snapshot}, nil
 }
 
+func (b *hubBackend) ListFiles(ctx context.Context, id string) ([]FileEntry, error) {
+	// The list route is /api/canvases/{id}/files with no trailing file path;
+	// build it directly rather than via filesPath (which appends a segment).
+	var wire []FileEntry
+	if err := b.doJSON(ctx, http.MethodGet, "/api/canvases/"+url.PathEscape(id)+"/files", nil, &wire); err != nil {
+		return nil, err
+	}
+	return wire, nil
+}
+
+func (b *hubBackend) CopyCanvas(ctx context.Context, from, to string, overwrite bool) (CopyInfo, error) {
+	// The hub does the recursive copy + atomic swap server-side; only the
+	// {to, overwrite} envelope crosses the wire. A 409 (target exists without
+	// overwrite) surfaces via doJSON's hubStatusError.
+	body := map[string]any{"to": to, "overwrite": overwrite}
+	var resp struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := b.doJSON(ctx, http.MethodPost, "/api/canvases/"+url.PathEscape(from)+"/copy", body, &resp); err != nil {
+		return CopyInfo{}, err
+	}
+	// Present the client-reachable view URL, never the hub's internal path.
+	return CopyInfo{From: resp.From, To: resp.To, URL: linkURL(b.baseURL, resp.To)}, nil
+}
+
 func (b *hubBackend) ReadFile(ctx context.Context, id, path string) ([]byte, error) {
 	rel, err := cleanRelPath(path)
 	if err != nil {
@@ -214,18 +257,38 @@ func (b *hubBackend) ReadFile(ctx context.Context, id, path string) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
+	// Offer to receive a compressed response. Setting Accept-Encoding
+	// ourselves opts OUT of net/http's transparent gzip decoding, so we must
+	// (and do) inflate manually below when the hub honors it.
+	req.Header.Set("Accept-Encoding", "gzip")
 	resp, err := b.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("reading file from hub: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Cap the response too, so a misbehaving hub can't stream unbounded bytes.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
+	// Cap the response so a misbehaving hub can't stream unbounded bytes. For a
+	// gzip response this bounds the COMPRESSED bytes (Inflate then bounds the
+	// decoded size), so the cap must allow gzip's worst-case EXPANSION of an
+	// at-cap incompressible file -- otherwise a ~2 MiB PNG stored in a canvas
+	// would be truncated mid-stream and fail to inflate. maxCompressedReadBytes
+	// covers that; the decoded size is still held to maxFileBytes below.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCompressedReadBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading file response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// An error body is small JSON, never gzip-encoded, so surface it as-is.
 		return nil, hubStatusError(resp.StatusCode, data)
+	}
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		raw, err := gzipx.Inflate(data, maxFileBytes)
+		if err != nil {
+			if errors.Is(err, gzipx.ErrTooLarge) {
+				return nil, fmt.Errorf("hub file exceeds the %d-byte (2 MiB) limit", maxFileBytes)
+			}
+			return nil, fmt.Errorf("decoding gzip response from hub: %w", err)
+		}
+		return raw, nil
 	}
 	if int64(len(data)) > maxFileBytes {
 		return nil, fmt.Errorf("hub file exceeds the %d-byte (2 MiB) limit", maxFileBytes)
@@ -241,33 +304,68 @@ func (b *hubBackend) WriteFile(ctx context.Context, id, path string, content []b
 	if len(content) > maxFileBytes {
 		return fmt.Errorf("file exceeds the %d-byte (2 MiB) per-file limit", maxFileBytes)
 	}
-	req, err := b.newRequest(ctx, http.MethodPut, b.filesURL(id, rel), content)
+	// Compress a large body on the wire (Content-Encoding: gzip); the hub
+	// inflates it back under the same per-file cap. Small bodies go verbatim --
+	// gzip framing would only add bytes. The cap check above is against the
+	// DECODED size, matching what the hub enforces on the inflated result.
+	body := content
+	contentEncoding := ""
+	if len(content) >= gzipWireMinBytes {
+		if gz := gzipx.Deflate(content); len(gz) < len(content) {
+			body = gz
+			contentEncoding = "gzip"
+		}
+	}
+	req, err := b.newRequest(ctx, http.MethodPut, b.filesURL(id, rel), body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 	resp, err := b.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("writing file to hub: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return hubStatusError(resp.StatusCode, body)
+		return hubStatusError(resp.StatusCode, respBody)
 	}
 	return nil
 }
 
 func (b *hubBackend) EditFile(ctx context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
-	rel, err := cleanRelPath(path)
-	if err != nil {
-		return EditInfo{}, err
-	}
 	// The edit itself is applied hub-side (fileedit.Apply behind PATCH), so
 	// only the strings cross the wire -- never the file. Conflict errors (409:
 	// old_string not found / ambiguous) surface via doJSON's hubStatusError
 	// with the hub's path-free message.
 	body := map[string]any{"old_string": oldStr, "new_string": newStr, "replace_all": replaceAll}
+	return b.patchEdit(ctx, id, path, body)
+}
+
+func (b *hubBackend) EditFileBatch(ctx context.Context, id, path string, edits []fileedit.Edit) (EditInfo, error) {
+	// Send the whole batch in one PATCH; the hub applies it transactionally
+	// (fileedit.ApplyBatch) and a failing edit surfaces as a 409 naming its
+	// index, via hubStatusError's path-free message.
+	wire := make([]map[string]any, len(edits))
+	for i, e := range edits {
+		wire[i] = map[string]any{"old_string": e.OldString, "new_string": e.NewString, "replace_all": e.ReplaceAll}
+	}
+	return b.patchEdit(ctx, id, path, map[string]any{"edits": wire})
+}
+
+// patchEdit is the shared PATCH round-trip behind EditFile (single) and
+// EditFileBatch: it canonicalizes the path, PATCHes body to the file route,
+// and maps the {path, replacements} response into an EditInfo. body is either
+// the single-edit fields or an {"edits": [...]} envelope -- the hub decides
+// which by their presence.
+func (b *hubBackend) patchEdit(ctx context.Context, id, path string, body map[string]any) (EditInfo, error) {
+	rel, err := cleanRelPath(path)
+	if err != nil {
+		return EditInfo{}, err
+	}
 	var resp struct {
 		Path         string `json:"path"`
 		Replacements int    `json:"replacements"`

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -504,4 +505,222 @@ func extractJSONField(t *testing.T, body []byte, field string) string {
 		t.Fatalf("unterminated field %q in body: %s", field, body)
 	}
 	return rest[:j]
+}
+
+// TestHubListFiles proves GET /api/canvases/{id}/files returns every regular
+// file as {path,size,modified_at}, recursive and sorted, with no content, and
+// 404s for an unknown canvas.
+func TestHubListFiles(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create canvas status = %d", resp.StatusCode)
+	}
+	for _, f := range []struct{ path, body string }{
+		{"index.html", "<h1>hi</h1>"},
+		{"assets/js/app.js", "x=1"},
+	} {
+		r := hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/"+f.path, hubToken, []byte(f.body))
+		_ = r.Body.Close()
+		if r.StatusCode != http.StatusNoContent {
+			t.Fatalf("seed write %s status = %d", f.path, r.StatusCode)
+		}
+	}
+
+	got := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files", hubToken, nil)
+	body, _ := io.ReadAll(got.Body)
+	_ = got.Body.Close()
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("list files status = %d, body: %s", got.StatusCode, body)
+	}
+	var files []struct {
+		Path       string `json:"path"`
+		Size       int64  `json:"size"`
+		ModifiedAt string `json:"modified_at"`
+	}
+	if err := json.Unmarshal(body, &files); err != nil {
+		t.Fatalf("unmarshal: %v; body: %s", err, body)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2: %+v", len(files), files)
+	}
+	if files[0].Path != "assets/js/app.js" || files[1].Path != "index.html" {
+		t.Errorf("paths = %q, %q (want sorted, slash-separated)", files[0].Path, files[1].Path)
+	}
+	if files[1].Size != int64(len("<h1>hi</h1>")) {
+		t.Errorf("index.html size = %d", files[1].Size)
+	}
+	// No content field is present anywhere in the response.
+	if strings.Contains(string(body), "<h1>") {
+		t.Errorf("listing leaked file content: %s", body)
+	}
+
+	// Unknown canvas -> 404.
+	missing := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/nope/files", hubToken, nil)
+	_ = missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Errorf("list files for unknown canvas status = %d, want 404", missing.StatusCode)
+	}
+}
+
+// TestHubListFilesEmptyCanvasIsEmptyArray proves an empty canvas serializes as
+// [] (not null), so a client can iterate it unconditionally.
+func TestHubListFilesEmptyCanvasIsEmptyArray(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"empty"}`))
+	_ = resp.Body.Close()
+	got := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/empty/files", hubToken, nil)
+	body, _ := io.ReadAll(got.Body)
+	_ = got.Body.Close()
+	if strings.TrimSpace(string(body)) != "[]" {
+		t.Errorf("empty canvas listing = %s, want []", body)
+	}
+}
+
+// TestHubBatchEdit proves PATCH with an edits array applies transactionally,
+// and that a failing edit leaves the file untouched with a 409 naming the
+// failing index.
+func TestHubBatchEdit(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	r := hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("alpha beta gamma"))
+	_ = r.Body.Close()
+
+	// Successful batch.
+	patch := hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken,
+		[]byte(`{"edits":[{"old_string":"alpha","new_string":"one"},{"old_string":"gamma","new_string":"three"}]}`))
+	pbody, _ := io.ReadAll(patch.Body)
+	_ = patch.Body.Close()
+	if patch.StatusCode != http.StatusOK {
+		t.Fatalf("batch edit status = %d, body: %s", patch.StatusCode, pbody)
+	}
+	got := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", hubToken, nil)
+	gotBody, _ := io.ReadAll(got.Body)
+	_ = got.Body.Close()
+	if string(gotBody) != "one beta three" {
+		t.Errorf("after batch = %q, want %q", gotBody, "one beta three")
+	}
+
+	// Failing batch: second edit not found -> 409, file untouched.
+	fail := hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken,
+		[]byte(`{"edits":[{"old_string":"one","new_string":"X"},{"old_string":"nope","new_string":"Y"}]}`))
+	fbody, _ := io.ReadAll(fail.Body)
+	_ = fail.Body.Close()
+	if fail.StatusCode != http.StatusConflict {
+		t.Fatalf("failing batch status = %d, want 409, body: %s", fail.StatusCode, fbody)
+	}
+	if !strings.Contains(string(fbody), "edit 1") {
+		t.Errorf("409 body %q does not name the failing index", fbody)
+	}
+	after := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", hubToken, nil)
+	afterBody, _ := io.ReadAll(after.Body)
+	_ = after.Body.Close()
+	if string(afterBody) != "one beta three" {
+		t.Errorf("file changed after failed batch = %q, want untouched", afterBody)
+	}
+}
+
+// TestHubBatchEditMutuallyExclusive proves supplying both the edits array and
+// the single-edit fields is a 400.
+func TestHubBatchEditMutuallyExclusive(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+	r := hubDo(t, http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", hubToken, []byte("data"))
+	_ = r.Body.Close()
+
+	both := hubDo(t, http.MethodPatch, ts.URL+"/api/canvases/c1/files/index.html", hubToken,
+		[]byte(`{"old_string":"data","new_string":"x","edits":[{"old_string":"data","new_string":"y"}]}`))
+	_ = both.Body.Close()
+	if both.StatusCode != http.StatusBadRequest {
+		t.Errorf("both single + edits status = %d, want 400", both.StatusCode)
+	}
+}
+
+// TestHubGzipWriteRead proves a PUT with Content-Encoding: gzip inflates
+// server-side, and a GET with Accept-Encoding: gzip returns a compressed body
+// that round-trips.
+func TestHubGzipWriteRead(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+
+	raw := []byte(strings.Repeat("<div>content</div>", 500)) // >1KiB, compressible
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", bytes.NewReader(gzipBytes(t, raw)))
+	req.Header.Set("Authorization", "Bearer "+hubToken)
+	req.Header.Set("Content-Encoding", "gzip")
+	put, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gzip PUT: %v", err)
+	}
+	_ = put.Body.Close()
+	if put.StatusCode != http.StatusNoContent {
+		t.Fatalf("gzip PUT status = %d, want 204", put.StatusCode)
+	}
+	// The bytes on disk are the inflated original -- read back identity.
+	plain := hubDo(t, http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", hubToken, nil)
+	plainBody, _ := io.ReadAll(plain.Body)
+	_ = plain.Body.Close()
+	if !bytes.Equal(plainBody, raw) {
+		t.Errorf("identity read-back mismatch (%d vs %d bytes)", len(plainBody), len(raw))
+	}
+
+	// GET with Accept-Encoding: gzip -> compressed response.
+	greq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/canvases/c1/files/index.html", nil)
+	greq.Header.Set("Authorization", "Bearer "+hubToken)
+	greq.Header.Set("Accept-Encoding", "gzip")
+	// Disable the transport's own gzip handling by setting the header ourselves.
+	gresp, err := http.DefaultClient.Do(greq)
+	if err != nil {
+		t.Fatalf("gzip GET: %v", err)
+	}
+	defer func() { _ = gresp.Body.Close() }()
+	if gresp.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", gresp.Header.Get("Content-Encoding"))
+	}
+	zr, err := gzip.NewReader(gresp.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	dec, _ := io.ReadAll(zr)
+	if !bytes.Equal(dec, raw) {
+		t.Errorf("gzip GET round-trip mismatch (%d vs %d bytes)", len(dec), len(raw))
+	}
+}
+
+// TestHubGzipBombRejected proves a small gzip body that inflates past the
+// per-file cap is refused (413), not written.
+func TestHubGzipBombRejected(t *testing.T) {
+	_, ts := newHubTestServer(t, nil, "")
+	resp := hubDo(t, http.MethodPost, ts.URL+"/api/canvases", hubToken, []byte(`{"id":"c1"}`))
+	_ = resp.Body.Close()
+
+	bomb := gzipBytes(t, bytes.Repeat([]byte("A"), maxFileBytes+1))
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/canvases/c1/files/index.html", bytes.NewReader(bomb))
+	req.Header.Set("Authorization", "Bearer "+hubToken)
+	req.Header.Set("Content-Encoding", "gzip")
+	put, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gzip bomb PUT: %v", err)
+	}
+	_ = put.Body.Close()
+	if put.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("gzip bomb status = %d, want 413", put.StatusCode)
+	}
+}
+
+func gzipBytes(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

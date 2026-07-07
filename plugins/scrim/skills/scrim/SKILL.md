@@ -52,9 +52,9 @@ verified it renders.
 ## MCP-first: prefer the tools when they're present
 
 If a `scrim` MCP server is wired into your session, scrim's verbs show up as
-MCP tools (`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
-`read_file`, `write_file`, `edit_file`, `push`, plus `path` in local mode
-only).
+MCP tools (`add`, `list`, `link`, `copy_canvas`, `rm`, `snap`, `snaps`,
+`revert`, `status`, `list_files`, `read_file`, `write_file`, `edit_file`,
+`push`, plus `path` in local mode only).
 **Prefer those tools over shelling out to the `scrim` CLI** — they're the same
 code path, return structured results, and don't depend on `scrim` being on
 `PATH`. Fall back to the shell verbs (the rest of this skill) only when the
@@ -67,7 +67,12 @@ can't reach on disk. `read_file`/`write_file`/`edit_file` work in both modes,
 and so does `push` — it reads the MCP process's own local disk either way;
 only `path` is local-only. Prefer `edit_file` over `write_file` for changes
 to an existing file — it replaces an exact string server-side, so it costs
-tokens proportional to the change, not the whole file.
+tokens proportional to the change, not the whole file; pass it an `edits`
+array to apply many replacements in one transactional call. `list_files`
+enumerates a canvas's files (paths + sizes, no content) so you can discover
+what to read or edit; `copy_canvas` duplicates a canvas server-side. For large
+or binary files, `read_file`/`write_file` accept `encoding: "gzip+base64"` to
+move content compressed.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which

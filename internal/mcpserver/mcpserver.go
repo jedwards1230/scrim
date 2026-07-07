@@ -27,6 +27,8 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -39,6 +41,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/daemon"
 	"github.com/jedwards1230/scrim/internal/fileedit"
+	"github.com/jedwards1230/scrim/internal/gzipx"
 	"github.com/jedwards1230/scrim/internal/pushclient"
 	"github.com/jedwards1230/scrim/internal/state"
 )
@@ -138,20 +141,28 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 		Description: "Restore a canvas from a snapshot (latest by default), taking a safety snapshot of the current contents first.",
 	}, s.handleRevert)
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "copy_canvas",
+		Description: "Duplicate a canvas into a new one server-side (no file bytes round-trip through the client). Fails if the destination exists unless overwrite is set, which snapshots the destination first.",
+	}, s.handleCopyCanvas)
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "status",
 		Description: "Report scrim daemon/hub status.",
 	}, s.handleStatus)
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_files",
+		Description: "List every file in a canvas as canvas-relative paths with size and modification time — the way to discover what a canvas contains before reading or editing it. Returns no file content.",
+	}, s.handleListFiles)
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
-		Description: "Read one file from a canvas and return its text content inline. The file must be UTF-8 text and at most ~2 MiB.",
+		Description: "Read one file from a canvas and return its text content inline. The file must be UTF-8 text and at most ~2 MiB. Pass encoding=\"gzip+base64\" to receive larger or binary files gzip-compressed then base64-encoded instead.",
 	}, s.handleReadFile)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "write_file",
-		Description: "Write one file into an existing canvas from inline text content (create the canvas first with add). Content is capped at ~2 MiB.",
+		Description: "Write one file into an existing canvas from inline text content (create the canvas first with add). Content is capped at ~2 MiB. Pass encoding=\"gzip+base64\" to send content gzip-compressed then base64-encoded (the cap applies to the decoded bytes) — worthwhile for large HTML/JS.",
 	}, s.handleWriteFile)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "edit_file",
-		Description: "Replace an exact string in one canvas file server-side — the token-efficient alternative to write_file for changing an existing file (tokens scale with the diff, not the file). old_string must occur exactly once unless replace_all is set.",
+		Description: "Replace an exact string in one canvas file server-side — the token-efficient alternative to write_file for changing an existing file (tokens scale with the diff, not the file). old_string must occur exactly once unless replace_all is set. Pass an edits array to apply many replacements in one transactional call (all-or-nothing: any failing edit leaves the file untouched); edits is mutually exclusive with the single old_string/new_string fields.",
 	}, s.handleEditFile)
 
 	// push is local-only whole-canvas push to an external hub, reading the
@@ -160,7 +171,7 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 	// independent of the backend.
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "push",
-		Description: "Tar a local canvas and push it to a hub once. Reads the canvas straight off disk; never launches a browser.",
+		Description: "Pack a canvas from the MACHINE RUNNING THIS MCP SERVER's own disk (its --dir) and push it once to a hub. It sources from the MCP server's filesystem — NOT the calling agent's machine and NOT the hub — so it's only useful when scrim mcp runs where the canvas files live. For a remotely-hosted MCP server (e.g. in-cluster beside the hub) that disk is the pod's, not yours: author canvas content over the wire with write_file/edit_file instead. Never launches a browser.",
 	}, s.handlePush)
 
 	// path is a server-local directory lookup — meaningless to a remote hub
@@ -403,6 +414,37 @@ func (s *server) handleRevert(ctx context.Context, _ *mcp.CallToolRequest, in re
 		revertOutput(info), nil
 }
 
+// ── tool: copy_canvas ──────────────────────────────────────────────────────
+
+type copyCanvasInput struct {
+	From      string `json:"from" jsonschema:"source canvas id to copy (required)"`
+	To        string `json:"to" jsonschema:"destination canvas id (required); must not already exist unless overwrite is set"`
+	Overwrite bool   `json:"overwrite,omitempty" jsonschema:"replace an existing destination, snapshotting it first"`
+}
+
+type copyCanvasOutput struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	URL  string `json:"url,omitempty"`
+}
+
+func (s *server) handleCopyCanvas(ctx context.Context, _ *mcp.CallToolRequest, in copyCanvasInput) (*mcp.CallToolResult, copyCanvasOutput, error) {
+	if err := canvas.ValidateID(in.From); err != nil {
+		return errorResult(err.Error()), copyCanvasOutput{}, nil
+	}
+	if err := canvas.ValidateID(in.To); err != nil {
+		return errorResult(err.Error()), copyCanvasOutput{}, nil
+	}
+	info, err := s.backend.CopyCanvas(ctx, in.From, in.To, in.Overwrite)
+	if err != nil {
+		return errorResult(err.Error()), copyCanvasOutput{}, nil
+	}
+	// copyCanvasOutput is CopyInfo's wire shape -- identical fields, JSON tags
+	// added -- so a direct conversion is exact.
+	return textResult(fmt.Sprintf("copied %s to %s", info.From, info.To)),
+		copyCanvasOutput(info), nil
+}
+
 // ── tool: status ─────────────────────────────────────────────────────────--
 
 type statusInput struct{}
@@ -443,17 +485,45 @@ func (s *server) handleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ sta
 	return textResult(fmt.Sprintf("daemon running (pid %d, %d canvas(es))", info.PID, info.CanvasCount)), out, nil
 }
 
+// ── tool: list_files ───────────────────────────────────────────────────────
+
+type listFilesInput struct {
+	ID string `json:"id" jsonschema:"canvas id whose files to list (required)"`
+}
+
+type listFilesOutput struct {
+	Files []FileEntry `json:"files"`
+}
+
+func (s *server) handleListFiles(ctx context.Context, _ *mcp.CallToolRequest, in listFilesInput) (*mcp.CallToolResult, listFilesOutput, error) {
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), listFilesOutput{}, nil
+	}
+	files, err := s.backend.ListFiles(ctx, in.ID)
+	if err != nil {
+		return errorResult(err.Error()), listFilesOutput{}, nil
+	}
+	if files == nil {
+		files = []FileEntry{}
+	}
+	return textResult(fmt.Sprintf("%d file(s) in %s", len(files), in.ID)), listFilesOutput{Files: files}, nil
+}
+
 // ── tool: read_file ────────────────────────────────────────────────────────
 
 type readFileInput struct {
-	ID   string `json:"id" jsonschema:"canvas id (required)"`
-	Path string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
+	ID       string `json:"id" jsonschema:"canvas id (required)"`
+	Path     string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
+	Encoding string `json:"encoding,omitempty" jsonschema:"omit for inline UTF-8 text, or set to gzip+base64 to receive content gzip-compressed then base64-encoded (for large or binary files)"`
 }
 
 type readFileOutput struct {
 	ID      string `json:"id"`
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	// Encoding reports how Content is encoded: "" (empty) for plain UTF-8
+	// text, or "gzip+base64" when the caller requested compressed content.
+	Encoding string `json:"encoding,omitempty"`
 }
 
 func (s *server) handleReadFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, readFileOutput, error) {
@@ -463,26 +533,80 @@ func (s *server) handleReadFile(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if in.Path == "" {
 		return errorResult("path is required"), readFileOutput{}, nil
 	}
+	if in.Encoding != "" && in.Encoding != encodingGzipBase64 {
+		return errorResult(unsupportedEncodingMsg(in.Encoding)), readFileOutput{}, nil
+	}
 	data, err := s.backend.ReadFile(ctx, in.ID, in.Path)
 	if err != nil {
 		return errorResult(err.Error()), readFileOutput{}, nil
 	}
-	// Content rides inline as text; a non-UTF-8 file can't be represented
-	// without corruption, so refuse it rather than mangle binary bytes.
+	// gzip+base64: return the compressed representation, which is binary-safe
+	// (no UTF-8 requirement) and small for large files. The summary reports
+	// the decoded size; the structured content carries the encoded bytes.
+	if in.Encoding == encodingGzipBase64 {
+		encoded := base64.StdEncoding.EncodeToString(gzipx.Deflate(data))
+		out := readFileOutput{ID: in.ID, Path: in.Path, Content: encoded, Encoding: encodingGzipBase64}
+		return textResult(fmt.Sprintf("%d bytes (gzip+base64 encoded)", len(data))), out, nil
+	}
+	// Plain-text path: content rides inline as text; a non-UTF-8 file can't be
+	// represented without corruption, so refuse it (the caller can re-request
+	// with encoding=gzip+base64) rather than mangle binary bytes.
 	if !utf8.Valid(data) {
-		return errorResult(fmt.Sprintf("file %q in canvas %q is not UTF-8 text (read_file returns text only)", in.Path, in.ID)),
+		return errorResult(fmt.Sprintf("file %q in canvas %q is not UTF-8 text (read_file returns text only; request encoding=gzip+base64 for binary)", in.Path, in.ID)),
 			readFileOutput{}, nil
 	}
 	out := readFileOutput{ID: in.ID, Path: in.Path, Content: string(data)}
 	return textResult(string(data)), out, nil
 }
 
+// ── content encoding (write_file / read_file) ───────────────────────────────
+
+// encodingGzipBase64 is the one non-default content encoding read_file and
+// write_file accept: the content field is the file's bytes gzip-compressed
+// then base64-encoded. It shrinks a large HTML/JS payload ~4x on the wire and
+// in an agent's context window (see #42); it is orthogonal to the hub machine
+// API's own Content-Encoding: gzip transport (that's the mcp-server↔hub hop).
+const encodingGzipBase64 = "gzip+base64"
+
+// decodeContent turns a write_file content field + encoding into the raw bytes
+// to write. An empty encoding is plain text (the bytes are the string itself);
+// gzip+base64 is base64-decoded then gunzipped with the per-file cap applied to
+// the DECODED size (the gzip-bomb guard). Any other encoding is rejected.
+func decodeContent(content, encoding string) ([]byte, error) {
+	switch encoding {
+	case "":
+		return []byte(content), nil
+	case encodingGzipBase64:
+		compressed, err := base64.StdEncoding.DecodeString(content)
+		if err != nil {
+			return nil, fmt.Errorf("content is not valid base64: %w", err)
+		}
+		raw, err := gzipx.Inflate(compressed, maxFileBytes)
+		if err != nil {
+			if errors.Is(err, gzipx.ErrTooLarge) {
+				return nil, fmt.Errorf("decoded content exceeds the %d-byte (2 MiB) per-file limit", maxFileBytes)
+			}
+			return nil, fmt.Errorf("content is not valid gzip: %w", err)
+		}
+		return raw, nil
+	default:
+		return nil, errors.New(unsupportedEncodingMsg(encoding))
+	}
+}
+
+// unsupportedEncodingMsg is the shared rejection message for an encoding value
+// read_file/write_file don't recognize.
+func unsupportedEncodingMsg(encoding string) string {
+	return fmt.Sprintf("unsupported encoding %q (want %q or omit for plain text)", encoding, encodingGzipBase64)
+}
+
 // ── tool: write_file ───────────────────────────────────────────────────────
 
 type writeFileInput struct {
-	ID      string `json:"id" jsonschema:"canvas id (required); the canvas must already exist"`
-	Path    string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
-	Content string `json:"content" jsonschema:"full file content to write (capped at ~2 MiB)"`
+	ID       string `json:"id" jsonschema:"canvas id (required); the canvas must already exist"`
+	Path     string `json:"path" jsonschema:"file path within the canvas, e.g. index.html or assets/app.js (required)"`
+	Content  string `json:"content" jsonschema:"file content to write; plain text by default, or base64(gzip(bytes)) when encoding is gzip+base64 (capped at ~2 MiB decoded)"`
+	Encoding string `json:"encoding,omitempty" jsonschema:"content encoding; omit for plain text, or set to gzip+base64 to send content gzip-compressed then base64-encoded"`
 }
 
 type writeFileOutput struct {
@@ -498,7 +622,12 @@ func (s *server) handleWriteFile(ctx context.Context, _ *mcp.CallToolRequest, in
 	if in.Path == "" {
 		return errorResult("path is required"), writeFileOutput{}, nil
 	}
-	content := []byte(in.Content)
+	content, err := decodeContent(in.Content, in.Encoding)
+	if err != nil {
+		return errorResult(err.Error()), writeFileOutput{}, nil
+	}
+	// The cap applies to the DECODED bytes: a gzip+base64 payload is small on
+	// the wire but its inflated size is what lands on disk.
 	if len(content) > maxFileBytes {
 		return errorResult(fmt.Sprintf("content is %d bytes, over the %d-byte (2 MiB) per-file limit", len(content), maxFileBytes)),
 			writeFileOutput{}, nil
@@ -513,9 +642,18 @@ func (s *server) handleWriteFile(ctx context.Context, _ *mcp.CallToolRequest, in
 // ── tool: edit_file ────────────────────────────────────────────────────────
 
 type editFileInput struct {
-	ID         string `json:"id" jsonschema:"canvas id (required)"`
-	Path       string `json:"path" jsonschema:"file path within the canvas, e.g. index.html (required); the file must already exist"`
-	OldString  string `json:"old_string" jsonschema:"exact text to replace (required); must occur exactly once unless replace_all is set"`
+	ID         string     `json:"id" jsonschema:"canvas id (required)"`
+	Path       string     `json:"path" jsonschema:"file path within the canvas, e.g. index.html (required); the file must already exist"`
+	OldString  string     `json:"old_string,omitempty" jsonschema:"exact text to replace; must occur exactly once unless replace_all is set. Required for a single edit; omit when using edits"`
+	NewString  string     `json:"new_string,omitempty" jsonschema:"replacement text; must differ from old_string. Pairs with old_string for a single edit"`
+	ReplaceAll bool       `json:"replace_all,omitempty" jsonschema:"replace every occurrence of old_string instead of requiring exactly one"`
+	Edits      []editSpec `json:"edits,omitempty" jsonschema:"a transactional batch of edits applied in order (all-or-nothing); mutually exclusive with old_string/new_string/replace_all"`
+}
+
+// editSpec is one entry in edit_file's batch array -- the same three fields a
+// single edit takes.
+type editSpec struct {
+	OldString  string `json:"old_string" jsonschema:"exact text to replace; must occur exactly once unless replace_all is set"`
 	NewString  string `json:"new_string" jsonschema:"replacement text; must differ from old_string"`
 	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"replace every occurrence of old_string instead of requiring exactly one"`
 }
@@ -532,6 +670,33 @@ func (s *server) handleEditFile(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if in.Path == "" {
 		return errorResult("path is required"), editFileOutput{}, nil
 	}
+
+	// Batch path: the edits array is mutually exclusive with the single-edit
+	// fields (matching the hub PATCH handler), and applied transactionally.
+	if len(in.Edits) > 0 {
+		if in.OldString != "" || in.NewString != "" || in.ReplaceAll {
+			return errorResult("edits is mutually exclusive with old_string/new_string/replace_all"), editFileOutput{}, nil
+		}
+		edits := make([]fileedit.Edit, len(in.Edits))
+		for i, e := range in.Edits {
+			// Fail the two pure input errors fast, per index, before any bytes
+			// cross the wire -- the wording mirrors fileedit's own messages.
+			if e.OldString == "" {
+				return errorResult(fmt.Sprintf("edit %d: %s", i, fileedit.ErrOldStringEmpty.Error())), editFileOutput{}, nil
+			}
+			if e.OldString == e.NewString {
+				return errorResult(fmt.Sprintf("edit %d: %s", i, fileedit.ErrNoChange.Error())), editFileOutput{}, nil
+			}
+			edits[i] = fileedit.Edit{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll}
+		}
+		info, err := s.backend.EditFileBatch(ctx, in.ID, in.Path, edits)
+		if err != nil {
+			return errorResult(err.Error()), editFileOutput{}, nil
+		}
+		return textResult(fmt.Sprintf("applied %d edit(s), %d replacement(s) in %s/%s", len(edits), info.Replacements, in.ID, info.Path)),
+			editFileOutput(info), nil
+	}
+
 	// Fail the two pure input errors fast (before any file read locally, or
 	// any bytes cross the wire in hub mode) with fileedit's own messages, so
 	// the wording is identical to what the backend would return.

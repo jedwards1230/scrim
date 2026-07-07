@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/fileedit"
 )
 
 func TestLocalBackendReadWriteRoundTrip(t *testing.T) {
@@ -149,5 +150,111 @@ func TestLocalBackendWriteSizeCap(t *testing.T) {
 	}
 	if err := b.WriteFile(context.Background(), "c1", "big.txt", make([]byte, maxFileBytes+1)); err == nil {
 		t.Fatal("oversize WriteFile error = nil, want a cap rejection")
+	}
+}
+
+func TestLocalBackendListFiles(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	b := newLocalBackend(cfg)
+	ctx := context.Background()
+
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("x=1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := b.ListFiles(ctx, "c1")
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 2 || files[0].Path != "assets/app.js" || files[1].Path != "index.html" {
+		t.Errorf("files = %+v, want sorted [assets/app.js, index.html]", files)
+	}
+}
+
+func TestLocalBackendEditFileBatch(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	b := newLocalBackend(cfg)
+	ctx := context.Background()
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("alpha beta gamma"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := b.EditFileBatch(ctx, "c1", "index.html", []fileedit.Edit{
+		{OldString: "alpha", NewString: "one"},
+		{OldString: "gamma", NewString: "three"},
+	})
+	if err != nil {
+		t.Fatalf("EditFileBatch: %v", err)
+	}
+	if info.Replacements != 2 {
+		t.Errorf("replacements = %d, want 2", info.Replacements)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "index.html"))
+	if string(got) != "one beta three" {
+		t.Errorf("content = %q, want %q", got, "one beta three")
+	}
+
+	// A failing batch leaves the file untouched.
+	_, err = b.EditFileBatch(ctx, "c1", "index.html", []fileedit.Edit{
+		{OldString: "one", NewString: "X"},
+		{OldString: "nope", NewString: "Y"},
+	})
+	if err == nil {
+		t.Fatal("failing batch err = nil, want an error")
+	}
+	got, _ = os.ReadFile(filepath.Join(dir, "index.html"))
+	if string(got) != "one beta three" {
+		t.Errorf("file changed after failed batch = %q, want untouched", got)
+	}
+}
+
+func TestLocalBackendCopyCanvas(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	b := newLocalBackend(cfg)
+	ctx := context.Background()
+	dir := filepath.Join(cfg.CanvasesDir(), "src")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>src</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("x=1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := b.CopyCanvas(ctx, "src", "dst", false)
+	if err != nil {
+		t.Fatalf("CopyCanvas: %v", err)
+	}
+	if info.From != "src" || info.To != "dst" {
+		t.Errorf("info = %+v", info)
+	}
+	dstDir := filepath.Join(cfg.CanvasesDir(), "dst")
+	if got, _ := os.ReadFile(filepath.Join(dstDir, "index.html")); string(got) != "<h1>src</h1>" {
+		t.Errorf("dst index.html = %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dstDir, "assets", "app.js")); string(got) != "x=1" {
+		t.Errorf("dst assets/app.js = %q", got)
+	}
+
+	// Copy onto an existing target without overwrite fails.
+	if _, err := b.CopyCanvas(ctx, "src", "dst", false); err == nil {
+		t.Error("copy onto existing target: err = nil, want an error")
+	}
+	// With overwrite it succeeds.
+	if _, err := b.CopyCanvas(ctx, "src", "dst", true); err != nil {
+		t.Errorf("overwrite copy: %v", err)
 	}
 }

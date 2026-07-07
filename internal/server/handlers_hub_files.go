@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/fileedit"
+	"github.com/jedwards1230/scrim/internal/gzipx"
 )
 
 // maxFileBytes bounds a single file written through PUT
@@ -72,6 +75,39 @@ func mustRel(base, target string) string {
 		return ".." // not relative -> fails IsLocal
 	}
 	return rel
+}
+
+// handleListCanvasFiles serves GET /api/canvases/{id}/files (hub mode only,
+// see routes.go): it returns a JSON array of {path, size, modified_at} for
+// every regular file in the canvas, recursively, as canvas-relative paths --
+// no content, so the response stays small and discloses no file bytes.
+// Bearer-gated by withHubGate like every hub machine endpoint. It shares
+// canvas.Files with the local MCP backend so both list the exact same shape.
+func (s *Server) handleListCanvasFiles(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := canvas.ValidateID(id); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	root := canvas.Dir(s.canvasesDir, id)
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		writeJSONError(w, http.StatusNotFound, "canvas not found: "+id)
+		return
+	}
+	files, err := canvas.Files(s.canvasesDir, id)
+	if err != nil {
+		// Generic on purpose: raw walk/os errors can embed absolute server
+		// paths, and this surface hides paths everywhere else.
+		writeJSONError(w, http.StatusInternalServerError, "listing files failed")
+		return
+	}
+	// canvas.Files already sorts by path and returns a JSON-tagged shape; a
+	// nil slice would marshal as null, so ensure an empty canvas serializes
+	// as [].
+	if files == nil {
+		files = []canvas.FileMeta{}
+	}
+	writeJSON(w, http.StatusOK, files)
 }
 
 // handleReadCanvasFile serves GET /api/canvases/{id}/files/{path...} (hub mode
@@ -142,8 +178,34 @@ func (s *Server) handleReadCanvasFile(w http.ResponseWriter, r *http.Request) {
 	// Canvas content is agent-authored and potentially sensitive: keep it out
 	// of every cache entirely, matching the static canvas handler's policy.
 	w.Header().Set("Cache-Control", "no-store")
+
+	// Compress the response only when the client asked for it (scrim mcp --hub
+	// sets Accept-Encoding: gzip) AND the file is large enough to be worth it
+	// -- tiny files gzip to more bytes than they save. Streamed through a
+	// gzip.Writer so a large file never buffers whole in memory.
+	if fi.Size() >= gzipReadMinBytes && clientAcceptsGzip(r) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		gz := gzip.NewWriter(w)
+		_, _ = io.Copy(gz, f)
+		_ = gz.Close()
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, f)
+}
+
+// gzipReadMinBytes is the file-size floor below which handleReadCanvasFile
+// serves identity even to a gzip-accepting client: below ~1 KiB, gzip's header
+// and framing overhead outweighs any saving.
+const gzipReadMinBytes = 1024
+
+// clientAcceptsGzip reports whether r's Accept-Encoding lists gzip. A simple
+// substring check is enough here: the only caller that sets it is scrim mcp
+// --hub, which sends a bare "gzip"; scrim never negotiates q-values.
+func clientAcceptsGzip(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
 }
 
 // handleWriteCanvasFile serves PUT /api/canvases/{id}/files/{path...} (hub mode
@@ -180,6 +242,24 @@ func (s *Server) handleWriteCanvasFile(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONError(w, http.StatusBadRequest, "reading request body: "+err.Error())
 		return
+	}
+
+	// A gzip-compressed body (Content-Encoding: gzip, sent by scrim mcp --hub's
+	// write path for large files) is inflated here, with the per-file cap
+	// applied to the DECODED size -- the gzip-bomb guard, since the compressed
+	// body could be far under maxFileBytes yet inflate past it. Absent the
+	// header the bytes are written verbatim, so a plain PUT is unchanged.
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		inflated, err := gzipx.Inflate(data, maxFileBytes)
+		if err != nil {
+			if errors.Is(err, gzipx.ErrTooLarge) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, fmtFileTooLarge())
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "invalid gzip request body")
+			return
+		}
+		data = inflated
 	}
 
 	// Serialize with handlePush's rename-aside/swap sequence (and the other
@@ -259,6 +339,15 @@ func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
 		OldString  string `json:"old_string"`
 		NewString  string `json:"new_string"`
 		ReplaceAll bool   `json:"replace_all"`
+		// Edits, when non-empty, is a transactional batch applied in order --
+		// mutually exclusive with the single-edit fields above (see #41). It
+		// shares fileedit.ApplyBatch with the MCP edit_file batch path, so the
+		// two can't drift.
+		Edits []struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		} `json:"edits"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		var maxErr *http.MaxBytesError
@@ -267,6 +356,15 @@ func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	// The single-edit fields and the edits array are mutually exclusive: a
+	// request that sets both is ambiguous and rejected before any file read.
+	singleGiven := body.OldString != "" || body.NewString != "" || body.ReplaceAll
+	if len(body.Edits) > 0 && singleGiven {
+		writeJSONError(w, http.StatusBadRequest,
+			"edits is mutually exclusive with old_string/new_string/replace_all")
 		return
 	}
 
@@ -320,10 +418,20 @@ func (s *Server) handleEditCanvasFile(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "reading file failed")
 		return
 	}
-	edited, replacements, err := fileedit.Apply(data, body.OldString, body.NewString, body.ReplaceAll, maxFileBytes)
+	var edited []byte
+	var replacements int
+	if len(body.Edits) > 0 {
+		edits := make([]fileedit.Edit, len(body.Edits))
+		for i, e := range body.Edits {
+			edits[i] = fileedit.Edit{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll}
+		}
+		edited, replacements, err = fileedit.ApplyBatch(data, edits, maxFileBytes)
+	} else {
+		edited, replacements, err = fileedit.Apply(data, body.OldString, body.NewString, body.ReplaceAll, maxFileBytes)
+	}
 	if err != nil {
-		// fileedit messages are path-free by construction, so they are safe
-		// to serve verbatim.
+		// fileedit messages are path-free by construction (a BatchError adds
+		// only the failing index), so they are safe to serve verbatim.
 		writeJSONError(w, editApplyStatus(err), err.Error())
 		return
 	}

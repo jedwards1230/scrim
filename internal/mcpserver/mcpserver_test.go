@@ -1,13 +1,16 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/gzipx"
 	"github.com/jedwards1230/scrim/internal/snapshot"
 	"github.com/jedwards1230/scrim/internal/state"
 )
@@ -608,13 +612,13 @@ func TestNewServerRegistersAllTools(t *testing.T) {
 		got[tool.Name] = true
 	}
 	// Local mode registers every tool, including path (local-only).
-	for _, want := range []string{"add", "list", "link", "path", "rm", "snap", "snaps", "revert", "status", "read_file", "write_file", "edit_file", "push"} {
+	for _, want := range []string{"add", "list", "link", "copy_canvas", "path", "rm", "snap", "snaps", "revert", "status", "list_files", "read_file", "write_file", "edit_file", "push"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
 		}
 	}
-	if len(got) != 13 {
-		t.Errorf("registered %d tools, want 13: %v", len(got), got)
+	if len(got) != 15 {
+		t.Errorf("registered %d tools, want 15: %v", len(got), got)
 	}
 }
 
@@ -743,5 +747,198 @@ func TestCallToolInvalidIDIsToolError(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Error("expected IsError for an invalid id")
+	}
+}
+
+func TestCallToolListFilesEndToEnd(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>hi</h1>"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("x=1"), 0o644)
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_files",
+		Arguments: map[string]any{"id": "c1"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("list_files tool error: %v", res.Content)
+	}
+	sc, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T", res.StructuredContent)
+	}
+	files, ok := sc["files"].([]any)
+	if !ok || len(files) != 2 {
+		t.Fatalf("files = %v, want 2 entries", sc["files"])
+	}
+	first := files[0].(map[string]any)
+	if first["path"] != "assets/app.js" {
+		t.Errorf("first path = %v, want assets/app.js", first["path"])
+	}
+}
+
+func TestCallToolEditFileBatchEndToEnd(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte("alpha beta gamma"), 0o644)
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "edit_file",
+		Arguments: map[string]any{
+			"id": "c1", "path": "index.html",
+			"edits": []any{
+				map[string]any{"old_string": "alpha", "new_string": "one"},
+				map[string]any{"old_string": "gamma", "new_string": "three"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("batch edit_file tool error: %v", res.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "index.html"))
+	if string(got) != "one beta three" {
+		t.Errorf("content = %q, want %q", got, "one beta three")
+	}
+
+	// Mutually exclusive: both edits and single fields -> tool error.
+	bad, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "edit_file",
+		Arguments: map[string]any{
+			"id": "c1", "path": "index.html",
+			"old_string": "beta", "new_string": "x",
+			"edits": []any{map[string]any{"old_string": "beta", "new_string": "y"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !bad.IsError {
+		t.Error("both single + edits: want a tool error")
+	}
+}
+
+func TestCallToolWriteReadGzipBase64RoundTrip(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+	dir := filepath.Join(cfg.CanvasesDir(), "c1")
+	_ = os.MkdirAll(dir, 0o755)
+
+	raw := []byte(strings.Repeat("<div>x</div>", 1000))
+	encoded := base64.StdEncoding.EncodeToString(gzipx.Deflate(raw))
+
+	wres, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "write_file",
+		Arguments: map[string]any{
+			"id": "c1", "path": "index.html",
+			"content": encoded, "encoding": "gzip+base64",
+		},
+	})
+	if err != nil {
+		t.Fatalf("write CallTool: %v", err)
+	}
+	if wres.IsError {
+		t.Fatalf("write_file gzip+base64 error: %v", wres.Content)
+	}
+	// The DECODED bytes landed on disk.
+	onDisk, _ := os.ReadFile(filepath.Join(dir, "index.html"))
+	if !bytes.Equal(onDisk, raw) {
+		t.Errorf("on-disk bytes mismatch (%d vs %d)", len(onDisk), len(raw))
+	}
+
+	// Read it back compressed and verify it inflates to the original.
+	rres, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"id": "c1", "path": "index.html", "encoding": "gzip+base64"},
+	})
+	if err != nil {
+		t.Fatalf("read CallTool: %v", err)
+	}
+	sc := rres.StructuredContent.(map[string]any)
+	if sc["encoding"] != "gzip+base64" {
+		t.Errorf("read encoding = %v, want gzip+base64", sc["encoding"])
+	}
+	compressed, err := base64.StdEncoding.DecodeString(sc["content"].(string))
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	back, err := gzipx.Inflate(compressed, maxFileBytes)
+	if err != nil {
+		t.Fatalf("inflate: %v", err)
+	}
+	if !bytes.Equal(back, raw) {
+		t.Errorf("gzip+base64 read round-trip mismatch")
+	}
+}
+
+func TestCallToolWriteFileBadEncoding(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+	_ = os.MkdirAll(filepath.Join(cfg.CanvasesDir(), "c1"), 0o755)
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "write_file",
+		Arguments: map[string]any{
+			"id": "c1", "path": "index.html",
+			"content": "not base64 gzip", "encoding": "gzip+base64",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Error("invalid gzip+base64 content: want a tool error")
+	}
+}
+
+func TestCallToolCopyCanvasEndToEnd(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	srv := NewServer(cfg, "test", nil)
+	session := connectInMemory(t, srv)
+	dir := filepath.Join(cfg.CanvasesDir(), "src")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>src</h1>"), 0o644)
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "copy_canvas",
+		Arguments: map[string]any{"from": "src", "to": "dst"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("copy_canvas tool error: %v", res.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(cfg.CanvasesDir(), "dst", "index.html"))
+	if string(got) != "<h1>src</h1>" {
+		t.Errorf("dst content = %q", got)
+	}
+
+	// Copy onto the existing target without overwrite -> tool error.
+	conflict, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "copy_canvas",
+		Arguments: map[string]any{"from": "src", "to": "dst"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !conflict.IsError {
+		t.Error("copy onto existing target: want a tool error")
 	}
 }

@@ -47,6 +47,65 @@ func (e *TooLargeError) Error() string {
 	return fmt.Sprintf("edited file would be %d bytes, over the %d-byte per-file limit", e.Size, e.Max)
 }
 
+// ErrNoEdits reports an empty edits slice handed to ApplyBatch -- a batch
+// with nothing to do is almost certainly a caller mistake, distinct from a
+// single edit whose old_string is empty (ErrOldStringEmpty).
+var ErrNoEdits = errors.New("edits is empty")
+
+// Edit is one replacement in a batch: the same three fields a single Apply
+// call takes.
+type Edit struct {
+	OldString  string
+	NewString  string
+	ReplaceAll bool
+}
+
+// BatchError reports which edit in an ApplyBatch sequence failed, wrapping the
+// underlying cause (ErrNotFound, *MultipleMatchesError, *TooLargeError, etc.).
+// Index is the zero-based position of the failing edit in the input slice, so
+// a caller can point at exactly which replacement didn't apply. It Unwraps to
+// the cause, so errors.Is/As and the HTTP-status mapping see through it.
+type BatchError struct {
+	Index int
+	Err   error
+}
+
+func (e *BatchError) Error() string {
+	return fmt.Sprintf("edit %d: %s", e.Index, e.Err.Error())
+}
+
+func (e *BatchError) Unwrap() error { return e.Err }
+
+// ApplyBatch applies edits sequentially to content -- each against the result
+// of the previous one -- and returns the final bytes plus the total number of
+// replacements across all edits. It is all-or-nothing and transactional: the
+// FIRST edit that fails (not-found, ambiguous without replace_all, or a
+// result over maxBytes) aborts the whole batch with a *BatchError naming that
+// edit's index, and NO partial result is returned -- the caller writes the
+// original file untouched. An empty edits slice is ErrNoEdits.
+//
+// Each step reuses Apply, so single-edit and batch semantics can never drift:
+// a one-element batch behaves exactly like the matching Apply call (only the
+// error is wrapped in a *BatchError). The size cap is enforced at every step,
+// bounding memory even if an intermediate result would balloon before a later
+// edit shrinks it.
+func ApplyBatch(content []byte, edits []Edit, maxBytes int) ([]byte, int, error) {
+	if len(edits) == 0 {
+		return nil, 0, ErrNoEdits
+	}
+	buf := content
+	total := 0
+	for i, e := range edits {
+		edited, n, err := Apply(buf, e.OldString, e.NewString, e.ReplaceAll, maxBytes)
+		if err != nil {
+			return nil, 0, &BatchError{Index: i, Err: err}
+		}
+		buf = edited
+		total += n
+	}
+	return buf, total, nil
+}
+
 // Apply replaces oldStr with newStr in content and returns the edited bytes
 // plus the number of replacements made. Semantics mirror an exact-string Edit
 // tool: oldStr must be non-empty and differ from newStr; without replaceAll,
