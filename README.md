@@ -300,6 +300,14 @@ docker run -p 7788:7788 -v scrim-hub-data:/data ghcr.io/jedwards1230/scrim:lates
 
 (Or build it yourself from the repo's `Dockerfile`: `docker build -t scrim-hub .`)
 
+### Machine API reference
+
+The hub's machine API — the bearer-gated HTTP surface `scrim mcp --hub` drives
+(canvas CRUD, per-file read/write/edit, push, copy, and snapshots) — is
+documented as a hand-authored OpenAPI 3.1 spec at
+[`api/openapi.yaml`](api/openapi.yaml). It is the canonical route reference and
+is kept current with the handlers (a CI `vacuum lint` gate guards its validity).
+
 ### OIDC login for reads
 
 Setting `--oidc-issuer` turns on native OpenID Connect login for hub **reads**,
