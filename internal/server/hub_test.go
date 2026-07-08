@@ -63,6 +63,7 @@ func TestDefaultServerHasNoHubSurface(t *testing.T) {
 		{http.MethodGet, "/api/canvases/foo/files/index.html"},
 		{http.MethodPost, "/api/canvases/foo/copy"},
 		{http.MethodGet, "/api/canvases/foo/snapshots"},
+		{http.MethodGet, "/api/openapi.yaml"},
 	} {
 		req := httptest.NewRequest(mr.method, mr.path, nil)
 		rec := httptest.NewRecorder()

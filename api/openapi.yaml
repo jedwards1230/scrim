@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: scrim hub machine API
-  version: 0.5.0
+  version: 0.6.0
   summary: HTTP control surface a remote MCP client (scrim mcp --hub) uses to author canvas content on a scrim hub.
   description: |-
     The machine API exposed by `scrim hub` (see the repo `CLAUDE.md` "Hub" section). It is the
@@ -28,9 +28,14 @@ info:
     **Common error shape.** Every non-2xx JSON response is `{"error": "<message>"}`. Messages are
     deliberately path-free (no absolute server paths ever appear in a body).
 
-    **Out of scope of this document.** Serving this spec over HTTP, client codegen, and any handler
-    change are non-goals (issue #57); this file is hand-authored and kept current with the handlers
-    as a review discipline plus a CI `vacuum lint` gate, not generated.
+    **Served from a live hub.** A hub serves this document at `GET /api/openapi.yaml` (gate-exempt,
+    hub-only) so standard OpenAPI tooling can consume the contract directly. Only YAML is served —
+    scrim's minimal-dependency posture means no YAML-to-JSON conversion library is pulled in; modern
+    tooling reads YAML natively.
+
+    **Out of scope of this document.** Client codegen and any handler change are non-goals (issue
+    #57); this file is hand-authored and kept current with the handlers as a review discipline plus
+    a CI `vacuum lint` gate, not generated.
 
   license:
     name: MIT
@@ -41,6 +46,8 @@ servers:
     description: Default hub bind (loopback, port 7788). A deployed hub is typically fronted by an ingress at its own host.
 
 tags:
+  - name: meta
+    description: The API's own contract, served for tooling.
   - name: status
     description: Daemon health and lifecycle.
   - name: canvases
@@ -61,6 +68,25 @@ security:
   - pushToken: []
 
 paths:
+  /api/openapi.yaml:
+    get:
+      tags: [meta]
+      operationId: getOpenAPISpec
+      summary: This OpenAPI document.
+      description: >-
+        Returns this spec itself, served verbatim from bytes embedded in the hub binary. Hub-only
+        and gate-exempt (no bearer, OIDC session, or CIDR match required): the document is public
+        (committed in the repo), carries no canvas content, and must be fetchable by non-browser
+        OpenAPI tooling. Only YAML is served — scrim adds no YAML-to-JSON dependency.
+      security: []
+      responses:
+        '200':
+          description: The OpenAPI 3.1 document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
   /api/status:
     get:
       tags: [status]

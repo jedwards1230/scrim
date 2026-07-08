@@ -42,6 +42,16 @@ const bearerPrefix = "Bearer "
 // browse from).
 func (s *Server) withHubGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The OpenAPI spec is public (committed in the repo, carries no canvas
+		// content) and must be fetchable by a non-browser OpenAPI tool without a
+		// session or token -- exempt it from the gate entirely, regardless of
+		// OIDC. Exact match only (same rationale as isAuthPath below): a prefix
+		// would exempt paths it must not.
+		if r.URL.Path == openAPISpecPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// The OIDC login routes must be reachable by an unauthenticated
 		// browser -- gating them would make logging in impossible. They are
 		// registered only when oidcAuth is set (see routes.go), so this

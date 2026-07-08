@@ -308,6 +308,12 @@ documented as a hand-authored OpenAPI 3.1 spec at
 [`api/openapi.yaml`](api/openapi.yaml). It is the canonical route reference and
 is kept current with the handlers (a CI `vacuum lint` gate guards its validity).
 
+A running hub also serves the spec at `GET /api/openapi.yaml` (embedded in the
+binary, gate-exempt, hub-only), so standard OpenAPI tooling can read the
+contract straight from a live instance — `curl http://<hub>/api/openapi.yaml`.
+Only YAML is served (scrim adds no YAML-to-JSON dependency; modern tools read
+YAML natively).
+
 ### OIDC login for reads
 
 Setting `--oidc-issuer` turns on native OpenID Connect login for hub **reads**,
