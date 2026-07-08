@@ -147,6 +147,101 @@ func List(canvasesDir, metaDir string) ([]Info, error) {
 	return infos, nil
 }
 
+// FileMeta describes one file inside a canvas: its canvas-relative,
+// slash-separated path plus size and modification time. It deliberately
+// carries NO content -- Files enumerates a canvas cheaply and privately, and
+// callers read individual files (read_file / the files GET route) when they
+// need bytes.
+type FileMeta struct {
+	Path       string    `json:"path"`
+	Size       int64     `json:"size"`
+	ModifiedAt time.Time `json:"modified_at"`
+}
+
+// Files walks canvas id's directory and returns every regular file within it
+// as a FileMeta, sorted by path. Paths are canvas-relative and always
+// slash-separated (so a hub on Linux and a client on Windows agree). Only
+// regular files are reported: directories, symlinks, and other irregular
+// entries are skipped -- the same "regular files only" stance push extraction
+// and the file GET/PUT routes take, so a listing never exposes a symlink as
+// if it were content. A missing canvas directory is an error (the caller
+// distinguishes it from an empty canvas); an empty canvas is an empty slice.
+func Files(canvasesDir, id string) ([]FileMeta, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	root := Dir(canvasesDir, id)
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return nil, fmt.Errorf("canvas %s: no such directory", id)
+	}
+
+	var out []FileMeta
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Only regular files carry content worth listing; skip the root and
+		// nested directories, and skip symlinks/devices/etc. outright.
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		out = append(out, FileMeta{
+			Path:       filepath.ToSlash(rel),
+			Size:       info.Size(),
+			ModifiedAt: info.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing files for canvas %s: %w", id, err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// CopyMeta duplicates canvas from's external metadata onto canvas to. It
+// copies the raw metadata FILE, so only authored title/description/icon are
+// carried -- a derived default icon stays derived from to's own id rather than
+// being baked in from the source (Get would otherwise return the source's
+// derived icon, which is the wrong default for a differently-named canvas). If
+// from has no metadata file, any existing metadata for to is removed, so an
+// overwrite-copy never leaves the previous canvas's metadata behind.
+func CopyMeta(metaDir, from, to string) error {
+	if err := ValidateID(from); err != nil {
+		return err
+	}
+	if err := ValidateID(to); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(metaPath(metaDir, from))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Source carries no explicit metadata: clear the target's for
+			// parity (matters on an overwrite copy).
+			if rmErr := os.Remove(metaPath(metaDir, to)); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				return fmt.Errorf("clearing canvas metadata %s: %w", to, rmErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("reading canvas metadata %s: %w", from, err)
+	}
+	if err := os.MkdirAll(metaDir, 0o755); err != nil { //nolint:gosec // metadata dir is user-owned working state, not sensitive
+		return fmt.Errorf("creating metadata dir: %w", err)
+	}
+	if err := os.WriteFile(metaPath(metaDir, to), data, 0o644); err != nil { //nolint:gosec // metadata is not sensitive
+		return fmt.Errorf("writing canvas metadata %s: %w", to, err)
+	}
+	return nil
+}
+
 type meta struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`

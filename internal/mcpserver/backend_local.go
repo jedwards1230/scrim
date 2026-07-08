@@ -8,6 +8,7 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/dircopy"
 	"github.com/jedwards1230/scrim/internal/fileedit"
 	"github.com/jedwards1230/scrim/internal/snapshot"
 )
@@ -156,6 +157,20 @@ func (b *localBackend) Revert(_ context.Context, id, name string) (RevertInfo, e
 	return RevertInfo{Reverted: id, Snapshot: entry.Name}, nil
 }
 
+func (b *localBackend) ListFiles(_ context.Context, id string) ([]FileEntry, error) {
+	// canvas.Files validates id, requires the directory to exist, and returns
+	// the same shape the hub route serves -- so local and hub list identically.
+	metas, err := canvas.Files(b.cfg.CanvasesDir(), id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FileEntry, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, FileEntry{Path: m.Path, Size: m.Size, ModifiedAt: m.ModifiedAt})
+	}
+	return out, nil
+}
+
 func (b *localBackend) ReadFile(_ context.Context, id, path string) ([]byte, error) {
 	// cleanRelPath first, so local and hub mode accept and canonicalize the
 	// exact same path shapes (e.g. "./x.html", "a//b").
@@ -210,6 +225,23 @@ func (b *localBackend) WriteFile(_ context.Context, id, path string, content []b
 }
 
 func (b *localBackend) EditFile(_ context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error) {
+	return b.editFile(id, path, func(data []byte) ([]byte, int, error) {
+		return fileedit.Apply(data, oldStr, newStr, replaceAll, maxFileBytes)
+	})
+}
+
+func (b *localBackend) EditFileBatch(_ context.Context, id, path string, edits []fileedit.Edit) (EditInfo, error) {
+	return b.editFile(id, path, func(data []byte) ([]byte, int, error) {
+		return fileedit.ApplyBatch(data, edits, maxFileBytes)
+	})
+}
+
+// editFile is the shared read-modify-write path behind both EditFile (single)
+// and EditFileBatch: it resolves+caps+reads the file, applies the caller's
+// transform (fileedit.Apply or fileedit.ApplyBatch), and atomically writes the
+// result back. Keeping the filesystem plumbing in one place means the single
+// and batch paths can only differ in which fileedit function runs.
+func (b *localBackend) editFile(id, path string, apply func([]byte) ([]byte, int, error)) (EditInfo, error) {
 	path, err := cleanRelPath(path)
 	if err != nil {
 		return EditInfo{}, err
@@ -234,7 +266,7 @@ func (b *localBackend) EditFile(_ context.Context, id, path, oldStr, newStr stri
 		}
 		return EditInfo{}, err
 	}
-	edited, replacements, err := fileedit.Apply(data, oldStr, newStr, replaceAll, maxFileBytes)
+	edited, replacements, err := apply(data)
 	if err != nil {
 		return EditInfo{}, err
 	}
@@ -245,6 +277,115 @@ func (b *localBackend) EditFile(_ context.Context, id, path, oldStr, newStr stri
 		return EditInfo{}, err
 	}
 	return EditInfo{Path: path, Replacements: replacements}, nil
+}
+
+func (b *localBackend) CopyCanvas(_ context.Context, from, to string, overwrite bool) (CopyInfo, error) {
+	if err := canvas.ValidateID(from); err != nil {
+		return CopyInfo{}, err
+	}
+	if err := canvas.ValidateID(to); err != nil {
+		return CopyInfo{}, err
+	}
+	if from == to {
+		return CopyInfo{}, fmt.Errorf("source and target are the same canvas")
+	}
+
+	canvasesDir := b.cfg.CanvasesDir()
+	sourceDir := canvas.Dir(canvasesDir, from)
+	if fi, err := os.Stat(sourceDir); err != nil || !fi.IsDir() {
+		return CopyInfo{}, fmt.Errorf("canvas %q not found", from)
+	}
+	targetDir := canvas.Dir(canvasesDir, to)
+	targetExists := false
+	if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+		targetExists = true
+	}
+	if targetExists && !overwrite {
+		return CopyInfo{}, fmt.Errorf("target canvas %q already exists (set overwrite to replace it)", to)
+	}
+
+	// Stage the copy under the data dir but OUTSIDE canvasesDir (so the
+	// daemon's watcher never fires on individual staged writes), then swap it
+	// into place with an atomic rename -- a copy is pure filesystem work, so
+	// like snap/revert it never self-starts the daemon.
+	if err := os.MkdirAll(b.cfg.Dir, 0o755); err != nil { //nolint:gosec // data dir is user-owned working state
+		return CopyInfo{}, fmt.Errorf("preparing staging area: %w", err)
+	}
+	staging, err := os.MkdirTemp(b.cfg.Dir, ".scrim-copy-*")
+	if err != nil {
+		return CopyInfo{}, fmt.Errorf("creating staging directory: %w", err)
+	}
+	stagingOwned := true
+	defer func() {
+		if stagingOwned {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+
+	if err := dircopy.Copy(sourceDir, staging, copyMaxBytes, copyMaxEntries); err != nil {
+		return CopyInfo{}, fmt.Errorf("copying canvas: %w", err)
+	}
+	if err := os.MkdirAll(canvasesDir, 0o755); err != nil { //nolint:gosec // canvases dir is user-owned working state
+		return CopyInfo{}, fmt.Errorf("preparing canvases directory: %w", err)
+	}
+	if targetExists {
+		if _, err := snapshot.Create(targetDir, b.cfg.VersionsDir(), to, "precopy"); err != nil {
+			return CopyInfo{}, fmt.Errorf("snapshotting target before overwrite: %w", err)
+		}
+	}
+
+	// Move the existing target aside UNDER the data dir (not under canvasesDir),
+	// so a running daemon watching canvasesDir never sees the aside dir appear
+	// and vanish -- mirroring the hub handler's use of the staging root.
+	var aside string
+	if targetExists {
+		tmp, err := os.MkdirTemp(b.cfg.Dir, "scrim-copy-old-*")
+		if err != nil {
+			return CopyInfo{}, fmt.Errorf("preparing canvas swap: %w", err)
+		}
+		if err := os.RemoveAll(tmp); err != nil {
+			return CopyInfo{}, fmt.Errorf("preparing canvas swap: %w", err)
+		}
+		if err := os.Rename(targetDir, tmp); err != nil {
+			return CopyInfo{}, fmt.Errorf("moving previous canvas aside: %w", err)
+		}
+		aside = tmp
+	}
+	if err := os.Rename(staging, targetDir); err != nil {
+		if aside != "" {
+			_ = os.Rename(aside, targetDir) // best-effort restore
+		}
+		return CopyInfo{}, fmt.Errorf("swapping copied canvas into place: %w", err)
+	}
+	stagingOwned = false
+	if aside != "" {
+		_ = os.RemoveAll(aside)
+	}
+	// The content swap is now committed. Metadata is non-critical and best-
+	// effort by comparison: a CopyMeta failure surfaces as an error even though
+	// the copied files are already in place (on overwrite, the old target was
+	// snapshotted first, so nothing is lost).
+	if err := canvas.CopyMeta(b.cfg.MetaDir(), from, to); err != nil {
+		return CopyInfo{}, err
+	}
+
+	return CopyInfo{From: from, To: to, URL: b.canvasViewURL(to)}, nil
+}
+
+// canvasViewURL returns the best-effort local view URL for canvas id: the
+// token-qualified /c/<id>/ URL when a daemon is already healthy, or "" when
+// none is running. It never self-starts one -- copy stays a pure filesystem
+// operation -- so the URL is a convenience, not a guarantee.
+func (b *localBackend) canvasViewURL(id string) string {
+	_, st, running, err := resolveDaemon(b.cfg, false)
+	if err != nil || !running {
+		return ""
+	}
+	url := st.BaseURL() + "/c/" + id + "/"
+	if st.AuthEnabled() {
+		url += "?t=" + st.Token
+	}
+	return url
 }
 
 // atomicWriteFileLocal writes content to a temp file in dir and renames it over

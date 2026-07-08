@@ -52,6 +52,26 @@ func TestDefaultServerHasNoHubSurface(t *testing.T) {
 		t.Errorf("POST /api/push/foo status = %d, want 404 (route not registered in default mode)", resp.StatusCode)
 	}
 
+	// 1b. None of the machine-API routes exist in default mode either -- the
+	// list-files and copy routes added alongside the file/snapshot surface are
+	// hub-only exactly like push. A 404 (not a gate rejection) proves the
+	// routes themselves are unregistered.
+	for _, mr := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/api/canvases/foo/files"},
+		{http.MethodGet, "/api/canvases/foo/files/index.html"},
+		{http.MethodPost, "/api/canvases/foo/copy"},
+		{http.MethodGet, "/api/canvases/foo/snapshots"},
+	} {
+		req := httptest.NewRequest(mr.method, mr.path, nil)
+		rec := httptest.NewRecorder()
+		s.routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s status = %d, want 404 (hub-only route absent in default mode)", mr.method, mr.path, rec.Code)
+		}
+	}
+
 	// 2. No CIDR gating: a request claiming a non-loopback RemoteAddr must
 	// be served identically to one from loopback -- default mode's only
 	// gate is withAuth (capability token), which NoAuth: true bypasses

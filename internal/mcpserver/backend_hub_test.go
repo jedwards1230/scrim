@@ -1,7 +1,9 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/fileedit"
 	scrimserver "github.com/jedwards1230/scrim/internal/server"
 )
 
@@ -329,5 +332,145 @@ func TestHubBackendRefusesRedirects(t *testing.T) {
 	}
 	if _, err := b.EditFile(context.Background(), "c1", "x.html", "a", "b", false); err == nil {
 		t.Error("EditFile through a redirecting hub error = nil, want a refusal")
+	}
+}
+
+func TestHubBackendListFiles(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+	if _, err := b.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := b.WriteFile(ctx, "c1", "index.html", []byte("<h1>hi</h1>")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := b.WriteFile(ctx, "c1", "assets/app.js", []byte("x=1")); err != nil {
+		t.Fatalf("WriteFile nested: %v", err)
+	}
+	files, err := b.ListFiles(ctx, "c1")
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 2 || files[0].Path != "assets/app.js" || files[1].Path != "index.html" {
+		t.Errorf("files = %+v, want sorted [assets/app.js, index.html]", files)
+	}
+}
+
+func TestHubBackendEditFileBatch(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+	if _, err := b.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.WriteFile(ctx, "c1", "index.html", []byte("alpha beta gamma")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := b.EditFileBatch(ctx, "c1", "index.html", []fileedit.Edit{
+		{OldString: "alpha", NewString: "one"},
+		{OldString: "gamma", NewString: "three"},
+	})
+	if err != nil {
+		t.Fatalf("EditFileBatch: %v", err)
+	}
+	if info.Replacements != 2 {
+		t.Errorf("replacements = %d, want 2", info.Replacements)
+	}
+	got, err := b.ReadFile(ctx, "c1", "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "one beta three" {
+		t.Errorf("content = %q, want %q", got, "one beta three")
+	}
+
+	// A failing batch surfaces a 409-derived error and leaves the file alone.
+	if _, err := b.EditFileBatch(ctx, "c1", "index.html", []fileedit.Edit{
+		{OldString: "one", NewString: "X"},
+		{OldString: "missing", NewString: "Y"},
+	}); err == nil {
+		t.Fatal("failing batch err = nil, want an error")
+	}
+	got, _ = b.ReadFile(ctx, "c1", "index.html")
+	if string(got) != "one beta three" {
+		t.Errorf("file changed after failed batch = %q", got)
+	}
+}
+
+func TestHubBackendCopyCanvas(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+	if _, err := b.Add(ctx, "src", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.WriteFile(ctx, "src", "index.html", []byte("SRC")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := b.CopyCanvas(ctx, "src", "dst", false)
+	if err != nil {
+		t.Fatalf("CopyCanvas: %v", err)
+	}
+	if info.To != "dst" || info.URL != b.baseURL+"/c/dst/" {
+		t.Errorf("info = %+v, want To=dst URL=%s/c/dst/", info, b.baseURL)
+	}
+	got, err := b.ReadFile(ctx, "dst", "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SRC" {
+		t.Errorf("dst content = %q, want SRC", got)
+	}
+	// Conflict without overwrite.
+	if _, err := b.CopyCanvas(ctx, "src", "dst", false); err == nil {
+		t.Error("copy onto existing target: err = nil, want a 409-derived error")
+	}
+}
+
+// TestHubBackendGzipWireRoundTrip proves a large file survives the gzip wire
+// path (Content-Encoding on PUT, Accept-Encoding on GET) byte-for-byte.
+func TestHubBackendGzipWireRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+	if _, err := b.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(strings.Repeat("<section>data</section>", 2000)) // well over the gzip threshold
+	if err := b.WriteFile(ctx, "c1", "index.html", raw); err != nil {
+		t.Fatalf("WriteFile (gzip PUT): %v", err)
+	}
+	got, err := b.ReadFile(ctx, "c1", "index.html")
+	if err != nil {
+		t.Fatalf("ReadFile (gzip GET): %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Errorf("gzip wire round-trip mismatch (%d vs %d bytes)", len(got), len(raw))
+	}
+}
+
+// TestHubBackendNearCapIncompressibleRoundTrip is a regression test for the
+// gzip-expansion bug: the hub gzips any file over its threshold even when
+// compression doesn't help, so an at-cap incompressible file comes back
+// slightly larger than the plain cap. The client's compressed-read budget must
+// allow that expansion instead of truncating the stream.
+func TestHubBackendNearCapIncompressibleRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+	if _, err := b.Add(ctx, "c1", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly at the per-file cap, and incompressible (random) so gzip expands
+	// it rather than shrinking it.
+	raw := make([]byte, maxFileBytes)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.WriteFile(ctx, "c1", "blob.bin", raw); err != nil {
+		t.Fatalf("WriteFile at cap: %v", err)
+	}
+	got, err := b.ReadFile(ctx, "c1", "blob.bin")
+	if err != nil {
+		t.Fatalf("ReadFile at cap: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Errorf("near-cap incompressible round-trip mismatch (%d vs %d bytes)", len(got), len(raw))
 	}
 }

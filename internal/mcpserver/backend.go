@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jedwards1230/scrim/internal/fileedit"
 )
 
 // maxFileBytes bounds a single file read_file/write_file handles, matching the
@@ -14,6 +16,15 @@ import (
 // client-side in both backends so an oversize write fails fast with a clear
 // message before any bytes cross the wire (hub mode) or touch disk (local).
 const maxFileBytes = 2 * 1024 * 1024 // 2 MiB
+
+// copyMaxBytes / copyMaxEntries bound a CopyCanvas source (dircopy caps),
+// matching the hub's push-extraction limits (server.maxPushBytes /
+// maxPushEntries) so a canvas that pushed successfully also copies. Defense in
+// depth: the source is already an on-disk canvas built from capped writes.
+const (
+	copyMaxBytes   = 50 * 1024 * 1024 // 50 MiB
+	copyMaxEntries = 1000
+)
 
 // backend is the seam between the MCP tool handlers and the two ways scrim can
 // drive a canvas store: localBackend (the local daemon + on-disk canvas dir,
@@ -36,6 +47,10 @@ type backend interface {
 	// Revert restores a canvas from a snapshot; an empty name selects the
 	// latest. A safety snapshot of the pre-revert contents is taken first.
 	Revert(ctx context.Context, id, name string) (RevertInfo, error)
+	// ListFiles enumerates a canvas's files (recursive, canvas-relative
+	// paths, no content) -- the discovery primitive that lets an agent find
+	// what to read/edit without already knowing every path.
+	ListFiles(ctx context.Context, id string) ([]FileEntry, error)
 	ReadFile(ctx context.Context, id, path string) ([]byte, error)
 	WriteFile(ctx context.Context, id, path string, content []byte) error
 	// EditFile applies an exact-string replacement (fileedit.Apply semantics)
@@ -43,6 +58,17 @@ type backend interface {
 	// WriteFile: only the changed strings cross the wire in hub mode, never
 	// the whole file.
 	EditFile(ctx context.Context, id, path, oldStr, newStr string, replaceAll bool) (EditInfo, error)
+	// EditFileBatch applies a sequence of exact-string replacements to one
+	// existing file transactionally (fileedit.ApplyBatch semantics): all-or-
+	// nothing, aborting on the first failing edit with the file untouched. It
+	// is the multi-edit counterpart to EditFile -- one round-trip for many
+	// replacements (see #41).
+	EditFileBatch(ctx context.Context, id, path string, edits []fileedit.Edit) (EditInfo, error)
+	// CopyCanvas duplicates canvas from into a new canvas to, server-side (no
+	// bytes round-trip through the client). A target that already exists is an
+	// error unless overwrite is set, in which case the target is snapshotted
+	// first (see #43).
+	CopyCanvas(ctx context.Context, from, to string, overwrite bool) (CopyInfo, error)
 }
 
 // CanvasInfo is one canvas as returned by List/Add. URL is the view URL
@@ -58,6 +84,15 @@ type CanvasInfo struct {
 	Color      string
 	ModifiedAt time.Time
 	SSEClients int
+}
+
+// FileEntry is one file in a canvas as returned by ListFiles: a
+// canvas-relative, slash-separated path plus its size and modification time.
+// It carries no content -- listing is deliberately cheap and private.
+type FileEntry struct {
+	Path       string    `json:"path"`
+	Size       int64     `json:"size"`
+	ModifiedAt time.Time `json:"modified_at"`
 }
 
 // StatusInfo reports daemon/hub status. Running is false when no local daemon
@@ -96,6 +131,15 @@ type RevertInfo struct {
 type EditInfo struct {
 	Path         string
 	Replacements int
+}
+
+// CopyInfo is the outcome of a CopyCanvas: the source and destination ids plus
+// the destination's view URL (token-qualified in local mode; hub-base-relative
+// in hub mode, carrying no token).
+type CopyInfo struct {
+	From string
+	To   string
+	URL  string
 }
 
 // safeJoinLocal resolves name (a caller-supplied relative file path) against

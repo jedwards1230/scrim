@@ -186,14 +186,22 @@ is requested but fails (e.g. no browser installed, headless environment),
 
 `scrim mcp` exposes scrim's verbs as [MCP](https://modelcontextprotocol.io)
 tools, so an agent drives scrim natively instead of shelling out. Tools:
-`add`, `list`, `link`, `rm`, `snap`, `snaps`, `revert`, `status`,
-`read_file`, `write_file`, `edit_file`, `push` (plus `path` in local mode
-only — a server-local directory has no remote meaning). `edit_file` applies
-an exact-string replacement server-side, so hub-mode edits cost tokens
-proportional to the change, not the file. Each maps to the same code
-path as the matching verb, so the same
+`add`, `list`, `link`, `copy_canvas`, `rm`, `snap`, `snaps`, `revert`,
+`status`, `list_files`, `read_file`, `write_file`, `edit_file`, `push` (plus
+`path` in local mode only — a server-local directory has no remote meaning).
+`list_files` enumerates a canvas's files (paths + sizes, no content) so an
+agent can discover what to read or edit. `edit_file` applies an exact-string
+replacement server-side, so hub-mode edits cost tokens proportional to the
+change, not the file, and accepts an `edits` array to apply many replacements
+in one transactional (all-or-nothing) call. `write_file`/`read_file` accept an
+optional `encoding: "gzip+base64"` to move large or binary content compressed
+(the size cap applies to the decoded bytes). `copy_canvas` duplicates a canvas
+server-side. Each maps to the same code path as the matching verb, so the same
 safety invariants hold: `link` returns a URL as data and **never** launches a
-browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot.
+browser, no tool logs URLs/canvas content/tokens, and `push` is one-shot —
+and, whichever mode, `push` packs the canvas from the MCP server process's own
+disk, so a remote/in-cluster deployment should author with `write_file`/
+`edit_file` instead.
 
 Transport is stdio by default; pass `--http ADDR` for streamable HTTP. The
 HTTP endpoint is unauthenticated for now (remote auth tracked in
@@ -227,9 +235,12 @@ a non-loopback bind is refused unless you pass `--allow-lan`.
 
 The tradeoff is disk vs token: local mode trusts the shared filesystem; hub
 mode trusts the bearer token and moves bytes over HTTP. The hub's machine API
-(canvas list/add/rm/status, per-file GET/PUT/PATCH, snapshot create/list/revert) is
-gated by the push token on **every** call, reads included — separate from the
-browser read gate (CIDR/read-token).
+(canvas list/add/rm/status/copy, per-canvas file listing, per-file
+GET/PUT/PATCH, snapshot create/list/revert) is gated by the push token on
+**every** call, reads included — separate from the browser read gate
+(CIDR/read-token). File PUTs may carry a `Content-Encoding: gzip` body and GETs
+an `Accept-Encoding: gzip` request; the hub inflates/deflates transparently
+(the per-file cap applies to the decoded size).
 
 ## Hub: a shared central store
 
