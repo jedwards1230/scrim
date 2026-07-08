@@ -75,7 +75,13 @@ jobs:
 
       # vacuum is a single Go binary, matching the repo's no-extra-toolchain
       # posture; pinned to a fixed version like golangci-lint above.
+      # GOTOOLCHAIN=auto is scoped to just this step: vacuum's module requires a
+      # newer Go patch than go.mod pins, so `go install` must be allowed to
+      # fetch the toolchain vacuum names (deterministic — fixed by the version
+      # pin above). The build/test jobs keep the runner's default GOTOOLCHAIN.
       - name: Install vacuum
+        env:
+          GOTOOLCHAIN: auto
         run: go install github.com/daveshanley/vacuum@v0.29.9
 
       # Fails on any error-severity finding (vacuum's default fail behavior),
