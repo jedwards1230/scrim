@@ -49,6 +49,12 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)
 
+		// The machine API's own contract, served so standard OpenAPI tooling can
+		// consume it from a live hub. Hub-only like the routes it documents; the
+		// default daemon never serves it (hub_test.go invariant). Gate-exempt in
+		// withHubGate -- the spec is public and must be fetchable without a token.
+		mux.HandleFunc("GET "+openAPISpecPath, s.handleOpenAPISpec)
+
 		gate = s.withHubGate
 
 		// The OIDC login routes exist only when a hub was started with OIDC

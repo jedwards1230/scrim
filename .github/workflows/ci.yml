@@ -62,6 +62,33 @@ jobs:
       - name: Check go mod tidy
         run: go mod tidy && git diff --exit-code -- go.mod go.sum
 
+  spec-lint:
+    name: OpenAPI spec lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # vacuum is a single Go binary, matching the repo's no-extra-toolchain
+      # posture; pinned to a fixed version like golangci-lint above.
+      # GOTOOLCHAIN=auto is scoped to just this step: vacuum's module requires a
+      # newer Go patch than go.mod pins, so `go install` must be allowed to
+      # fetch the toolchain vacuum names (deterministic — fixed by the version
+      # pin above). The build/test jobs keep the runner's default GOTOOLCHAIN.
+      - name: Install vacuum
+        env:
+          GOTOOLCHAIN: auto
+        run: go install github.com/daveshanley/vacuum@v0.29.9
+
+      # Fails on any error-severity finding (vacuum's default fail behavior),
+      # so a spec that drifts from a valid OpenAPI 3.1 document blocks the PR.
+      - name: Lint api/openapi.yaml
+        run: vacuum lint --details --fail-severity error api/openapi.yaml
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -88,12 +115,12 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [test, lint, build]
+    needs: [test, lint, spec-lint, build]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.build.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.spec-lint.result }}" "${{ needs.build.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               echo "CI failed"

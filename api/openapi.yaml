@@ -1,0 +1,907 @@
+openapi: 3.1.0
+
+info:
+  title: scrim hub machine API
+  version: 0.6.0
+  summary: HTTP control surface a remote MCP client (scrim mcp --hub) uses to author canvas content on a scrim hub.
+  description: |-
+    The machine API exposed by `scrim hub` (see the repo `CLAUDE.md` "Hub" section). It is the
+    same serving engine as `scrim serve`, plus a bearer-gated write/read surface for a remote
+    client with no shared disk: per-file read/write/edit, whole-canvas push and copy, snapshot
+    control, and canvas CRUD.
+
+    **Hub-only.** Every path here is registered ONLY when the daemon is started as a hub
+    (`NewHub`). The default local daemon (`scrim serve`) exposes a strict subset — `GET /api/status`,
+    `GET`/`POST /api/canvases`, `DELETE /api/canvases/{id}`, `POST /api/stop` — gated by a
+    query-string capability token instead of a bearer, and none of the `push`/`files`/`copy`/
+    `snapshots` routes. This document describes the hub.
+
+    **Authorization model** (`hubgate.go`). A valid push token presented as
+    `Authorization: Bearer <token>` authorizes ANY method — it is the machine-API credential, reads
+    included. Absent a valid bearer, a write (any method other than GET/HEAD) is rejected `401`.
+    Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is configured with
+    OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a browser navigation);
+    otherwise the client IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a
+    separate read token is configured, present it. A machine client authenticates with the bearer
+    and never touches the browser gate.
+
+    **Common error shape.** Every non-2xx JSON response is `{"error": "<message>"}`. Messages are
+    deliberately path-free (no absolute server paths ever appear in a body).
+
+    **Served from a live hub.** A hub serves this document at `GET /api/openapi.yaml` (gate-exempt,
+    hub-only) so standard OpenAPI tooling can consume the contract directly. Only YAML is served —
+    scrim's minimal-dependency posture means no YAML-to-JSON conversion library is pulled in; modern
+    tooling reads YAML natively.
+
+    **Out of scope of this document.** Client codegen and any handler change are non-goals (issue
+    #57); this file is hand-authored and kept current with the handlers as a review discipline plus
+    a CI `vacuum lint` gate, not generated.
+
+  license:
+    name: MIT
+    url: https://github.com/jedwards1230/scrim/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:7788
+    description: Default hub bind (loopback, port 7788). A deployed hub is typically fronted by an ingress at its own host.
+
+tags:
+  - name: meta
+    description: The API's own contract, served for tooling.
+  - name: status
+    description: Daemon health and lifecycle.
+  - name: canvases
+    description: Canvas CRUD (create, list, delete) — the subset shared with the local daemon.
+  - name: files
+    description: Per-file read, write, and server-side edit within a canvas. Hub-only.
+  - name: push
+    description: Whole-canvas transfer — tar push and server-side copy. Hub-only.
+  - name: snapshots
+    description: Canvas versioning — list, create, and revert. Hub-only.
+  - name: auth
+    description: >-
+      Browser OIDC login flow. NOT part of the machine API — a human's browser drives these to
+      obtain a read session. Present only when the hub is started with OIDC configured; otherwise
+      the paths 404. Listed for completeness.
+
+security:
+  - pushToken: []
+
+paths:
+  /api/openapi.yaml:
+    get:
+      tags: [meta]
+      operationId: getOpenAPISpec
+      summary: This OpenAPI document.
+      description: >-
+        Returns this spec itself, served verbatim from bytes embedded in the hub binary. Hub-only
+        and gate-exempt (no bearer, OIDC session, or CIDR match required): the document is public
+        (committed in the repo), carries no canvas content, and must be fetchable by non-browser
+        OpenAPI tooling. Only YAML is served — scrim adds no YAML-to-JSON dependency.
+      security: []
+      responses:
+        '200':
+          description: The OpenAPI 3.1 document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /api/status:
+    get:
+      tags: [status]
+      operationId: getStatus
+      summary: Daemon status and health.
+      description: >-
+        Returns the daemon's health and runtime counters. Used by the CLI to decide whether to
+        self-start, and as a general status query. A read: a bearer authorizes it; absent a bearer
+        it is subject to the browser read gate (OIDC session, or CIDR allowlist + optional read
+        token).
+      responses:
+        '200':
+          description: Current daemon status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases:
+    get:
+      tags: [canvases]
+      operationId: listCanvases
+      summary: List all canvases.
+      responses:
+        '200':
+          description: Every canvas, each as a Canvas object.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Canvas'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [canvases]
+      operationId: createCanvas
+      summary: Create an empty canvas.
+      description: >-
+        Registers a new, empty canvas directory. The client typically calls this before writing
+        files into it (PUT/PATCH return 404 for a canvas that does not exist).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCanvasRequest'
+      responses:
+        '201':
+          description: Canvas created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Canvas'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}:
+    delete:
+      tags: [canvases]
+      operationId: deleteCanvas
+      summary: Delete a canvas.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      responses:
+        '204':
+          description: Canvas deleted. No body.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/stop:
+    post:
+      tags: [status]
+      operationId: stopDaemon
+      summary: Stop the daemon.
+      description: >-
+        Acknowledges the request, then triggers a graceful shutdown. A write, so it requires a
+        valid bearer.
+      responses:
+        '200':
+          description: Shutdown acknowledged; the daemon then exits.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                required: [ok]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/push/{id}:
+    post:
+      tags: [push]
+      operationId: pushCanvas
+      summary: Push a whole canvas as a tar archive.
+      description: >-
+        The request body is an UNCOMPRESSED tar archive of a canvas's files. It is extracted into a
+        staging directory outside the servable tree and atomically swapped into place — one clean
+        SSE reload, never a partial serve. Only regular files and directories are accepted; symlink,
+        hardlink, device, and fifo entries are rejected (`400`). Any entry whose path escapes the
+        staging root is rejected. Caps: 50 MiB total uncompressed content, 1000 entries
+        (files + directories), and a coarse ~58 MiB request-body ceiling — exceeding any is `413`.
+        Optional canvas metadata (title/description/icon) is supplied as query parameters, not in
+        the body.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+        - name: title
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional canvas title to record as metadata.
+        - name: description
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional canvas description to record as metadata.
+        - name: icon
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional canvas emoji icon to record as metadata.
+      requestBody:
+        required: true
+        content:
+          application/x-tar:
+            schema:
+              type: string
+              format: binary
+              description: Uncompressed tar archive of the canvas's files.
+      responses:
+        '200':
+          description: Canvas pushed and swapped into place.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  url:
+                    type: string
+                    description: Canvas-relative URL, e.g. "/c/<id>/".
+                required: [id, url]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/files:
+    get:
+      tags: [files]
+      operationId: listCanvasFiles
+      summary: List a canvas's files (metadata only).
+      description: >-
+        Returns every regular file in the canvas, recursively, as `{path, size, modified_at}` with
+        canvas-relative slash-separated paths — sorted by path, no content. An empty canvas returns
+        `[]`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      responses:
+        '200':
+          description: File listing.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileMeta'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/files/{path}:
+    parameters:
+      - $ref: '#/components/parameters/CanvasId'
+      - $ref: '#/components/parameters/FilePath'
+    get:
+      tags: [files]
+      operationId: readCanvasFile
+      summary: Read one file's raw bytes.
+      description: >-
+        Returns one file's raw bytes. `Content-Type` is derived from the file extension (or
+        `application/octet-stream`). The response is compressed with `Content-Encoding: gzip` only
+        when the client sends `Accept-Encoding: gzip` AND the file is at least 1024 bytes; smaller
+        files are always served identity. `Cache-Control: no-store` and `X-Content-Type-Options:
+        nosniff` are always set.
+      parameters:
+        - name: Accept-Encoding
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Send "gzip" to allow a gzip-compressed response for files >= 1024 bytes.
+      responses:
+        '200':
+          description: The file's bytes.
+          headers:
+            Content-Encoding:
+              schema:
+                type: string
+              description: '"gzip" when the response was compressed (see the endpoint description); absent otherwise.'
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            X-Content-Type-Options:
+              schema:
+                type: string
+                const: nosniff
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [files]
+      operationId: writeCanvasFile
+      summary: Write one file's raw bytes.
+      description: >-
+        Writes one file's raw body into an EXISTING canvas (a missing canvas is `404` — it is never
+        created implicitly). The write is atomic (temp file + rename), so exactly one SSE reload
+        fires. The body may be gzip-compressed by sending `Content-Encoding: gzip`; the 2 MiB
+        per-file cap is then applied to the DECODED size (the gzip-bomb guard), so a compressed body
+        under 2 MiB that inflates past it is `413`. Parent directories are created as needed.
+      parameters:
+        - name: Content-Encoding
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Set to "gzip" to send a gzip-compressed body; it is inflated server-side under the 2 MiB decoded-size cap.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: The file's raw (or, with Content-Encoding gzip, compressed) bytes. Decoded size capped at 2 MiB.
+      responses:
+        '204':
+          description: File written. No body. An SSE reload is broadcast to viewers.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [files]
+      operationId: editCanvasFile
+      summary: Server-side exact-string edit of one file.
+      description: |-
+        Applies an exact-string replacement to one EXISTING file server-side, so an edit costs bytes
+        proportional to the change, not the file. The file must exist (`404` otherwise — an edit
+        never creates a file).
+
+        Two mutually-exclusive body shapes:
+        - **Single edit** — `old_string`/`new_string`/`replace_all`.
+        - **Batch** — a non-empty `edits` array applied transactionally in order.
+
+        Sending both a single edit and a non-empty `edits` array is `400`. Conflict outcomes are
+        `409`: `old_string` matching nothing (`"old_string not found in file"`), or matching more
+        than once without `replace_all` (`"old_string found N times ..."`). In a batch, the failing
+        edit's index is named in the message (`"edit N: ..."`) and the WHOLE batch is aborted (no
+        partial write). An edited result exceeding the 2 MiB per-file cap is `413`; an oversize edit
+        REQUEST body (over 6 MiB) is also `413` with a distinct message. `old_string == new_string`
+        or an empty `old_string` is `400`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditRequest'
+      responses:
+        '200':
+          description: Edit applied; the file was rewritten atomically.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                    description: The canvas-relative path that was edited.
+                  replacements:
+                    type: integer
+                    description: Total number of replacements applied (across all edits in a batch).
+                required: [path, replacements]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/EditConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/copy:
+    post:
+      tags: [push]
+      operationId: copyCanvas
+      summary: Copy a canvas to a new id.
+      description: >-
+        Duplicates canvas `{id}` (the source) into a new canvas named by the body's `to` field. The
+        copy is staged outside the servable tree and atomically swapped in — one clean SSE reload.
+        Source and target must differ (`400` otherwise). A target that already exists is `409`
+        UNLESS `overwrite: true`, in which case the existing target is snapshotted first (so the
+        overwrite is itself undoable via revert) and then replaced. The source's authored metadata
+        (title/description/icon) is carried onto the copy. A source exceeding the copy size or
+        file-count limit is `413`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CopyRequest'
+      responses:
+        '200':
+          description: Canvas copied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from:
+                    type: string
+                  to:
+                    type: string
+                  url:
+                    type: string
+                    description: Canvas-relative URL of the copy, e.g. "/c/<to>/".
+                required: [from, to, url]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CopyConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/snapshots:
+    parameters:
+      - $ref: '#/components/parameters/CanvasId'
+    get:
+      tags: [snapshots]
+      operationId: listSnapshots
+      summary: List a canvas's snapshots.
+      description: Every snapshot for the canvas, newest-first. A canvas with no snapshots returns `[]`.
+      responses:
+        '200':
+          description: Snapshot listing, newest-first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Snapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [snapshots]
+      operationId: createSnapshot
+      summary: Snapshot a canvas.
+      description: Snapshots the canvas's current contents, with an optional label. An empty body is valid (no label).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  description: Optional human-readable label appended to the snapshot name.
+      responses:
+        '201':
+          description: Snapshot created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: The snapshot's on-disk name, as passed back to the revert route.
+                  dir:
+                    type: string
+                    description: The snapshot's directory name.
+                required: [name, dir]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/snapshots/{name}/revert:
+    post:
+      tags: [snapshots]
+      operationId: revertSnapshot
+      summary: Revert a canvas to a snapshot.
+      description: >-
+        Reverts the canvas to the named snapshot. The target is resolved first (a typo'd name fails
+        `404` BEFORE any pre-revert safety snapshot is taken). A pre-revert safety snapshot is taken
+        so the revert is itself undoable.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The snapshot name, exactly as returned by the list/create snapshot routes.
+      responses:
+        '200':
+          description: Canvas reverted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reverted:
+                    type: string
+                    description: The canvas id that was reverted.
+                  snapshot:
+                    type: string
+                    description: The snapshot name reverted to.
+                required: [reverted, snapshot]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/login:
+    get:
+      tags: [auth]
+      operationId: authLogin
+      summary: Begin the browser OIDC login flow (browser-flow, not machine API).
+      description: >-
+        Redirects a browser to the OIDC provider. Present only when the hub is configured with OIDC.
+        A machine client authenticates with the push-token bearer and never uses this.
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Where to send the browser after a successful login.
+      responses:
+        '302':
+          description: Redirect to the OIDC provider's authorization endpoint.
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      operationId: authCallback
+      summary: OIDC redirect callback (browser-flow, not machine API).
+      description: The provider redirects the browser here with an authorization code; the hub establishes a session and redirects onward.
+      security: []
+      responses:
+        '302':
+          description: Redirect onward (to return_to or the dashboard) after establishing a session.
+
+  /auth/logout:
+    get:
+      tags: [auth]
+      operationId: authLogout
+      summary: Clear the browser session (browser-flow, not machine API).
+      security: []
+      responses:
+        '302':
+          description: Session cleared; redirect to the dashboard.
+
+components:
+  securitySchemes:
+    pushToken:
+      type: http
+      scheme: bearer
+      description: >-
+        The hub's push token, presented as `Authorization: Bearer <token>`, compared in constant
+        time. A valid push token authorizes ANY method — writes and reads alike (it is the
+        machine-API credential). Absent a valid bearer, a write is `401`; a read falls to the
+        browser gate (OIDC session, or CIDR allowlist + optional read token) and may instead be
+        `403` (outside the allowlist) or `401` (OIDC configured, no session).
+
+  parameters:
+    CanvasId:
+      name: id
+      in: path
+      required: true
+      description: Canvas id. Must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+    FilePath:
+      name: path
+      in: path
+      required: true
+      description: >-
+        Canvas-relative file path. Captures the entire remaining path, so it may contain slashes
+        (`/`). Resolved under the canvas root with a traversal guard; an absolute path or one that
+        escapes the canvas is `400`.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request (bad canvas id, malformed body, invalid file path, or bad tar entry).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid push token on a write (or, for a read, an OIDC-configured hub with no session).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: A read from outside the hub's CIDR allowlist (non-OIDC hub, no valid bearer).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Canvas or file not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    EditConflict:
+      description: >-
+        The edit could not be applied cleanly — `old_string` matched nothing, or matched more than
+        once without `replace_all`. In a batch the message names the failing edit's index and the
+        whole batch is aborted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    CopyConflict:
+      description: The target canvas already exists and `overwrite` was not set.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: >-
+        A cap was exceeded — a file over 2 MiB (decoded), an edit request body over 6 MiB, a pushed
+        archive over its size/entry limit, or a copy source over its size/file-count limit.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: An unexpected server-side error. The message is generic and never contains a server path.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      description: The common error envelope for every non-2xx JSON response.
+      properties:
+        error:
+          type: string
+          description: Human-readable, path-free error message.
+      required: [error]
+
+    Status:
+      type: object
+      description: Daemon health and runtime counters, as returned by GET /api/status.
+      properties:
+        pid:
+          type: integer
+          description: The daemon process's PID.
+        host:
+          type: string
+        port:
+          type: integer
+        version:
+          type: string
+          description: The daemon's short version string.
+        started_at:
+          type: string
+          format: date-time
+        uptime_seconds:
+          type: number
+        canvas_count:
+          type: integer
+        idle_timeout_seconds:
+          type: number
+          description: The configured idle timeout; <= 0 means idle reaping is disabled.
+        idle_seconds:
+          type: number
+          description: Seconds since the last request.
+        sse_clients:
+          type: integer
+          description: Current number of connected SSE (live-reload) clients.
+        active:
+          type: boolean
+          description: Whether the daemon considers itself active (has SSE clients, reaping disabled, or under the idle timeout).
+      required:
+        - pid
+        - host
+        - port
+        - version
+        - started_at
+        - uptime_seconds
+        - canvas_count
+        - idle_timeout_seconds
+        - idle_seconds
+        - sse_clients
+        - active
+
+    Canvas:
+      type: object
+      description: One canvas, as returned by the canvas CRUD routes.
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+          description: Emoji glyph — the value given at creation, or a deterministic default derived from the id.
+        color:
+          type: string
+          description: Accent color, always deterministically derived from the id (not overridable).
+        dir:
+          type: string
+          description: The canvas's on-disk directory path.
+        url:
+          type: string
+          description: The canvas's browse URL (includes a `?t=` capability token unless the daemon runs with --no-auth).
+        modified_at:
+          type: string
+          format: date-time
+        sse_clients:
+          type: integer
+          description: Current number of SSE clients connected to this canvas.
+      required:
+        - id
+        - icon
+        - color
+        - dir
+        - url
+        - modified_at
+        - sse_clients
+
+    CreateCanvasRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+          description: The new canvas's id.
+        title:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+      required: [id]
+
+    FileMeta:
+      type: object
+      description: One file's metadata (no content).
+      properties:
+        path:
+          type: string
+          description: Canvas-relative, slash-separated path.
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes.
+        modified_at:
+          type: string
+          format: date-time
+      required: [path, size, modified_at]
+
+    EditRequest:
+      type: object
+      description: >-
+        A single exact-string edit OR a transactional batch. The single-edit fields
+        (old_string/new_string/replace_all) and a non-empty `edits` array are mutually exclusive.
+      properties:
+        old_string:
+          type: string
+          description: The exact string to find. Must occur exactly once unless replace_all is set.
+        new_string:
+          type: string
+          description: The replacement string.
+        replace_all:
+          type: boolean
+          default: false
+          description: Replace every occurrence instead of requiring exactly one.
+        edits:
+          type: array
+          description: A transactional batch of edits applied in order; mutually exclusive with the single-edit fields.
+          items:
+            type: object
+            properties:
+              old_string:
+                type: string
+              new_string:
+                type: string
+              replace_all:
+                type: boolean
+                default: false
+            required: [old_string, new_string]
+
+    CopyRequest:
+      type: object
+      properties:
+        to:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+          description: The target canvas id (must differ from the source).
+        overwrite:
+          type: boolean
+          default: false
+          description: Replace an existing target (snapshotting it first) instead of failing with 409.
+      required: [to]
+
+    Snapshot:
+      type: object
+      description: One snapshot entry.
+      properties:
+        name:
+          type: string
+          description: The snapshot's on-disk name, as passed back to the revert route.
+        timestamp:
+          type: string
+          format: date-time
+        label:
+          type: string
+          description: Optional label given at creation time.
+      required: [name, timestamp]
