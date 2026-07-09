@@ -62,6 +62,9 @@ tags:
     description: >-
       User-minted bearer tokens that act as their owner on the machine plane (mint, list, revoke).
       Hub-only.
+  - name: grants
+    description: >-
+      Per-canvas view-only sharing grants (list, add, remove) — user/group/everyone/link. Hub-only.
   - name: auth
     description: >-
       Browser OIDC login flow. NOT part of the machine API — a human's browser drives these to
@@ -514,6 +517,148 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/canvases/{id}/grants:
+    parameters:
+      - $ref: '#/components/parameters/CanvasId'
+    get:
+      tags: [grants]
+      operationId: listGrants
+      summary: List a canvas's owner and sharing grants.
+      description: >-
+        Returns the canvas's owner and its current view-only grants, secret-free — a share-link
+        grant appears only by its public `link_id`, never its secret or hash. Visibility is enforced
+        at the gate, so any caller who may see the canvas may list who it is shared with.
+      responses:
+        '200':
+          description: The canvas's owner and grants.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [grants]
+      operationId: createGrant
+      summary: Add a sharing grant to a canvas.
+      description: >-
+        Adds a view-only grant. Only the canvas owner, the admin push token, or a verified
+        CF-forwarded actor that owns the canvas may add a grant; a user token is additionally bounded
+        by its `allowed_grant_targets` allowance (`403` when a target is not permitted). For a `link`
+        grant the hub mints a fresh link id + secret and returns the raw secret ONCE — append it to
+        the canvas URL as `?k=<secret>`. Adding an already-present user/group/everyone grant is a
+        no-op (`200`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantRequest'
+      responses:
+        '200':
+          description: The grant already existed (idempotent add).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGrantResponse'
+        '201':
+          description: Grant added; a link grant's secret is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGrantResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/grants/{grantRef}:
+    delete:
+      tags: [grants]
+      operationId: deleteGrant
+      summary: Remove a sharing grant.
+      description: >-
+        Removes matching grants. `grantRef` addresses a link grant by its public `link_id`, a
+        user/group grant by its `target`, and the everyone grant by the literal `everyone`. Owner or
+        admin only. No matching grant is `404`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+        - name: grantRef
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The grant reference (link id, target, or "everyone").
+      responses:
+        '204':
+          description: Grant(s) removed. No body.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/claim:
+    post:
+      tags: [canvases]
+      operationId: claimCanvas
+      summary: Claim ownership of a legacy (admin-owned) canvas.
+      description: >-
+        Lets a logged-in session or user-token principal take ownership of a canvas currently owned
+        by `admin` (a legacy/bootstrap canvas). Only admin-owned canvases are claimable: a canvas
+        already owned by a different principal is `409`, and claiming one the caller already owns is a
+        `200` no-op. A canvas that doesn't exist is `404`; an anonymous caller is `401`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      responses:
+        '200':
+          description: Ownership transferred to (or already held by) the caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  owner:
+                    type: string
+                required: [id, owner]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The canvas is already owned by a different principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/tokens:
     get:
       tags: [tokens]
@@ -959,6 +1104,50 @@ components:
         link_id:
           type: string
           description: A share-link grant's public id (link kind only).
+      required: [kind]
+
+    GrantList:
+      type: object
+      description: A canvas's owner and its current secret-free grants.
+      properties:
+        owner:
+          type: string
+          description: The owning principal id (email; "admin" for legacy/bootstrap canvases).
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/Grant'
+      required: [owner, grants]
+
+    CreateGrantRequest:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+          description: The class of principal to share with.
+        target:
+          type: string
+          description: Required for user (email) and group (group name) kinds; omitted for everyone/link.
+      required: [kind]
+
+    CreateGrantResponse:
+      type: object
+      description: >-
+        The added grant. link_secret is present ONLY for a link grant, carrying the raw secret shown
+        once (only its hash is stored).
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+        target:
+          type: string
+        link_id:
+          type: string
+          description: A share-link grant's public id (link kind only).
+        link_secret:
+          type: string
+          description: A share-link grant's raw secret, returned ONCE (link kind only). Append as ?k=<secret>.
       required: [kind]
 
     Allowance:

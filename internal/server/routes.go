@@ -52,6 +52,19 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("PATCH /api/canvases/{id}/files/{path...}", s.handleEditCanvasFile)
 		mux.HandleFunc("POST /api/canvases/{id}/copy", s.handleCopyCanvas)
 
+		// Per-canvas sharing grants (#52). GET is a read (visibility-gated like
+		// any other per-canvas read); POST/DELETE are writes authorized in
+		// withHubGate (owner/admin/CF-actor), with POST additionally bounded by a
+		// user token's allowance in the handler.
+		mux.HandleFunc("GET /api/canvases/{id}/grants", s.handleListGrants)
+		mux.HandleFunc("POST /api/canvases/{id}/grants", s.handleCreateGrant)
+		mux.HandleFunc("DELETE /api/canvases/{id}/grants/{grantRef}", s.handleDeleteGrant)
+
+		// Legacy-canvas ownership claim (#55). A write, but authorized for any
+		// authenticated principal in withHubGate (serveWrite's claim branch): it
+		// is how a logged-in principal takes ownership of an admin-owned canvas.
+		mux.HandleFunc("POST /api/canvases/{id}/claim", s.handleClaimCanvas)
+
 		// User-token management (#50). Hub-only. POST/DELETE are authorized in
 		// withHubGate for a browser session (or admin); GET lists the caller's
 		// own tokens. Raw secrets are returned only once, by POST.

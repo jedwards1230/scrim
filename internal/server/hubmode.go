@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
@@ -151,7 +152,35 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		}
 		s.oidcAuth = auth
 	}
+
+	// One-time legacy-ownership sweep (#55): stamp owner="admin" on any canvas
+	// whose meta predates ownership, so every canvas has an explicit owner
+	// on disk. Idempotent -- a canvas that already has an owner is skipped -- so
+	// it is safe to run on every startup. Best-effort: a write failure is logged
+	// (scrubbed) but never blocks the hub from serving, since enforcement already
+	// treats an empty owner as admin-owned (ownerOrAdmin).
+	s.migrateLegacyOwners()
+
 	return s, nil
+}
+
+// migrateLegacyOwners assigns owner="admin" to every canvas that has no owner
+// recorded yet, creating an admin-owned meta file for a legacy canvas that has
+// none. Idempotent and best-effort (see NewHub).
+func (s *Server) migrateLegacyOwners() {
+	infos, err := canvas.List(s.canvasesDir, s.metaDir)
+	if err != nil {
+		logging.Error(logging.CategoryConfig, fmt.Errorf("legacy owner sweep: listing canvases: %w", err))
+		return
+	}
+	for _, info := range infos {
+		if info.Owner != "" {
+			continue
+		}
+		if err := canvas.SetOwner(s.metaDir, info.ID, "admin"); err != nil {
+			logging.Error(logging.CategoryConfig, fmt.Errorf("legacy owner sweep: %w", err))
+		}
+	}
 }
 
 // parseCIDRs parses every entry in cidrs, returning an error on the first

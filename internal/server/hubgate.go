@@ -9,7 +9,9 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/identity"
+	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
+	"github.com/jedwards1230/scrim/internal/principal"
 	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
@@ -92,12 +94,10 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 		// The admin push token is the machine/bootstrap credential: it
 		// authorizes ANY method, reads included, and is a visibility superuser
 		// (see identity.CanView). It is distinct from the browser read gate
-		// (OIDC / CIDR / read-token) below.
-		//
-		// TODO(#51): resolveClaims will additionally return a CF-forwarded actor
-		// (Admin=false) when a valid admin push token carries verified
-		// X-Scrim-Actor-* headers; such a request is authorized as that actor
-		// (still not admin) rather than served here unconditionally.
+		// (OIDC / CIDR / read-token) below. A request carrying a verified
+		// CF-forwarded actor is Admin=false (resolveClaims branch 1), so it does
+		// NOT hit this bypass: it is authorized as the actor -- writes via
+		// serveWrite's machine-plane branch, reads via serveOIDCRead's CanView.
 		if c.Admin {
 			next.ServeHTTP(w, r)
 			return
@@ -134,20 +134,47 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 	})
 }
 
+// CF-forwarded actor attribution headers. scrim-mcp verifies the HMAC-signed
+// X-Forwarded-User-* identity from ContextForge and re-emits the verified
+// principal to the hub as these headers, on top of the admin push-token bearer
+// (see internal/mcpserver's identity.go). The hub trusts them ONLY when they
+// ride a valid admin push token (resolveClaims branch 1); they are never
+// honored on any other request, so a spoofed header on a tokenless (or
+// session/user-token) request is ignored by construction.
+//
+// Two-sided defense: this admin-bearer trust rule is one half. The other is a
+// NetworkPolicy pinning the hub's machine-API ingress to scrim-mcp, so only the
+// trusted attributor can even present these headers. Neither alone suffices --
+// together they bound actor attribution to "scrim-mcp, holding the admin push
+// token, on the allowed network path".
+const (
+	actorHeaderID     = "X-Scrim-Actor-Id"
+	actorHeaderEmail  = "X-Scrim-Actor-Email"
+	actorHeaderGroups = "X-Scrim-Actor-Groups"
+)
+
 // resolveClaims determines the identity a hub request carries, in precedence
 // order, returning the resolving user token too (nil unless a user bearer token
-// matched). It never mutates the request and never calls out to the IdP -- it
-// reads the presented credential only.
+// matched). It never calls out to the IdP -- it reads the presented credential
+// only. Its one side effect is feeding the display-only principal registry when
+// a CF actor is resolved (best-effort; enforcement never reads that registry).
 func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Token) {
 	// 1. The global admin push token: the machine/bootstrap credential.
 	if s.hasValidPushToken(r) {
-		// TODO(#51): when r additionally carries verified HMAC-signed
-		// X-Scrim-Actor-* headers, return the forwarded CF principal
-		// (Claims{Subject/Email/Groups: actor…, Admin: false}) and feed the
-		// principal registry with source "cf-header". X-Scrim-Actor-* is trusted
-		// ONLY on this branch (a request bearing the admin token); it is never
-		// honored otherwise, so a spoofed header on a tokenless request is
-		// ignored by construction.
+		// A CF-forwarded actor rides the admin push token: when scrim-mcp
+		// attaches verified X-Scrim-Actor-* headers, the request acts AS that
+		// actor (Admin:false) rather than as the raw admin superuser. This is the
+		// ONLY branch that honors those headers -- their trust derives entirely
+		// from the accompanying valid admin bearer.
+		if email := r.Header.Get(actorHeaderEmail); email != "" {
+			c := identity.Claims{
+				Subject: r.Header.Get(actorHeaderID),
+				Email:   email,
+				Groups:  splitActorGroups(r.Header.Get(actorHeaderGroups)),
+			}
+			s.observeCFActor(c)
+			return c, nil
+		}
 		return identity.Claims{Admin: true}, nil
 	}
 
@@ -176,16 +203,67 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 	return identity.Claims{}, nil
 }
 
+// splitActorGroups parses the comma-separated X-Scrim-Actor-Groups header into a
+// trimmed, empty-free slice (nil when there are none).
+func splitActorGroups(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if g := strings.TrimSpace(p); g != "" {
+			out = append(out, g)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// observeCFActor feeds the display-only principal registry with a verified
+// CF-forwarded actor. Best-effort: a registry write failure is logged (scrubbed)
+// but never fails the request, and enforcement never reads the registry.
+func (s *Server) observeCFActor(c identity.Claims) {
+	if s.principals == nil || c.Email == "" {
+		return
+	}
+	if err := s.principals.Observe(c.Email, c.Name, c.Groups, principal.SourceCFHeader); err != nil {
+		logging.Error(logging.CategoryAuth, fmt.Errorf("principal registry: %w", err))
+	}
+}
+
 // serveWrite authorizes a write (a non-GET/HEAD request) for a non-admin caller
 // (admin is served earlier). The token-management endpoints are open to any
 // session (a logged-in principal mints/revokes its own tokens); every other
 // write requires a user bearer token whose owner may write the target canvas.
 func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims, tok *usertoken.Token) {
+	// A CF-forwarded actor rides the admin push token (the machine plane) but
+	// acts AS the actor (Admin:false, no user token). It is distinguished from a
+	// browser session -- also non-admin and tokenless -- by the presence of the
+	// valid admin bearer, so recompute it once here.
+	machineActor := tok == nil && c.Authenticated() && s.hasValidPushToken(r)
+
+	// Claiming ownership of a legacy (admin-owned) canvas is the one write the
+	// browser plane permits: it's how a logged-in principal takes ownership, so
+	// any authenticated caller (session, user token, or CF actor) may reach the
+	// claim handler, which enforces the admin-owned/409 rules itself.
+	if isClaimPath(r.URL.Path) {
+		if c.Authenticated() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "unauthorized: login required to claim a canvas", http.StatusUnauthorized)
+		return
+	}
+
 	// Token management: a logged-in OIDC session mints/revokes its OWN tokens.
 	// A user-token principal may not mint further tokens (no privilege
-	// escalation), and an anonymous caller may not either.
+	// escalation); nor may the machine plane (admin bearer / CF actor) or an
+	// anonymous caller.
 	if isTokenPath(r.URL.Path) {
-		if c.Email != "" && tok == nil {
+		if c.Email != "" && tok == nil && !machineActor {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -194,6 +272,18 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 			return
 		}
 		http.Error(w, "unauthorized: login required", http.StatusUnauthorized)
+		return
+	}
+
+	// A CF-forwarded actor writes AS itself on the machine plane: authorized by
+	// the same ownership check a user token uses (creating a new canvas is always
+	// allowed; writing an existing one requires CanWrite).
+	if machineActor {
+		if !s.userTokenMayWrite(r, c) {
+			http.Error(w, "forbidden: your identity does not own this canvas", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 		return
 	}
 
@@ -251,6 +341,13 @@ func (s *Server) userTokenMayWrite(r *http.Request, c identity.Claims) bool {
 // isTokenPath reports whether path addresses the token-management endpoints.
 func isTokenPath(path string) bool {
 	return path == "/api/tokens" || strings.HasPrefix(path, "/api/tokens/")
+}
+
+// isClaimPath reports whether path is a canvas-claim request
+// (POST /api/canvases/{id}/claim), which any authenticated principal may reach.
+func isClaimPath(path string) bool {
+	rest, ok := strings.CutPrefix(path, "/api/canvases/")
+	return ok && strings.HasSuffix(rest, "/claim") && !strings.Contains(strings.TrimSuffix(rest, "/claim"), "/")
 }
 
 // writeTargetCanvasID extracts the canvas id a write path mutates, covering the
