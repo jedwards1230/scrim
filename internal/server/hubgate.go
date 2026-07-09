@@ -52,6 +52,16 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			return
 		}
 
+		// The liveness/readiness probe is public and reveals nothing (200, no
+		// body) -- exempt it by EXACT match (same rationale as the spec and
+		// isAuthPath below) so an orchestrator probe with no cookie/token/CIDR
+		// membership isn't answered with the 401 the OIDC read gate would give
+		// it. A prefix would exempt paths it must not (#47).
+		if r.URL.Path == healthzPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// The OIDC login routes must be reachable by an unauthenticated
 		// browser -- gating them would make logging in impossible. They are
 		// registered only when oidcAuth is set (see routes.go), so this

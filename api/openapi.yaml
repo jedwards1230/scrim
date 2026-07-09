@@ -87,6 +87,21 @@ paths:
               schema:
                 type: string
 
+  /healthz:
+    get:
+      tags: [status]
+      operationId: getHealthz
+      summary: Liveness/readiness probe.
+      description: >-
+        A dependency-free liveness/readiness probe for orchestrators (e.g. a kubelet). Returns `200`
+        with no body and reveals nothing (no canvas content, no identity). Hub-only and gate-exempt
+        (no bearer, OIDC session, or CIDR match required) so a cookie-less, non-browser probe is not
+        answered with the `401` an OIDC-configured read gate would otherwise return.
+      security: []
+      responses:
+        '200':
+          description: The hub is up. No body.
+
   /api/status:
     get:
       tags: [status]

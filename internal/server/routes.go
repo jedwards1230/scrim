@@ -55,6 +55,12 @@ func (s *Server) routes() http.Handler {
 		// withHubGate -- the spec is public and must be fetchable without a token.
 		mux.HandleFunc("GET "+openAPISpecPath, s.handleOpenAPISpec)
 
+		// A dependency-free liveness/readiness probe for orchestrators (e.g.
+		// kubelet). Hub-only like the machine API it fronts, and gate-exempt in
+		// withHubGate (exact match) so a cookie-less probe gets a 200 rather than
+		// the 401 an OIDC read gate would otherwise return (#47).
+		mux.HandleFunc("GET "+healthzPath, s.handleHealthz)
+
 		gate = s.withHubGate
 
 		// The OIDC login routes exist only when a hub was started with OIDC

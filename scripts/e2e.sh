@@ -1112,6 +1112,17 @@ else
   bad "hub scenario: push with wrong bearer token gets 401 (got $STATUS)"
 fi
 
+# The liveness/readiness probe is gate-exempt: an unauthenticated,
+# non-browser request (no bearer, no session -- exactly a kubelet probe)
+# gets 200 with no body, even though this hub CIDR-restricts ordinary reads
+# to loopback. It needs no OIDC (this hub has none) and reveals nothing (#47).
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HUB1_PORT/healthz")
+if [ "$STATUS" = "200" ]; then
+  ok "hub scenario: unauthenticated GET /healthz gets 200 (gate-exempt probe)"
+else
+  bad "hub scenario: unauthenticated GET /healthz gets 200 (got $STATUS)"
+fi
+
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely
 # unauthenticated (401).
