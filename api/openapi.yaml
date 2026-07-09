@@ -526,8 +526,12 @@ paths:
       summary: List a canvas's owner and sharing grants.
       description: >-
         Returns the canvas's owner and its current view-only grants, secret-free — a share-link
-        grant appears only by its public `link_id`, never its secret or hash. Visibility is enforced
-        at the gate, so any caller who may see the canvas may list who it is shared with.
+        grant appears only by its public `link_id`, never its secret or hash. The ACL is more
+        privileged than the canvas view: only the owner, the admin push token, a verified
+        CF-forwarded actor that owns the canvas, or a principal that is itself an explicit
+        `user`/`group` grantee may read it. A caller who can see the canvas only via a share link or
+        an `everyone` grant is refused (`403`), so a link holder cannot enumerate the owner's email
+        or the other grantees.
       responses:
         '200':
           description: The canvas's owner and grants.
