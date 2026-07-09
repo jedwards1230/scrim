@@ -53,13 +53,27 @@ func IsLoopbackAddr(addr string) bool {
 // exposing it as a streamable-HTTP MCP endpoint at /mcp plus a GET /healthz
 // liveness probe. It reuses NewServer, so the tool set (and thus behaviour) is
 // identical to the stdio transport.
-func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget) http.Handler {
+//
+// When oauth is non-nil the endpoint becomes an RFC 9728 OAuth 2.0 protected
+// resource: /mcp is wrapped with bearer validation + per-tool scope enforcement
+// and the protected-resource metadata is served UNAUTHENTICATED at its
+// well-known path. A nil oauth leaves the transport exactly as before (no
+// bearer requirement, no metadata endpoint). Either way the CF header-trust
+// plane (identity.go) is unchanged -- the two identity layers are orthogonal.
+func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthValidator) http.Handler {
 	srv := NewServer(cfg, ver, hub)
 	mux := http.NewServeMux()
-	mux.Handle(mcpPath, mcp.NewStreamableHTTPHandler(
+	var mcpHandler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		nil,
-	))
+	)
+	if oauth != nil {
+		// The metadata endpoint is deliberately mounted OUTSIDE the bearer gate:
+		// a client fetches it precisely because it holds no token yet.
+		mux.HandleFunc("GET "+protectedResourceMetadataPath, oauth.handleMetadata)
+		mcpHandler = oauth.middleware(mcpHandler)
+	}
+	mux.Handle(mcpPath, mcpHandler)
 	mux.HandleFunc("GET "+healthPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
@@ -99,11 +113,29 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 // mounted at /mcp and a GET /healthz liveness probe at /healthz. On ctx
 // cancellation it shuts the server down gracefully with a short timeout.
 //
-// This transport is UNAUTHENTICATED — OAuth for remote clients is tracked in
-// scrim#33. The caller (cli.cmdMcp) is responsible for gating a non-loopback
-// bind behind --allow-lan via IsLoopbackAddr before calling this.
-func ServeHTTP(ctx context.Context, addr string, cfg config.Config, ver string, hub *HubTarget, stderr io.Writer) error {
-	httpSrv := newHTTPServer(addr, newHTTPHandler(cfg, ver, hub))
+// When oauth.Enabled() the endpoint is an RFC 9728 OAuth 2.0 protected resource
+// (scrim#33): OIDC discovery runs HERE, before the listener binds, so a bad
+// issuer fails fast and the "serving on ..." banner never prints for a server
+// that can't validate tokens. An empty OAuthConfig leaves the transport
+// unauthenticated as before -- the caller (cli.cmdMcp) still gates a
+// non-loopback bind behind --allow-lan via IsLoopbackAddr, unless OAuth makes
+// the endpoint authenticated.
+func ServeHTTP(ctx context.Context, addr string, cfg config.Config, ver string, hub *HubTarget, oauth OAuthConfig, stderr io.Writer) error {
+	var validator *oauthValidator
+	if oauth.Enabled() {
+		v, err := newOAuthValidator(ctx, oauth)
+		if err != nil {
+			return fmt.Errorf("mcp http oauth: %w", err)
+		}
+		validator = v
+		if stderr != nil {
+			// Diagnostics only: the mode and metadata path, never the token,
+			// issuer secret, or any request content.
+			_, _ = fmt.Fprintf(stderr, "scrim mcp: OAuth protected-resource mode enabled (issuer discovered; metadata at %s)\n", protectedResourceMetadataPath)
+		}
+	}
+
+	httpSrv := newHTTPServer(addr, newHTTPHandler(cfg, ver, hub, validator))
 
 	// Bind synchronously up front so a bind failure (port in use, bad addr)
 	// is returned to the caller BEFORE the "serving on ..." banner prints —

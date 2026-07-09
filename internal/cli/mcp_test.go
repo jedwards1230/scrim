@@ -18,7 +18,7 @@ func TestMcpHTTPRefusesNonLoopbackWithoutAllowLAN(t *testing.T) {
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2 (usage); stderr: %s", code, errb.String())
 			}
-			for _, want := range []string{"--allow-lan", "UNAUTHENTICATED", "scrim#33"} {
+			for _, want := range []string{"--allow-lan", "UNAUTHENTICATED", "OAuth"} {
 				if !strings.Contains(errb.String(), want) {
 					t.Errorf("stderr = %q, want it to mention %q", errb.String(), want)
 				}
@@ -31,12 +31,13 @@ func TestMcpHTTPRefusesNonLoopbackWithoutAllowLAN(t *testing.T) {
 // blocking server.
 func TestPlanMcp(t *testing.T) {
 	cases := []struct {
-		name        string
-		httpAddr    string
-		allowLAN    bool
-		wantErr     bool
-		wantHTTP    bool
-		wantWarnLAN bool
+		name         string
+		httpAddr     string
+		allowLAN     bool
+		oauthEnabled bool
+		wantErr      bool
+		wantHTTP     bool
+		wantWarnLAN  bool
 	}{
 		{name: "stdio", httpAddr: "", wantHTTP: false},
 		{name: "stdio with allow-lan warns", httpAddr: "", allowLAN: true, wantWarnLAN: true},
@@ -45,10 +46,11 @@ func TestPlanMcp(t *testing.T) {
 		{name: "ipv6 loopback http", httpAddr: "[::1]:9999", wantHTTP: true},
 		{name: "non-loopback refused", httpAddr: ":9999", wantErr: true},
 		{name: "non-loopback allowed with flag", httpAddr: "0.0.0.0:9999", allowLAN: true, wantHTTP: true},
+		{name: "non-loopback allowed by oauth", httpAddr: "0.0.0.0:9999", oauthEnabled: true, wantHTTP: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := planMcp(tc.httpAddr, tc.allowLAN)
+			plan, err := planMcp(tc.httpAddr, tc.allowLAN, tc.oauthEnabled)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("planMcp(%q, %v) = nil error, want an error", tc.httpAddr, tc.allowLAN)
