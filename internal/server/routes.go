@@ -71,6 +71,18 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/tokens", s.handleCreateToken)
 		mux.HandleFunc("GET /api/tokens", s.handleListTokens)
 		mux.HandleFunc("DELETE /api/tokens/{id}", s.handleRevokeToken)
+
+		// Principal autocomplete (#53): the share dialog's grantee suggestions.
+		// A session-gated read (general non-canvas read at the gate), thin over
+		// the principalLister seam so #54 can layer a directory driver (#54).
+		mux.HandleFunc("GET /api/principals", s.handlePrincipals)
+
+		// The my-tokens management page (#53): a server-rendered HTML page that
+		// drives the /api/tokens JSON endpoints from the browser. A read like the
+		// index, so the gate lets an authenticated session (or a CIDR-allowed
+		// non-OIDC reader) reach it; it is NOT part of the machine API (an HTML
+		// page, like the index, so it stays out of api/openapi.yaml).
+		mux.HandleFunc("GET /tokens", s.handleTokensPage)
 		mux.HandleFunc("GET /api/canvases/{id}/snapshots", s.handleListSnapshots)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)

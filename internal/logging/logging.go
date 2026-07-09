@@ -41,6 +41,10 @@ const (
 	// CategoryConfig covers startup-time configuration concerns that aren't
 	// tied to a request, e.g. internal/config's permission-hardening.
 	CategoryConfig Category = "config"
+	// CategoryDirectory covers the optional read-only directory feeder
+	// (internal/authentik): a failed background pull degrades autocomplete but
+	// never a request, and logs one constant, PII-free line here.
+	CategoryDirectory Category = "directory"
 )
 
 var (

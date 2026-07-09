@@ -65,6 +65,10 @@ tags:
   - name: grants
     description: >-
       Per-canvas view-only sharing grants (list, add, remove) — user/group/everyone/link. Hub-only.
+  - name: principals
+    description: >-
+      Display-only autocomplete of observed principals, feeding the browser share dialog's grantee
+      field. Never an authorization source. Hub-only.
   - name: auth
     description: >-
       Browser OIDC login flow. NOT part of the machine API — a human's browser drives these to
@@ -746,6 +750,40 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/principals:
+    get:
+      tags: [principals]
+      operationId: listPrincipals
+      summary: Autocomplete observed principals for the share dialog.
+      description: >-
+        Returns the principals the hub has observed (from logins, verified CF identity headers, and
+        grant targets) whose email or display name case-insensitively starts with `q`, capped at 20
+        and sorted by email. With `q` omitted or empty it returns the first 20 principals. This is a
+        display-only, best-effort convenience feeding the browser share dialog's grantee field — it
+        is NOT an authorization source, and a principal absent here can still be granted access by
+        typing its email. A session-gated read like the gallery: under OIDC an authenticated session
+        is required; otherwise the CIDR/read-token browser gate applies.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Case-insensitive email/display-name prefix to filter by.
+      responses:
+        '200':
+          description: Matching principals (display-only, secret-free).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PrincipalSuggestion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /api/canvases/{id}/snapshots:
     parameters:
       - $ref: '#/components/parameters/CanvasId'
@@ -1214,7 +1252,31 @@ components:
           format: date-time
         revoked:
           type: boolean
+        auto_share:
+          type: array
+          description: Grants automatically applied to canvases this token creates (as minted).
+          items:
+            $ref: '#/components/schemas/Grant'
+        allowed_grant_targets:
+          $ref: '#/components/schemas/Allowance'
       required: [id, name, owner_email, created_at]
+
+    PrincipalSuggestion:
+      type: object
+      description: One display-only autocomplete row for the share dialog. Carries no secret.
+      properties:
+        email:
+          type: string
+          description: The principal's email (the grant target it would be shared to).
+        display_name:
+          type: string
+          description: A best-effort display name, when one has been observed.
+        groups_seen:
+          type: array
+          items:
+            type: string
+          description: Group memberships observed for this principal, for a group-grant hint.
+      required: [email]
 
     MintTokenResponse:
       type: object

@@ -1243,6 +1243,25 @@ else
   bad "grant scenario: list_grants shows the grant, no secret (got: $GRANTS)"
 fi
 
+# --- Principal autocomplete (#53) ---
+# The share dialog's grantee-autocomplete source. A shape check (a JSON array),
+# runnable here because it's a session-gated READ that a loopback caller reaches
+# through this non-OIDC hub's CIDR gate. Granting erin above observed her in the
+# display-only registry, so the unfiltered list is a non-empty array.
+PRINCIPALS=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/api/principals" || true)
+case "$PRINCIPALS" in
+  \[*\]) ok "principals scenario: GET /api/principals returns a JSON array" ;;
+  *) bad "principals scenario: GET /api/principals returns a JSON array (got: $PRINCIPALS)" ;;
+esac
+
+# The q= prefix filter still returns an array, and finds the observed grantee.
+PRINCIPALS_Q=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/api/principals?q=erin" || true)
+case "$PRINCIPALS_Q" in
+  \[*erin@example.com*\]) ok "principals scenario: GET /api/principals?q= filters to the matching principal" ;;
+  \[*\]) bad "principals scenario: prefix filter should surface the observed grantee (got: $PRINCIPALS_Q)" ;;
+  *) bad "principals scenario: prefix-filtered principals returns an array (got: $PRINCIPALS_Q)" ;;
+esac
+
 # --- Legacy migration + claim (#55) ---
 # A canvas created via the admin push token is admin-owned (the legacy/bootstrap
 # state the startup sweep guarantees). A logged-in principal (dave's token)
@@ -1287,6 +1306,89 @@ fi
 # OIDC and covered above: healthz, token-as-owner writes, CF-actor attribution
 # + spoof rejection (#51), grant allowance enforcement + list_grants (#52), and
 # legacy migration + claim ownership transfer (#55).
+
+# --- OAuth protected-resource mode for `scrim mcp --http` (#33) ---
+# scrim mcp --http can be an RFC 9728 OAuth 2.0 protected resource. Two contract
+# points are assertable without a real IdP: the protected-resource metadata is
+# served UNAUTHENTICATED (200), and any /mcp request without a valid bearer is
+# refused 401 with a WWW-Authenticate challenge. Minting a real Authentik JWT in
+# shell is impractical, so the ACCEPT + per-tool-scope paths live in Go tests
+# (internal/mcpserver/oauth_test.go); the reject + discovery paths need only the
+# AS's discovery document reachable at startup (JWKS is fetched lazily and never
+# for these paths). A tiny static file server provides that doc, so the scenario
+# is skipped cleanly where python3 is unavailable.
+if command -v python3 >/dev/null 2>&1; then
+  OAUTH_ISS_PORT=19501
+  OAUTH_MCP_PORT=19502
+  OAUTH_DIR="$WORKDIR/oauth-issuer"
+  ISS="http://127.0.0.1:$OAUTH_ISS_PORT"
+  mkdir -p "$OAUTH_DIR/.well-known"
+  cat >"$OAUTH_DIR/.well-known/openid-configuration" <<EOF
+{"issuer":"$ISS","authorization_endpoint":"$ISS/authorize","token_endpoint":"$ISS/token","jwks_uri":"$ISS/jwks","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}
+EOF
+  python3 -m http.server "$OAUTH_ISS_PORT" --directory "$OAUTH_DIR" >"$WORKDIR/oauth-issuer.log" 2>&1 &
+  OAUTH_ISS_PID=$!
+  disown "$OAUTH_ISS_PID" 2>/dev/null || true
+  ISS_UP=0
+  for _ in $(seq 1 25); do
+    if curl -fsS "$ISS/.well-known/openid-configuration" >/dev/null 2>&1; then ISS_UP=1; break; fi
+    sleep 0.2
+  done
+  if [ "$ISS_UP" = "1" ]; then
+    ok "oauth scenario: fake AS discovery document is being served"
+  else
+    bad "oauth scenario: fake AS discovery document is being served"
+  fi
+
+  "$BIN" mcp --dir "$WORKDIR/oauth-mcp" --http "127.0.0.1:$OAUTH_MCP_PORT" \
+    --oauth-issuer "$ISS" --oauth-audience "scrim-mcp" >"$WORKDIR/oauth-mcp.log" 2>&1 &
+  OAUTH_MCP_PID=$!
+  disown "$OAUTH_MCP_PID" 2>/dev/null || true
+  MCP_UP=0
+  for _ in $(seq 1 25); do
+    if curl -fsS "http://127.0.0.1:$OAUTH_MCP_PORT/healthz" >/dev/null 2>&1; then MCP_UP=1; break; fi
+    sleep 0.2
+  done
+  if [ "$MCP_UP" = "1" ]; then
+    ok "oauth scenario: scrim mcp --http started in OAuth protected-resource mode"
+  else
+    bad "oauth scenario: scrim mcp --http started in OAuth mode (log: $(cat "$WORKDIR/oauth-mcp.log"))"
+  fi
+
+  # Metadata endpoint: 200, unauthenticated, advertising the AS + scopes.
+  META=$(curl -fsS "http://127.0.0.1:$OAUTH_MCP_PORT/.well-known/oauth-protected-resource" || true)
+  if echo "$META" | grep -q '"authorization_servers"' && echo "$META" | grep -q 'scrim:write'; then
+    ok "oauth scenario: protected-resource metadata is served 200 unauthenticated"
+  else
+    bad "oauth scenario: protected-resource metadata served unauthenticated (got: $META)"
+  fi
+
+  # A /mcp request with NO bearer → 401 carrying a WWW-Authenticate challenge.
+  STATUS=$(curl -s -o /dev/null -w '%{http_code}' -D "$WORKDIR/oauth-h1.txt" -X POST \
+    -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    "http://127.0.0.1:$OAUTH_MCP_PORT/mcp")
+  if [ "$STATUS" = "401" ] && grep -qi "WWW-Authenticate: Bearer" "$WORKDIR/oauth-h1.txt"; then
+    ok "oauth scenario: /mcp with no bearer is 401 with a WWW-Authenticate challenge"
+  else
+    bad "oauth scenario: /mcp no bearer is 401 + WWW-Authenticate (got $STATUS; $(cat "$WORKDIR/oauth-h1.txt"))"
+  fi
+
+  # A garbage bearer → 401 pointing at the resource metadata (RFC 9728 §5.1).
+  STATUS=$(curl -s -o /dev/null -w '%{http_code}' -D "$WORKDIR/oauth-h2.txt" -X POST \
+    -H "Authorization: Bearer not-a-real-jwt" -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list"}}' \
+    "http://127.0.0.1:$OAUTH_MCP_PORT/mcp")
+  if [ "$STATUS" = "401" ] && grep -qi "resource_metadata=" "$WORKDIR/oauth-h2.txt"; then
+    ok "oauth scenario: /mcp with a garbage bearer is 401 pointing at resource_metadata"
+  else
+    bad "oauth scenario: /mcp garbage bearer is 401 + resource_metadata (got $STATUS; $(cat "$WORKDIR/oauth-h2.txt"))"
+  fi
+
+  kill -TERM "$OAUTH_MCP_PID" 2>/dev/null || true
+  kill -TERM "$OAUTH_ISS_PID" 2>/dev/null || true
+else
+  printf '  [SKIP] oauth scenario: python3 unavailable to serve a fake AS discovery doc\n'
+fi
 
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely

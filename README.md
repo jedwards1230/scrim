@@ -187,8 +187,11 @@ is requested but fails (e.g. no browser installed, headless environment),
 `scrim mcp` exposes scrim's verbs as [MCP](https://modelcontextprotocol.io)
 tools, so an agent drives scrim natively instead of shelling out. Tools:
 `add`, `list`, `link`, `copy_canvas`, `rm`, `snap`, `snaps`, `revert`,
-`status`, `list_files`, `read_file`, `write_file`, `edit_file`, `push` (plus
-`path` in local mode only — a server-local directory has no remote meaning).
+`status`, `list_files`, `read_file`, `write_file`, `edit_file`, `share_canvas`,
+`list_grants`, `push` (plus `path` in local mode only — a server-local
+directory has no remote meaning). `share_canvas`/`list_grants` manage a
+canvas's view-only sharing grants (see [Ownership, sharing &
+tokens](#ownership-sharing--tokens)) over the machine API.
 `list_files` enumerates a canvas's files (paths + sizes, no content) so an
 agent can discover what to read or edit. `edit_file` applies an exact-string
 replacement server-side, so hub-mode edits cost tokens proportional to the
@@ -204,10 +207,11 @@ disk, so a remote/in-cluster deployment should author with `write_file`/
 `edit_file` instead.
 
 Transport is stdio by default; pass `--http ADDR` for streamable HTTP. The
-HTTP endpoint is unauthenticated for now (remote auth tracked in
-[#33](https://github.com/jedwards1230/scrim/issues/33)), so it fails closed:
-a non-loopback bind is refused unless you pass `--allow-lan`.
-`scrim mcp --http 127.0.0.1:9797` is the safe default.
+HTTP endpoint is unauthenticated by default, so it fails closed: a
+non-loopback bind is refused unless you pass `--allow-lan` or configure
+[OAuth resource mode](#oauth-20-resource-mode---http-only), which
+authenticates every request instead. `scrim mcp --http 127.0.0.1:9797` is the
+safe default.
 
 ```jsonc
 // e.g. an MCP client config — local mode
@@ -224,9 +228,15 @@ a non-loopback bind is refused unless you pass `--allow-lan`.
   hub over its bearer-authenticated machine API — for a scrim mcp hosted away
   from the agent (e.g. in-cluster). Since there's no shared disk, authoring is
   done entirely through `write_file`/`read_file` (inline content, ~2 MiB cap);
-  `path` is absent (a server-local path is meaningless remotely). The push
-  token authenticates every call — from `SCRIM_PUSH_TOKEN` or
-  `--hub-token-file PATH`; `scrim mcp --hub` fails closed with no token.
+  `path` is absent (a server-local path is meaningless remotely). A bearer
+  token authenticates every call — from `SCRIM_PUSH_TOKEN` (the admin
+  credential) or `--hub-token-file PATH` — and can be either the admin push
+  token or a [user token](#ownership-sharing--tokens); `scrim mcp --hub` fails
+  closed with no token. A user token attributes everything it creates/writes to
+  its owner instead of the shared admin credential — see [Identity on the
+  streamable-HTTP transport](#identity-on-the-streamable-http-transport) for
+  how a per-request end-user is instead attributed when scrim mcp sits behind
+  ContextForge.
 
 ```jsonc
 // hub mode — SCRIM_PUSH_TOKEN in the environment
@@ -241,6 +251,63 @@ GET/PUT/PATCH, snapshot create/list/revert) is gated by the push token on
 (CIDR/read-token). File PUTs may carry a `Content-Encoding: gzip` body and GETs
 an `Accept-Encoding: gzip` request; the hub inflates/deflates transparently
 (the per-file cap applies to the decoded size).
+
+### Identity on the streamable-HTTP transport
+
+Two identity layers apply to `--http`, and they're orthogonal:
+
+- **ContextForge header-trust** (existing): when scrim mcp sits behind a
+  trusted gateway, it verifies HMAC-signed `X-Forwarded-User-*` headers
+  (shared secret in `SCRIM_MCP_IDENTITY_HMAC_SECRET`) and re-emits the
+  verified principal to the hub as `X-Scrim-Actor-*` on top of its own hub
+  bearer, so a canvas is attributed to the real caller rather than the shared
+  credential. An unset secret is fail-closed: identity is not verified and
+  every call is attributed to whatever hub credential scrim mcp itself holds.
+  This is why a deployment that wants agent output visible to a human without
+  wiring up per-request header signing instead mints the agent a [user
+  token](#ownership-sharing--tokens) with an `auto_share` grant to that
+  human's email or group — the agent's calls own their own canvases under its
+  own service identity, auto-shared to the human, rather than depending on
+  per-request forwarded identity.
+- **OAuth 2.0 resource mode** (below): authenticates the *client connection*
+  itself (the MCP host presenting a bearer JWT), independent of which end
+  user or service the ContextForge layer attributes a call to.
+
+### OAuth 2.0 resource mode (`--http` only)
+
+Setting `--oauth-issuer` turns `--http`'s `/mcp` endpoint into an
+[RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) OAuth 2.0 protected
+resource ([#33](https://github.com/jedwards1230/scrim/issues/33)):
+unauthenticated protected-resource metadata is served at
+`/.well-known/oauth-protected-resource`, and every request to `/mcp` must
+carry a bearer JWT that's validated (signature/issuer/audience/expiry, via
+the issuer's JWKS) before it's served. A `tools/call` additionally needs the
+tool's required scope — `scrim:read` for lookups, `scrim:write` for
+everything else (a write-scoped token also satisfies a read requirement). A
+missing/invalid token is `401`; an insufficient scope is `403`; both carry a
+`WWW-Authenticate` challenge pointing at the metadata document. stdio is
+unaffected — it carries no inbound HTTP request for this layer to check.
+
+```bash
+scrim mcp --http 0.0.0.0:9797 \
+  --oauth-issuer https://auth.example.com/application/o/scrim-mcp/ \
+  --oauth-audience scrim-mcp
+```
+
+- `--oauth-issuer` (env `SCRIM_MCP_OAUTH_ISSUER`) — the authorization
+  server's issuer URL; setting it turns OAuth resource mode on. A
+  bad/unreachable issuer fails startup (one-shot OIDC discovery, like
+  `--oidc-issuer` below). Once set, a non-loopback `--http` bind no longer
+  needs `--allow-lan` — the endpoint is authenticated.
+- `--oauth-audience` (env `SCRIM_MCP_OAUTH_AUDIENCE`) — the expected `aud`
+  claim (the resource id the AS mints tokens for). Required whenever the
+  issuer is set; a resource with no pinned audience would accept any token
+  the AS ever issued, for any resource.
+- `--oauth-resource` (env `SCRIM_MCP_OAUTH_RESOURCE`) — the canonical
+  resource URL advertised in the metadata document. Optional: derived from
+  the inbound request (honoring `X-Forwarded-Proto`) when unset; set it
+  explicitly when that can't be derived correctly (e.g. behind a
+  TLS-terminating proxy scrim can't see through).
 
 ## Hub: a shared central store
 
@@ -275,20 +342,26 @@ scrim hub --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
   machine client is commonly outside the read allowlist entirely (e.g. a
   laptop or in-cluster MCP server pushing to a homelab hub it isn't itself
   permitted to browse from).
-- **The push token is now read+write, not write-only.** It authenticates the
-  whole machine API (`scrim mcp --hub`): a holder can read canvas content and
-  file bytes (`GET /api/canvases/{id}/files/...`), list, and snapshot — not
-  just push. Size its trust accordingly when you distribute it (e.g. to an
-  in-cluster MCP deployment) and rotate it as a read-capable secret. Browser
-  reads remain separately gated by the CIDR allowlist (+ optional read token).
+- **The push token is now read+write, not write-only** — and it's the hub's
+  **admin/bootstrap** credential: unrestricted over the whole machine API
+  (`scrim mcp --hub`), a holder can read canvas content and file bytes
+  (`GET /api/canvases/{id}/files/...`), list, and snapshot — not just push —
+  and owns every legacy canvas. Size its trust accordingly when you
+  distribute it (e.g. to an in-cluster MCP deployment) and rotate it as a
+  read-capable secret. Browser reads remain separately gated by the CIDR
+  allowlist (+ optional read token). A logged-in principal that wants its own
+  scoped credential instead should mint a [user token](#ownership-sharing--tokens).
 - The hub is long-lived by default (`--idle-timeout` defaults to disabled)
   and doesn't advertise over mDNS by default (`--no-mdns` defaults to true).
 
 `scrim push <id> --to URL --token TOKEN [--watch]` tars a **local** canvas
 directory (read straight off disk via `--dir`/`SCRIM_DIR` -- it never talks
 to a local daemon) and POSTs it to a hub's push endpoint, printing the
-hub's canvas URL on success. `--watch` re-pushes on every local change
-(200ms debounce) until interrupted. `push` never launches a browser.
+hub's canvas URL on success. `TOKEN` is the admin push token or a [user
+token](#ownership-sharing--tokens) — either way it's the Direct plane, so
+the pushed canvas is owned by whichever principal the token resolves to.
+`--watch` re-pushes on every local change (200ms debounce) until
+interrupted. `push` never launches a browser.
 
 A multi-arch (amd64/arm64) container image running `scrim hub` against a
 `/data` volume is published to GHCR on every release:
@@ -313,6 +386,76 @@ binary, gate-exempt, hub-only), so standard OpenAPI tooling can read the
 contract straight from a live instance — `curl http://<hub>/api/openapi.yaml`.
 Only YAML is served (scrim adds no YAML-to-JSON dependency; modern tools read
 YAML natively).
+
+### Ownership, sharing & tokens
+
+> This is the tail of the ownership/sharing/identity epic
+> ([#48](https://github.com/jedwards1230/scrim/issues/48)); it lands *after*
+> the MCP batch (#40–#43, #46) documented above, reusing that settled
+> `internal/mcpserver` surface rather than changing it.
+
+Every canvas has an **owner** (a principal's email, or `admin` for the push
+token and legacy canvases) and a **grant list** — private by default,
+visible only to the owner, admin, and explicit grantees until shared.
+
+- **Migration & claim.** On every hub startup, any canvas whose metadata
+  predates ownership is stamped `owner: admin`. A logged-in principal
+  reclaims one it actually created via the gallery's Claim button
+  (`POST /api/canvases/{id}/claim`, any authenticated caller); a canvas
+  already owned by someone else is `409`, claiming your own is an idempotent
+  `200`.
+- **User tokens** (`/tokens` page; `POST`/`GET /api/tokens`,
+  `DELETE /api/tokens/{id}`) — a logged-in session mints a named bearer
+  token that acts AS its owner on the Direct plane: canvases it creates or
+  writes (via `scrim push --token` or `scrim mcp --hub`) are owned by that
+  principal, not the shared admin credential. A token can carry `auto_share`
+  grants (applied to every canvas it creates) and an
+  `allowed_grant_targets` allowance bounding what it may later share
+  interactively; minting a token for another principal is admin-only (no
+  privilege escalation).
+- **Sharing** — `GET`/`POST /api/canvases/{id}/grants`,
+  `DELETE .../grants/{grantRef}`. Grant kinds: `user` (one email), `group`,
+  `everyone` (any authenticated viewer), `link` (an unguessable secret,
+  shown once at creation, redeemed as `?k=<secret>`). The browser's share
+  dialog drives these natively for a session that owns the canvas — safe
+  against CSRF because the session cookie is HttpOnly + SameSite=Lax, the
+  same reasoning that already makes `POST /api/tokens` session-writable. The
+  `share_canvas`/`list_grants` MCP tools do the same over the machine API.
+  Grantee autocomplete comes from `GET /api/principals?q=` — principals the
+  hub has *observed* (logins, verified CF headers, grant targets), display-only,
+  never an authorization source.
+- **Two planes attribute identity differently.** Direct requests (a browser
+  session, or `scrim push --token <user-token>`) carry identity natively.
+  ContextForge-plane requests (agent → CF gateway → scrim-mcp) carry it via
+  HMAC-signed headers that scrim-mcp itself must verify — see [Identity on
+  the streamable-HTTP transport](#identity-on-the-streamable-http-transport)
+  for how that plane attributes a call, and degrades, when unconfigured.
+
+Private-by-default *visibility* (owner/admin/grant matching) is enforced on
+reads only when `--oidc-issuer` is set — without OIDC the hub's CIDR/
+read-token gate is unchanged and every canvas stays visible to anyone who
+passes it, exactly as before this epic. Ownership always governs *writes*:
+a user token (or a CF-forwarded actor) may only create or mutate a canvas
+its owner can write; the admin push token is unrestricted either way.
+
+### Authentik directory (optional)
+
+Setting **both** `--authentik-url` and `--authentik-token` turns on a
+read-only pull of Authentik users/groups that enriches `GET /api/principals`
+with display names and groups for people who haven't shown up in the
+observed registry yet. Setting only one of the pair leaves the feeder off
+(a startup warning is logged).
+
+- `--authentik-url` (env `SCRIM_AUTHENTIK_URL`) — the Authentik instance's
+  base URL.
+- `--authentik-token` (env `SCRIM_AUTHENTIK_TOKEN`) — a **read-only**
+  Authentik API token; the client only ever issues GETs.
+- `--authentik-cache-ttl` (env `SCRIM_AUTHENTIK_CACHE_TTL`, default `5m`) —
+  how long pulled entries are cached in memory.
+
+Pulled data is cached in memory only, **never persisted**, and **never
+consulted for enforcement** — an unreachable or misconfigured Authentik
+silently degrades autocomplete and never fails a request or the hub.
 
 ### OIDC login for reads
 

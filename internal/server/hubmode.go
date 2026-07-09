@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jedwards1230/scrim/internal/authentik"
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
@@ -42,6 +43,16 @@ type HubOptions struct {
 	// not advertise it at all. Writes (the push token) are unaffected either
 	// way.
 	OIDC *oidc.Config
+	// Authentik, when non-nil, turns on the OPTIONAL read-only Authentik
+	// directory feeder behind GET /api/principals: NewHub builds the client
+	// (validating the URL as a startup error, like a bad CIDR) and composes it
+	// with the lazy registry, so autocomplete gains display names and groups
+	// for people who haven't shown up yet. Nil (the default) leaves the lazy
+	// registry as the sole autocomplete source, byte-for-byte as before. The
+	// pulled data is cached in memory only, NEVER persisted, and NEVER consulted
+	// by enforcement -- a fetch failure silently degrades autocomplete and
+	// never fails a request or the hub.
+	Authentik *authentik.Config
 }
 
 // hubConfig is HubOptions after validation: PushToken/ReadToken carried
@@ -114,9 +125,33 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 	// read by enforcement). It lives under the hub's meta dir alongside the
 	// canvas sidecars.
 	s.principals = principal.New(s.metaDir)
+	// The share dialog's autocomplete reads through this seam; it defaults to
+	// the display-only registry. When Authentik is configured it is composed
+	// with a read-only directory driver just below (see directory.go).
+	s.directory = s.principals
 	// The user-token store backs the direct (machine) plane's per-principal
 	// credentials: a bearer that isn't the admin push token is resolved here.
 	s.tokens = usertoken.New(s.metaDir)
+
+	// Optional read-only Authentik directory feeder (#54). Built only when
+	// configured; a malformed URL fails startup here (like a bad CIDR), but at
+	// runtime an unreachable Authentik just degrades autocomplete -- the driver
+	// never persists and enforcement never reads it. Composed BEHIND the same
+	// principalLister seam so the handler and the enforcement path are untouched.
+	if opts.Authentik != nil {
+		ac := *opts.Authentik
+		if ac.Log == nil {
+			// Route the driver's constant, PII-free refresh-failure notices
+			// through the daemon's scrubbed logging surface (the server package
+			// owns its own logging), greppable under CategoryDirectory.
+			ac.Log = func(err error) { logging.Error(logging.CategoryDirectory, err) }
+		}
+		driver, err := authentik.New(ac)
+		if err != nil {
+			return nil, err
+		}
+		s.directory = compositeLister{sources: []principalLister{s.principals, driver}}
+	}
 
 	// OIDC discovery happens here so NewHub fails closed: a hub with OIDC
 	// configured but an unreachable/misconfigured issuer refuses to start

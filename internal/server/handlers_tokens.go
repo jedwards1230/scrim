@@ -11,14 +11,19 @@ import (
 
 // tokenResponse is the secret-free view of a user token returned by the token
 // endpoints. It NEVER carries the hash or the raw secret (the raw is returned
-// exactly once, by mint, in mintResponse).
+// exactly once, by mint, in mintResponse). AutoShare/AllowedGrantTargets are
+// additive (omitempty): the my-tokens page shows them so a caller can see what
+// a token auto-shares and may share to; older clients that don't know the
+// fields ignore them.
 type tokenResponse struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	OwnerEmail string     `json:"owner_email"`
-	CreatedAt  time.Time  `json:"created_at"`
-	LastUsed   *time.Time `json:"last_used,omitempty"`
-	Revoked    bool       `json:"revoked,omitempty"`
+	ID                  string              `json:"id"`
+	Name                string              `json:"name"`
+	OwnerEmail          string              `json:"owner_email"`
+	CreatedAt           time.Time           `json:"created_at"`
+	LastUsed            *time.Time          `json:"last_used,omitempty"`
+	Revoked             bool                `json:"revoked,omitempty"`
+	AutoShare           []canvas.Grant      `json:"auto_share,omitempty"`
+	AllowedGrantTargets usertoken.Allowance `json:"allowed_grant_targets,omitempty"`
 }
 
 // mintResponse is the one-time result of minting a token: the raw secret plus
@@ -30,12 +35,14 @@ type mintResponse struct {
 
 func toTokenResponse(t usertoken.Token) tokenResponse {
 	return tokenResponse{
-		ID:         t.ID,
-		Name:       t.Name,
-		OwnerEmail: t.OwnerEmail,
-		CreatedAt:  t.CreatedAt,
-		LastUsed:   t.LastUsed,
-		Revoked:    t.Revoked,
+		ID:                  t.ID,
+		Name:                t.Name,
+		OwnerEmail:          t.OwnerEmail,
+		CreatedAt:           t.CreatedAt,
+		LastUsed:            t.LastUsed,
+		Revoked:             t.Revoked,
+		AutoShare:           t.AutoShare,
+		AllowedGrantTargets: t.AllowedGrantTargets,
 	}
 }
 
