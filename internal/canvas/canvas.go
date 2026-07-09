@@ -19,8 +19,50 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 )
+
+// metaLocks serializes the read-modify-write of a single canvas's metadata
+// file (<id>.json). Create/SetOwner/AddGrant/RemoveGrant each do
+// read -> mutate -> writeMeta, and without a per-id lock two concurrent
+// writers race on the same file: a last-writer-wins over a stale read loses an
+// update -- most dangerously, a grant revoke (RemoveGrant) racing a concurrent
+// AddGrant/auto-share can RESURRECT a revoked share. Keyed by canvas id so
+// different canvases never contend; the same id is mutually exclusive across
+// every caller. Package-level so the serialization holds regardless of which
+// handler/goroutine drives the write, mirroring the whole-file mutex the
+// usertoken.Store and principal.Registry hold over their own RMW.
+var metaLocks keyedMutex
+
+// keyedMutex hands out a distinct mutex per string key, so callers can
+// serialize work on the same key while letting different keys run in parallel.
+// Entries are created on demand and never reclaimed -- the key space is canvas
+// ids, which is small and bounded, so the leak is negligible and dropping an
+// entry would reintroduce the very race the lock exists to prevent (same
+// rationale as internal/server's keyedMutex).
+type keyedMutex struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+// lock acquires (creating if needed) the mutex for key and returns its unlock
+// func for the caller to defer.
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = make(map[string]*sync.Mutex)
+	}
+	mu, ok := k.m[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		k.m[key] = mu
+	}
+	k.mu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
 
 // Grant kinds. A canvas is private by default (visible only to its owner);
 // each grant on a canvas widens that visibility for one class of principal.
@@ -158,6 +200,9 @@ func Create(canvasesDir, metaDir, id, title, description, icon, owner string) (s
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // canvas dirs are user-owned working files, not sensitive
 		return "", fmt.Errorf("creating canvas dir %s: %w", id, err)
 	}
+	// Serialize the metadata read->mutate->write against every other writer of
+	// this id, so a concurrent grant op (or another Create) can't clobber it.
+	defer metaLocks.lock(id)()
 	existing := readMeta(metaDir, id)
 	m := meta{
 		Title:       title,
@@ -199,6 +244,7 @@ func SetOwner(metaDir, id, owner string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
+	defer metaLocks.lock(id)()
 	m := readMeta(metaDir, id)
 	m.Owner = owner
 	return writeMeta(metaDir, id, m)
@@ -211,6 +257,7 @@ func AddGrant(metaDir, id string, g Grant) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
+	defer metaLocks.lock(id)()
 	m := readMeta(metaDir, id)
 	m.Grants = append(m.Grants, g)
 	return writeMeta(metaDir, id, m)
@@ -224,6 +271,7 @@ func RemoveGrant(metaDir, id string, match func(Grant) bool) (removed int, err e
 	if err := ValidateID(id); err != nil {
 		return 0, err
 	}
+	defer metaLocks.lock(id)()
 	m := readMeta(metaDir, id)
 	kept := m.Grants[:0:0]
 	for _, g := range m.Grants {

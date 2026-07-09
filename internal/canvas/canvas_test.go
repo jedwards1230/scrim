@@ -603,3 +603,84 @@ func TestHashLinkSecretIsStableHex(t *testing.T) {
 		t.Error("HashLinkSecret collided on different inputs")
 	}
 }
+
+// TestGrantRMWSerializedUnderConcurrency proves the per-id metadata lock
+// serializes concurrent read-modify-write on the same canvas: many AddGrant
+// calls interleaved with a RemoveGrant never lose an update, and a removed
+// grant stays removed (a revoke racing an add must not resurrect it). Without
+// the lock, a last-writer-wins over a stale read drops adds and/or re-adds the
+// revoked grant. Run under -race to also catch any unsynchronized map access.
+func TestGrantRMWSerializedUnderConcurrency(t *testing.T) {
+	tests := []struct {
+		name     string
+		adders   int
+		removers int
+	}{
+		{"many adds, one revoke", 64, 1},
+		{"many adds, several revokes", 64, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canvasesDir := t.TempDir()
+			metaDir := t.TempDir()
+			if _, err := Create(canvasesDir, metaDir, "c", "", "", "", "alice@example.com"); err != nil {
+				t.Fatal(err)
+			}
+			// Seed the grant that the concurrent revokes target. It must not
+			// survive: not one adder's stale read may write it back.
+			if err := AddGrant(metaDir, "c", Grant{Kind: GrantUser, Target: "victim@example.com"}); err != nil {
+				t.Fatal(err)
+			}
+
+			isVictim := func(g Grant) bool {
+				return g.Kind == GrantUser && g.Target == "victim@example.com"
+			}
+
+			var wg sync.WaitGroup
+			for i := 0; i < tt.adders; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					g := Grant{Kind: GrantUser, Target: fmt.Sprintf("u%d@example.com", i)}
+					if err := AddGrant(metaDir, "c", g); err != nil {
+						t.Errorf("AddGrant(u%d): %v", i, err)
+					}
+				}(i)
+			}
+			for i := 0; i < tt.removers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := RemoveGrant(metaDir, "c", isVictim); err != nil {
+						t.Errorf("RemoveGrant(victim): %v", err)
+					}
+				}()
+			}
+			wg.Wait()
+
+			_, grants, err := GetOwnerGrants(metaDir, "c")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			seen := make(map[string]int, len(grants))
+			for _, g := range grants {
+				if isVictim(g) {
+					t.Errorf("revoked grant resurrected: %+v", g)
+				}
+				seen[g.Target]++
+			}
+			// Every adder's grant must be present exactly once (no lost update,
+			// no duplicate), and nothing else should remain.
+			if len(grants) != tt.adders {
+				t.Fatalf("final grant count = %d, want %d (adds lost or duplicated): %+v", len(grants), tt.adders, grants)
+			}
+			for i := 0; i < tt.adders; i++ {
+				target := fmt.Sprintf("u%d@example.com", i)
+				if seen[target] != 1 {
+					t.Errorf("grant %s present %d times, want 1", target, seen[target])
+				}
+			}
+		})
+	}
+}
