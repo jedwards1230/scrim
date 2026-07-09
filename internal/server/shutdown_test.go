@@ -31,7 +31,7 @@ func TestShutdownClosesOpenSSEConnectionsPromptly(t *testing.T) {
 	}
 	srv := New(cfg)
 
-	if _, err := canvas.Create(cfg.CanvasesDir(), cfg.MetaDir(), "demo", "Demo", "", ""); err != nil {
+	if _, err := canvas.Create(cfg.CanvasesDir(), cfg.MetaDir(), "demo", "Demo", "", "", ""); err != nil {
 		t.Fatalf("canvas.Create() error = %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestShutdownClosesOpenSSEConnectionsPromptlyOnContextCancel(t *testing.T) {
 	}
 	srv := New(cfg)
 
-	if _, err := canvas.Create(cfg.CanvasesDir(), cfg.MetaDir(), "demo", "Demo", "", ""); err != nil {
+	if _, err := canvas.Create(cfg.CanvasesDir(), cfg.MetaDir(), "demo", "Demo", "", "", ""); err != nil {
 		t.Fatalf("canvas.Create() error = %v", err)
 	}
 

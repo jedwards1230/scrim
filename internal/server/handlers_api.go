@@ -62,7 +62,15 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon); err != nil {
+	// Ownership is a hub concept: only a hub resolves request identity (the
+	// default daemon has no gate, no OIDC, and its canvases are never
+	// visibility-filtered), so it alone stamps an owner -- keeping the default
+	// daemon's on-disk behavior byte-for-byte unchanged (hub_test.go invariant).
+	owner := ""
+	if s.isHub() {
+		owner = ownerFromClaims(claimsFrom(r.Context()))
+	}
+	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon, owner); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

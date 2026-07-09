@@ -178,11 +178,18 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	title := r.URL.Query().Get("title")
 	description := r.URL.Query().Get("description")
 	icon := r.URL.Query().Get("icon")
-	if title != "" || description != "" || icon != "" {
-		if _, err := canvas.Create(s.canvasesDir, s.metaDir, id, title, description, icon); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "writing canvas metadata: "+err.Error())
-			return
-		}
+	// Attribute ownership to the pushing principal (admin for the push token;
+	// #51 will carry a CF-forwarded actor), but never clobber an existing owner
+	// -- a later claim/transfer (#55) must win over a re-push. Passing owner ""
+	// to canvas.Create leaves any existing owner in place and preserves grants,
+	// so this also records metadata even when no title/description/icon is given.
+	owner := ownerFromClaims(claimsFrom(r.Context()))
+	if existing, _, err := canvas.GetOwnerGrants(s.metaDir, id); err == nil && existing != "" {
+		owner = existing
+	}
+	if _, err := canvas.Create(s.canvasesDir, s.metaDir, id, title, description, icon, owner); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "writing canvas metadata: "+err.Error())
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
