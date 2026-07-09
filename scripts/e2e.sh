@@ -1184,15 +1184,109 @@ else
   bad "token scenario: a revoked token no longer authorizes writes (got $STATUS)"
 fi
 
-# NOTE: the #49 identity scenarios -- private-by-default (unauth API/SSE 401,
-# browser 302 login), owner-only visibility, and each share-grant kind
-# (user/group/everyone/link via ?k=) -- plus the #50 "second token can't SEE
-# the first's canvas" read half all require a live OIDC IdP, which an
+# --- CF-forwarded actor attribution (#51) ---
+# The admin push token carries X-Scrim-Actor-* headers (as scrim-mcp attaches
+# after verifying ContextForge's signed identity). A canvas created that way is
+# owned by the ACTOR, not admin; the same headers WITHOUT the admin bearer are
+# ignored (a spoof buys nothing). Both against the running non-OIDC hub1.
+ACTOR_CREATE=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" \
+  -H "X-Scrim-Actor-Email: carol@example.com" -H "X-Scrim-Actor-Id: sub-carol" \
+  -H "Content-Type: application/json" -d '{"id":"carol-canvas"}' \
+  "http://127.0.0.1:$HUB1_PORT/api/canvases" || true)
+if echo "$ACTOR_CREATE" | grep -q '"owner":"carol@example.com"'; then
+  ok "actor scenario: admin bearer + X-Scrim-Actor-* attributes the canvas to the actor"
+else
+  bad "actor scenario: admin bearer + actor headers attributes to the actor (got: $ACTOR_CREATE)"
+fi
+
+# The SAME actor headers with NO admin bearer are ignored → anonymous → 401.
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "X-Scrim-Actor-Email: carol@example.com" -H "Content-Type: application/json" \
+  -d '{"id":"spoofed"}' "http://127.0.0.1:$HUB1_PORT/api/canvases")
+if [ "$STATUS" = "401" ]; then
+  ok "actor scenario: spoofed X-Scrim-Actor-* without the admin bearer is ignored (401)"
+else
+  bad "actor scenario: spoofed actor header without admin bearer ignored (got $STATUS)"
+fi
+
+# --- Share grants + allowance (#52) ---
+# Mint a user token for dave, allowed to share only to erin@example.com. His
+# token creates a canvas he owns, then an in-allowance grant succeeds (201) and
+# an out-of-allowance grant is rejected (403).
+DAVE_TOK=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"dave-laptop","owner_email":"dave@example.com","allowed_grant_targets":{"emails":["erin@example.com"]}}' \
+  "http://127.0.0.1:$HUB1_PORT/api/tokens" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+curl -fsS -X POST -H "Authorization: Bearer $DAVE_TOK" -H "Content-Type: application/json" \
+  -d '{"id":"dave-canvas"}' "http://127.0.0.1:$HUB1_PORT/api/canvases" >/dev/null 2>&1 || true
+
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $DAVE_TOK" -H "Content-Type: application/json" \
+  -d '{"kind":"user","target":"erin@example.com"}' "http://127.0.0.1:$HUB1_PORT/api/canvases/dave-canvas/grants")
+if [ "$STATUS" = "201" ]; then
+  ok "grant scenario: an in-allowance share_canvas grant succeeds (201)"
+else
+  bad "grant scenario: in-allowance grant succeeds (got $STATUS)"
+fi
+
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $DAVE_TOK" -H "Content-Type: application/json" \
+  -d '{"kind":"user","target":"mallory@example.com"}' "http://127.0.0.1:$HUB1_PORT/api/canvases/dave-canvas/grants")
+if [ "$STATUS" = "403" ]; then
+  ok "grant scenario: an out-of-allowance grant is rejected (403)"
+else
+  bad "grant scenario: out-of-allowance grant rejected (got $STATUS)"
+fi
+
+# list_grants shows the granted target and never leaks a secret/hash.
+GRANTS=$(curl -fsS -H "Authorization: Bearer $HUB_PUSH_TOKEN" "http://127.0.0.1:$HUB1_PORT/api/canvases/dave-canvas/grants" || true)
+if echo "$GRANTS" | grep -q 'erin@example.com' && ! echo "$GRANTS" | grep -q 'link_secret'; then
+  ok "grant scenario: list_grants shows the grant and leaks no secret"
+else
+  bad "grant scenario: list_grants shows the grant, no secret (got: $GRANTS)"
+fi
+
+# --- Legacy migration + claim (#55) ---
+# A canvas created via the admin push token is admin-owned (the legacy/bootstrap
+# state the startup sweep guarantees). A logged-in principal (dave's token)
+# claims it and becomes the owner.
+curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"id":"legacy-canvas"}' "http://127.0.0.1:$HUB1_PORT/api/canvases" >/dev/null 2>&1 || true
+LEGACY_GRANTS=$(curl -fsS -H "Authorization: Bearer $HUB_PUSH_TOKEN" "http://127.0.0.1:$HUB1_PORT/api/canvases/legacy-canvas/grants" || true)
+if echo "$LEGACY_GRANTS" | grep -q '"owner":"admin"'; then
+  ok "claim scenario: an admin-pushed canvas is admin-owned (legacy state)"
+else
+  bad "claim scenario: admin-pushed canvas is admin-owned (got: $LEGACY_GRANTS)"
+fi
+
+CLAIM_RESP=$(curl -fsS -X POST -H "Authorization: Bearer $DAVE_TOK" "http://127.0.0.1:$HUB1_PORT/api/canvases/legacy-canvas/claim" || true)
+if echo "$CLAIM_RESP" | grep -q '"owner":"dave@example.com"'; then
+  ok "claim scenario: a logged-in principal claims an admin-owned canvas and becomes owner"
+else
+  bad "claim scenario: claim transfers ownership to the claimant (got: $CLAIM_RESP)"
+fi
+
+# Erin's token cannot claim a canvas dave now owns → 409.
+ERIN_TOK=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"erin-laptop","owner_email":"erin@example.com"}' \
+  "http://127.0.0.1:$HUB1_PORT/api/tokens" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $ERIN_TOK" \
+  "http://127.0.0.1:$HUB1_PORT/api/canvases/legacy-canvas/claim")
+if [ "$STATUS" = "409" ]; then
+  ok "claim scenario: claiming a canvas already owned by another principal is 409"
+else
+  bad "claim scenario: claiming an already-owned canvas is 409 (got $STATUS)"
+fi
+
+# NOTE: the OIDC-dependent read halves -- #49 private-by-default (unauth
+# API/SSE 401, browser 302 login), owner-only visibility, each share-grant
+# kind's VIEW enforcement (user/group/everyone/link via ?k=), the #50 "second
+# token can't SEE the first's canvas", and a #52 grant RECIPIENT actually
+# viewing the shared canvas -- all require a live OIDC IdP, which an
 # OIDC-configured hub fails closed without at startup. Standing up a real IdP
-# in shell is impractical, so those scenarios live as Go httptest+oidctest
-# integration tests in internal/server/hubgate_identity_test.go and
-# handlers_tokens_test.go instead (per the PR contract). healthz + the
-# token-as-owner writes above are the identity scenarios doable here (no OIDC).
+# in shell is impractical, so those live as Go httptest+oidctest integration
+# tests in internal/server/hubgate_identity_test.go, hubgate_cf_test.go, and
+# handlers_tokens_test.go instead (per the PR contract). Doable here without
+# OIDC and covered above: healthz, token-as-owner writes, CF-actor attribution
+# + spoof rejection (#51), grant allowance enforcement + list_grants (#52), and
+# legacy migration + claim ownership transfer (#55).
 
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely
