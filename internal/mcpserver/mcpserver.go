@@ -63,6 +63,11 @@ type server struct {
 	cfg     config.Config
 	ver     string
 	local   bool
+	// identitySecret is the shared HMAC secret verifying inbound
+	// X-Forwarded-User-* identity headers (env SCRIM_MCP_IDENTITY_HMAC_SECRET).
+	// Empty disables identity trust: every call is anonymous and the hub
+	// attributes it to the admin push token alone.
+	identitySecret string
 }
 
 // resolveDaemon returns an apiclient plus the daemon state for cfg. When
@@ -109,7 +114,7 @@ func NewServer(cfg config.Config, ver string, hub *HubTarget) *mcp.Server {
 // meaningless to a remote client, so the tool is simply absent and the surface
 // is self-describing.
 func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server {
-	s := &server{backend: b, cfg: cfg, ver: ver, local: local}
+	s := &server{backend: b, cfg: cfg, ver: ver, local: local, identitySecret: identitySecretFromEnv()}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "scrim", Version: ver}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -164,6 +169,14 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 		Name:        "edit_file",
 		Description: "Replace an exact string in one canvas file server-side — the token-efficient alternative to write_file for changing an existing file (tokens scale with the diff, not the file). old_string must occur exactly once unless replace_all is set. Pass an edits array to apply many replacements in one transactional call (all-or-nothing: any failing edit leaves the file untouched); edits is mutually exclusive with the single old_string/new_string fields.",
 	}, s.handleEditFile)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "share_canvas",
+		Description: "Share a canvas with another principal. target_kind is user (share to one email in target), group (share to a group name in target), everyone (any authenticated viewer), or link (mint an unguessable share URL — the secret is returned ONCE, append it as ?k=<secret>). Grants are view-only. In hub mode the hub enforces ownership and any allowance bound to the calling token; it surfaces an actionable rejection when a target is not permitted.",
+	}, s.handleShareCanvas)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_grants",
+		Description: "List a canvas's owner and current sharing grants (who it is shared with). Never returns share-link secrets or their hashes — only each grant's kind, target, and public link id.",
+	}, s.handleListGrants)
 
 	// push is local-only whole-canvas push to an external hub, reading the
 	// canvas straight off local disk — unchanged from single-mode. It stays
@@ -212,7 +225,8 @@ type addOutput struct {
 	URL string `json:"url"`
 }
 
-func (s *server) handleAdd(ctx context.Context, _ *mcp.CallToolRequest, in addInput) (*mcp.CallToolResult, addOutput, error) {
+func (s *server) handleAdd(ctx context.Context, req *mcp.CallToolRequest, in addInput) (*mcp.CallToolResult, addOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), addOutput{}, nil
 	}
@@ -243,7 +257,8 @@ type listOutput struct {
 	Canvases []canvasSummary `json:"canvases"`
 }
 
-func (s *server) handleList(ctx context.Context, _ *mcp.CallToolRequest, _ listInput) (*mcp.CallToolResult, listOutput, error) {
+func (s *server) handleList(ctx context.Context, req *mcp.CallToolRequest, _ listInput) (*mcp.CallToolResult, listOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	canvases, err := s.backend.List(ctx)
 	if err != nil {
 		return errorResult(err.Error()), listOutput{}, nil
@@ -267,7 +282,8 @@ type linkOutput struct {
 	URLs []string `json:"urls"`
 }
 
-func (s *server) handleLink(ctx context.Context, _ *mcp.CallToolRequest, in linkInput) (*mcp.CallToolResult, linkOutput, error) {
+func (s *server) handleLink(ctx context.Context, req *mcp.CallToolRequest, in linkInput) (*mcp.CallToolResult, linkOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	// Validate before anything else so a bad id never reaches the backend.
 	if in.ID != "" {
 		if err := canvas.ValidateID(in.ID); err != nil {
@@ -325,7 +341,8 @@ type rmOutput struct {
 	Removed string `json:"removed"`
 }
 
-func (s *server) handleRm(ctx context.Context, _ *mcp.CallToolRequest, in rmInput) (*mcp.CallToolResult, rmOutput, error) {
+func (s *server) handleRm(ctx context.Context, req *mcp.CallToolRequest, in rmInput) (*mcp.CallToolResult, rmOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), rmOutput{}, nil
 	}
@@ -347,7 +364,8 @@ type snapOutput struct {
 	Dir  string `json:"dir"`
 }
 
-func (s *server) handleSnap(ctx context.Context, _ *mcp.CallToolRequest, in snapInput) (*mcp.CallToolResult, snapOutput, error) {
+func (s *server) handleSnap(ctx context.Context, req *mcp.CallToolRequest, in snapInput) (*mcp.CallToolResult, snapOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), snapOutput{}, nil
 	}
@@ -375,7 +393,8 @@ type snapsOutput struct {
 	Snapshots []snapshotSummary `json:"snapshots"`
 }
 
-func (s *server) handleSnaps(ctx context.Context, _ *mcp.CallToolRequest, in snapsInput) (*mcp.CallToolResult, snapsOutput, error) {
+func (s *server) handleSnaps(ctx context.Context, req *mcp.CallToolRequest, in snapsInput) (*mcp.CallToolResult, snapsOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), snapsOutput{}, nil
 	}
@@ -402,7 +421,8 @@ type revertOutput struct {
 	Snapshot string `json:"snapshot"`
 }
 
-func (s *server) handleRevert(ctx context.Context, _ *mcp.CallToolRequest, in revertInput) (*mcp.CallToolResult, revertOutput, error) {
+func (s *server) handleRevert(ctx context.Context, req *mcp.CallToolRequest, in revertInput) (*mcp.CallToolResult, revertOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), revertOutput{}, nil
 	}
@@ -428,7 +448,8 @@ type copyCanvasOutput struct {
 	URL  string `json:"url,omitempty"`
 }
 
-func (s *server) handleCopyCanvas(ctx context.Context, _ *mcp.CallToolRequest, in copyCanvasInput) (*mcp.CallToolResult, copyCanvasOutput, error) {
+func (s *server) handleCopyCanvas(ctx context.Context, req *mcp.CallToolRequest, in copyCanvasInput) (*mcp.CallToolResult, copyCanvasOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.From); err != nil {
 		return errorResult(err.Error()), copyCanvasOutput{}, nil
 	}
@@ -462,7 +483,8 @@ type statusOutput struct {
 	IdleTimeoutSeconds float64 `json:"idle_timeout_seconds,omitempty"`
 }
 
-func (s *server) handleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ statusInput) (*mcp.CallToolResult, statusOutput, error) {
+func (s *server) handleStatus(ctx context.Context, req *mcp.CallToolRequest, _ statusInput) (*mcp.CallToolResult, statusOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	info, err := s.backend.Status(ctx)
 	if err != nil {
 		return errorResult(err.Error()), statusOutput{}, nil
@@ -495,7 +517,8 @@ type listFilesOutput struct {
 	Files []FileEntry `json:"files"`
 }
 
-func (s *server) handleListFiles(ctx context.Context, _ *mcp.CallToolRequest, in listFilesInput) (*mcp.CallToolResult, listFilesOutput, error) {
+func (s *server) handleListFiles(ctx context.Context, req *mcp.CallToolRequest, in listFilesInput) (*mcp.CallToolResult, listFilesOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), listFilesOutput{}, nil
 	}
@@ -526,7 +549,8 @@ type readFileOutput struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
-func (s *server) handleReadFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, readFileOutput, error) {
+func (s *server) handleReadFile(ctx context.Context, req *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, readFileOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), readFileOutput{}, nil
 	}
@@ -615,7 +639,8 @@ type writeFileOutput struct {
 	BytesWritten int    `json:"bytes_written"`
 }
 
-func (s *server) handleWriteFile(ctx context.Context, _ *mcp.CallToolRequest, in writeFileInput) (*mcp.CallToolResult, writeFileOutput, error) {
+func (s *server) handleWriteFile(ctx context.Context, req *mcp.CallToolRequest, in writeFileInput) (*mcp.CallToolResult, writeFileOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), writeFileOutput{}, nil
 	}
@@ -663,7 +688,8 @@ type editFileOutput struct {
 	Replacements int    `json:"replacements"`
 }
 
-func (s *server) handleEditFile(ctx context.Context, _ *mcp.CallToolRequest, in editFileInput) (*mcp.CallToolResult, editFileOutput, error) {
+func (s *server) handleEditFile(ctx context.Context, req *mcp.CallToolRequest, in editFileInput) (*mcp.CallToolResult, editFileOutput, error) {
+	ctx = s.actorContext(ctx, req)
 	if err := canvas.ValidateID(in.ID); err != nil {
 		return errorResult(err.Error()), editFileOutput{}, nil
 	}
@@ -714,6 +740,90 @@ func (s *server) handleEditFile(ctx context.Context, _ *mcp.CallToolRequest, in 
 	// added -- so a direct conversion is exact.
 	return textResult(fmt.Sprintf("made %d replacement(s) in %s/%s", info.Replacements, in.ID, info.Path)),
 		editFileOutput(info), nil
+}
+
+// ── tool: share_canvas ──────────────────────────────────────────────────────
+
+type shareCanvasInput struct {
+	ID         string `json:"id" jsonschema:"canvas id to share (required)"`
+	TargetKind string `json:"target_kind" jsonschema:"who to share with: user, group, everyone, or link (required)"`
+	Target     string `json:"target,omitempty" jsonschema:"the target email (user kind) or group name (group kind); omit for everyone/link"`
+}
+
+type shareCanvasOutput struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Target string `json:"target,omitempty"`
+	LinkID string `json:"link_id,omitempty"`
+	// LinkSecret is the raw share-link secret, returned ONCE for a link grant
+	// (append it to the canvas URL as ?k=<secret>). Empty for every other kind.
+	LinkSecret string `json:"link_secret,omitempty"`
+}
+
+func (s *server) handleShareCanvas(ctx context.Context, req *mcp.CallToolRequest, in shareCanvasInput) (*mcp.CallToolResult, shareCanvasOutput, error) {
+	ctx = s.actorContext(ctx, req)
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), shareCanvasOutput{}, nil
+	}
+	switch in.TargetKind {
+	case canvas.GrantUser, canvas.GrantGroup:
+		if in.Target == "" {
+			return errorResult(fmt.Sprintf("target is required for a %q grant", in.TargetKind)), shareCanvasOutput{}, nil
+		}
+	case canvas.GrantEveryone, canvas.GrantLink:
+		// No target: everyone and link carry none.
+	default:
+		return errorResult(fmt.Sprintf("invalid target_kind %q (want user, group, everyone, or link)", in.TargetKind)), shareCanvasOutput{}, nil
+	}
+	grant, err := s.backend.ShareCanvas(ctx, in.ID, in.TargetKind, in.Target)
+	if err != nil {
+		return errorResult(err.Error()), shareCanvasOutput{}, nil
+	}
+	out := shareCanvasOutput{ID: in.ID, Kind: grant.Kind, Target: grant.Target, LinkID: grant.LinkID, LinkSecret: grant.LinkSecret}
+	summary := fmt.Sprintf("shared %s with %s", in.ID, grant.Kind)
+	if grant.Target != "" {
+		summary += " " + grant.Target
+	}
+	if grant.LinkSecret != "" {
+		summary += " (share-link secret returned once; append as ?k=<secret>)"
+	}
+	return textResult(summary), out, nil
+}
+
+// ── tool: list_grants ───────────────────────────────────────────────────────
+
+type listGrantsInput struct {
+	ID string `json:"id" jsonschema:"canvas id whose grants to list (required)"`
+}
+
+type grantSummary struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target,omitempty"`
+	LinkID string `json:"link_id,omitempty"`
+}
+
+type listGrantsOutput struct {
+	ID     string         `json:"id"`
+	Owner  string         `json:"owner,omitempty"`
+	Grants []grantSummary `json:"grants"`
+}
+
+func (s *server) handleListGrants(ctx context.Context, req *mcp.CallToolRequest, in listGrantsInput) (*mcp.CallToolResult, listGrantsOutput, error) {
+	ctx = s.actorContext(ctx, req)
+	if err := canvas.ValidateID(in.ID); err != nil {
+		return errorResult(err.Error()), listGrantsOutput{}, nil
+	}
+	res, err := s.backend.ListGrants(ctx, in.ID)
+	if err != nil {
+		return errorResult(err.Error()), listGrantsOutput{}, nil
+	}
+	out := listGrantsOutput{ID: in.ID, Owner: res.Owner, Grants: make([]grantSummary, 0, len(res.Grants))}
+	for _, g := range res.Grants {
+		// grantSummary is GrantEntry's wire shape -- identical fields, JSON tags
+		// added -- so a direct conversion is exact.
+		out.Grants = append(out.Grants, grantSummary(g))
+	}
+	return textResult(fmt.Sprintf("%d grant(s) on %s (owner %s)", len(out.Grants), in.ID, res.Owner)), out, nil
 }
 
 // ── tool: push (local disk → external hub, both modes) ───────────────────────

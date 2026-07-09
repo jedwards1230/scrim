@@ -248,6 +248,43 @@ func (b *hubBackend) CopyCanvas(ctx context.Context, from, to string, overwrite 
 	return CopyInfo{From: resp.From, To: resp.To, URL: linkURL(b.baseURL, resp.To)}, nil
 }
 
+func (b *hubBackend) ShareCanvas(ctx context.Context, id, kind, target string) (GrantResult, error) {
+	// The hub is the enforcement point: it checks the caller owns the canvas and
+	// (for a user token) that the target is within the token's allowance, minting
+	// a link secret server-side for a link grant. A rejection (403/404/409)
+	// surfaces via doJSON's hubStatusError with the hub's actionable message.
+	body := map[string]string{"kind": kind, "target": target}
+	var resp struct {
+		Kind       string `json:"kind"`
+		Target     string `json:"target"`
+		LinkID     string `json:"link_id"`
+		LinkSecret string `json:"link_secret"`
+	}
+	if err := b.doJSON(ctx, http.MethodPost, "/api/canvases/"+url.PathEscape(id)+"/grants", body, &resp); err != nil {
+		return GrantResult{}, err
+	}
+	return GrantResult{Kind: resp.Kind, Target: resp.Target, LinkID: resp.LinkID, LinkSecret: resp.LinkSecret}, nil
+}
+
+func (b *hubBackend) ListGrants(ctx context.Context, id string) (GrantsResult, error) {
+	var resp struct {
+		Owner  string `json:"owner"`
+		Grants []struct {
+			Kind   string `json:"kind"`
+			Target string `json:"target"`
+			LinkID string `json:"link_id"`
+		} `json:"grants"`
+	}
+	if err := b.doJSON(ctx, http.MethodGet, "/api/canvases/"+url.PathEscape(id)+"/grants", nil, &resp); err != nil {
+		return GrantsResult{}, err
+	}
+	out := GrantsResult{Owner: resp.Owner, Grants: make([]GrantEntry, 0, len(resp.Grants))}
+	for _, g := range resp.Grants {
+		out.Grants = append(out.Grants, GrantEntry{Kind: g.Kind, Target: g.Target, LinkID: g.LinkID})
+	}
+	return out, nil
+}
+
 func (b *hubBackend) ReadFile(ctx context.Context, id, path string) ([]byte, error) {
 	rel, err := cleanRelPath(path)
 	if err != nil {
@@ -407,6 +444,16 @@ func (b *hubBackend) newRequest(ctx context.Context, method, rawURL string, body
 		return nil, fmt.Errorf("building hub request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+b.token)
+	// When the call carries a verified CF-forwarded actor, attribute it to the
+	// hub via X-Scrim-Actor-* on top of the admin bearer (#51). The hub trusts
+	// these headers ONLY because they ride the valid admin push token above; a
+	// call with no verified actor sends the admin bearer alone and is attributed
+	// to admin. localBackend, having no remote hub, ignores the actor entirely.
+	if a, ok := actorFromContext(ctx); ok {
+		req.Header.Set(hdrActorID, a.ID)
+		req.Header.Set(hdrActorEmail, a.Email)
+		req.Header.Set(hdrActorGroups, strings.Join(a.Groups, ","))
+	}
 	return req, nil
 }
 

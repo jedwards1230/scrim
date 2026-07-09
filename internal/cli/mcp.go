@@ -64,6 +64,14 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 	if hub != nil && hubBearerInsecure(hub.BaseURL) {
 		outf(stderr, "scrim mcp: warning: --hub uses plain http to a non-loopback host — the push token is sent unencrypted; prefer https\n")
 	}
+	// The CF identity plane only reaches this server over the streamable-HTTP
+	// transport (stdio carries no inbound headers). When that transport is used
+	// in hub mode WITHOUT the shared HMAC secret set, X-Forwarded-User-* identity
+	// is not verified and every call is attributed to the hub's admin push token
+	// alone -- a deliberately fail-closed default worth a one-line diagnostic.
+	if plan.http && hub != nil && os.Getenv(mcpserver.IdentitySecretEnv) == "" {
+		outf(stderr, "scrim mcp: note: %s is unset — forwarded-user identity is not verified; all calls are attributed to the hub admin token\n", mcpserver.IdentitySecretEnv)
+	}
 
 	cfg := cf.toConfig()
 

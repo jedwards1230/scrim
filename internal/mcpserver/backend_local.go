@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
@@ -277,6 +278,46 @@ func (b *localBackend) editFile(id, path string, apply func([]byte) ([]byte, int
 		return EditInfo{}, err
 	}
 	return EditInfo{Path: path, Replacements: replacements}, nil
+}
+
+func (b *localBackend) ShareCanvas(_ context.Context, id, kind, target string) (GrantResult, error) {
+	// Local mode is single-user: there is no owner enforcement and no token
+	// allowance to bound sharing, so a grant is applied directly. A link grant
+	// mints its secret here (only the hash is stored) and returns it once.
+	if err := canvas.ValidateID(id); err != nil {
+		return GrantResult{}, err
+	}
+	if fi, err := os.Stat(canvas.Dir(b.cfg.CanvasesDir(), id)); err != nil || !fi.IsDir() {
+		return GrantResult{}, fmt.Errorf("canvas %q not found", id)
+	}
+	g := canvas.Grant{Kind: kind, Target: target, CreatedAt: time.Now()}
+	res := GrantResult{Kind: kind, Target: target}
+	if kind == canvas.GrantLink {
+		linkID, secret, err := canvas.NewLink()
+		if err != nil {
+			return GrantResult{}, err
+		}
+		g.LinkID = linkID
+		g.LinkSecretHash = canvas.HashLinkSecret(secret)
+		res.LinkID = linkID
+		res.LinkSecret = secret
+	}
+	if err := canvas.AddGrant(b.cfg.MetaDir(), id, g); err != nil {
+		return GrantResult{}, err
+	}
+	return res, nil
+}
+
+func (b *localBackend) ListGrants(_ context.Context, id string) (GrantsResult, error) {
+	owner, grants, err := canvas.GetOwnerGrants(b.cfg.MetaDir(), id)
+	if err != nil {
+		return GrantsResult{}, err
+	}
+	out := GrantsResult{Owner: owner, Grants: make([]GrantEntry, 0, len(grants))}
+	for _, g := range grants {
+		out.Grants = append(out.Grants, GrantEntry{Kind: g.Kind, Target: g.Target, LinkID: g.LinkID})
+	}
+	return out, nil
 }
 
 func (b *localBackend) CopyCanvas(_ context.Context, from, to string, overwrite bool) (CopyInfo, error) {
