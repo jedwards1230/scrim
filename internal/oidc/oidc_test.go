@@ -149,15 +149,86 @@ func TestHappyPathLoginAuthenticatesSession(t *testing.T) {
 	// The minted session cookie authenticates a subsequent request.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(session)
-	subject, ok := auth.SessionFromRequest(req)
+	sess, ok := auth.SessionFromRequest(req)
 	if !ok {
 		t.Fatal("SessionFromRequest with the minted cookie = not ok, want ok")
 	}
-	if subject != "user-happy-path" {
-		t.Errorf("subject = %q, want %q", subject, "user-happy-path")
+	if sess.Subject != "user-happy-path" {
+		t.Errorf("subject = %q, want %q", sess.Subject, "user-happy-path")
 	}
 	if !session.HttpOnly {
 		t.Error("session cookie is not HttpOnly")
+	}
+}
+
+// TestCallbackCapturesClaimsAndFeedsRegistry proves HandleCallback captures the
+// email/name/groups claims into the session and fires the OnLogin hook with
+// them -- the #49 identity-capture requirement.
+func TestCallbackCapturesClaimsAndFeedsRegistry(t *testing.T) {
+	idp := oidctest.New(t)
+	idp.Subject = "sub-1"
+	idp.Email = "alice@example.com"
+	idp.Name = "Alice"
+	idp.Groups = []string{"eng", "ops"}
+
+	var gotEmail, gotName string
+	var gotGroups []string
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		OnLogin: func(email, name string, groups []string) {
+			gotEmail, gotName, gotGroups = email, name, groups
+		},
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	session := idp.Login(t, auth, "/")
+
+	if gotEmail != "alice@example.com" || gotName != "Alice" {
+		t.Errorf("OnLogin got email/name = %q/%q, want alice@example.com/Alice", gotEmail, gotName)
+	}
+	if len(gotGroups) != 2 || gotGroups[0] != "eng" || gotGroups[1] != "ops" {
+		t.Errorf("OnLogin got groups = %v, want [eng ops]", gotGroups)
+	}
+
+	// The minted session cookie carries the same claims back.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(session)
+	sess, ok := auth.SessionFromRequest(req)
+	if !ok {
+		t.Fatal("SessionFromRequest = not ok, want ok")
+	}
+	if sess.Email != "alice@example.com" || sess.Name != "Alice" {
+		t.Errorf("session claims = %+v, want alice@example.com/Alice", sess)
+	}
+	if len(sess.Groups) != 2 {
+		t.Errorf("session groups = %v, want [eng ops]", sess.Groups)
+	}
+}
+
+// TestCallbackWithoutGroupsStillLogsIn proves an IdP that omits name/groups (a
+// bare openid+email token) yields empty profile fields, not a failed login.
+func TestCallbackWithoutGroupsStillLogsIn(t *testing.T) {
+	auth, idp := newAuth(t) // idp.Name/Groups unset -> omitted from the token
+	session := idp.Login(t, auth, "/")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(session)
+	sess, ok := auth.SessionFromRequest(req)
+	if !ok {
+		t.Fatal("SessionFromRequest = not ok, want ok")
+	}
+	if len(sess.Groups) != 0 || sess.Name != "" {
+		t.Errorf("session = %+v, want empty name/groups (IdP omitted them)", sess)
+	}
+	// email defaults in the fake IdP, so it is present; the point is the login
+	// succeeded with no groups claim.
+	if sess.Subject == "" {
+		t.Error("session has no subject, want the login to have succeeded")
 	}
 }
 

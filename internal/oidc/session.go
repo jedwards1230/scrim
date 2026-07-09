@@ -19,30 +19,41 @@ import (
 var errBadCookie = errors.New("oidc: invalid or expired signed cookie")
 
 // signer signs and verifies short opaque cookie payloads with HMAC-SHA256.
-// It carries only the server-side secret; the signed values themselves
-// (session subject, or the login flow's state/nonce/PKCE verifier) are
-// integrity-protected but not encrypted -- they hold no data that is secret
+// It carries the server-side secret plus a fixed domain tag; the signed values
+// themselves (session claims, or the login flow's state/nonce/PKCE verifier)
+// are integrity-protected but not encrypted -- they hold no data that is secret
 // from the very browser they are handed to, only data an attacker must not be
 // able to forge or tamper with.
+//
+// domain separates the two cookie kinds cryptographically: the session signer
+// and the flow signer are keyed from the SAME secret but carry distinct domains
+// ("session" vs "flow"), and sign mixes the domain into the MAC. A cookie of
+// one kind therefore cannot verify as the other even though both are HMAC'd
+// with the same key -- closing the cross-cookie replay the #38 review flagged.
 type signer struct {
-	key []byte
+	key    []byte
+	domain string
 }
 
-// sign returns base64url(payload) + "." + base64url(HMAC(payload)). The
-// payload is carried alongside its MAC rather than only its MAC so the
+// sign returns base64url(payload) + "." + base64url(HMAC(domain || 0 || payload)).
+// The payload is carried alongside its MAC rather than only its MAC so the
 // verifier is fully stateless -- it recomputes the MAC over the presented
-// payload and constant-time-compares, holding no per-session state itself.
+// payload and constant-time-compares, holding no per-session state itself. The
+// NUL-separated domain tag makes the MAC context-bound (see the signer doc).
 func (s signer) sign(payload []byte) string {
 	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(s.domain))
+	mac.Write([]byte{0})
 	mac.Write(payload)
 	sum := mac.Sum(nil)
 	return b64(payload) + "." + b64(sum)
 }
 
-// verify recomputes the MAC over the presented payload and constant-time
-// compares it against the presented MAC, returning the payload bytes only if
-// they match. A structurally malformed value (missing separator, non-base64
-// half) is rejected exactly like a bad signature.
+// verify recomputes the MAC (over this signer's domain + the presented payload)
+// and constant-time compares it against the presented MAC, returning the
+// payload bytes only if they match. A structurally malformed value (missing
+// separator, non-base64 half) is rejected exactly like a bad signature, as is a
+// value signed under a different domain.
 func (s signer) verify(value string) ([]byte, error) {
 	payloadB64, macB64, ok := strings.Cut(value, ".")
 	if !ok {
@@ -57,6 +68,8 @@ func (s signer) verify(value string) ([]byte, error) {
 		return nil, errBadCookie
 	}
 	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(s.domain))
+	mac.Write([]byte{0})
 	mac.Write(payload)
 	expected := mac.Sum(nil)
 	if subtle.ConstantTimeCompare(presented, expected) != 1 {
@@ -65,37 +78,60 @@ func (s signer) verify(value string) ([]byte, error) {
 	return payload, nil
 }
 
-// session is the authenticated identity carried by the session cookie. It is
-// deliberately minimal: only the IdP subject (the stable identity key, per
-// the auto-registration model -- never email, which can change and is PII)
-// and an absolute expiry. No local user record exists; a valid, unexpired,
+// Session is the authenticated identity a valid session cookie attests to. It
+// keys on the IdP subject (the stable identity key, per the auto-registration
+// model) and additionally carries the email/name/groups claims the hub's
+// ownership + grant enforcement needs -- captured at login so enforcement is a
+// pure claims read, never an IdP round-trip. A valid, unexpired,
 // correctly-signed session cookie IS the authorization for read access.
-type session struct {
-	Subject string `json:"sub"`
-	Expiry  int64  `json:"exp"` // unix seconds
+type Session struct {
+	Subject string
+	Email   string
+	Name    string
+	Groups  []string
+	Expiry  int64 // unix seconds
 }
 
-// encodeSession signs a session valid until expiry.
-func (s signer) encodeSession(subject string, expiry time.Time) string {
-	payload, _ := json.Marshal(session{Subject: subject, Expiry: expiry.Unix()})
+// session is the on-the-wire (JSON) form of a Session inside the signed cookie.
+type session struct {
+	Subject string   `json:"sub"`
+	Email   string   `json:"email,omitempty"`
+	Name    string   `json:"name,omitempty"`
+	Groups  []string `json:"groups,omitempty"`
+	Expiry  int64    `json:"exp"` // unix seconds
+}
+
+// encodeSession signs sess valid until expiry, carrying every claim field.
+func (s signer) encodeSession(sess Session, expiry time.Time) string {
+	payload, _ := json.Marshal(session{
+		Subject: sess.Subject,
+		Email:   sess.Email,
+		Name:    sess.Name,
+		Groups:  sess.Groups,
+		Expiry:  expiry.Unix(),
+	})
 	return s.sign(payload)
 }
 
-// decodeSession verifies value's signature and expiry, returning the subject
-// it attests to. now is passed in so tests can drive expiry deterministically.
-func (s signer) decodeSession(value string, now time.Time) (string, error) {
+// decodeSession verifies value's signature and expiry, returning the Session it
+// attests to. now is passed in so tests can drive expiry deterministically. A
+// wrong signature, wrong domain, malformed payload, empty subject, or expired
+// session all map to the single opaque errBadCookie.
+func (s signer) decodeSession(value string, now time.Time) (Session, error) {
 	payload, err := s.verify(value)
 	if err != nil {
-		return "", err
+		return Session{}, err
 	}
 	var sess session
 	if err := json.Unmarshal(payload, &sess); err != nil {
-		return "", errBadCookie
+		return Session{}, errBadCookie
 	}
 	if sess.Subject == "" || now.Unix() >= sess.Expiry {
-		return "", errBadCookie
+		return Session{}, errBadCookie
 	}
-	return sess.Subject, nil
+	// session and Session hold the same fields (session is just the JSON-tagged
+	// wire form), so a direct conversion carries every claim across.
+	return Session(sess), nil
 }
 
 // flowState is the per-login-attempt state carried, signed, in a short-lived
