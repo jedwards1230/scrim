@@ -205,6 +205,14 @@ func (o *oauthValidator) metadataURL(r *http.Request) string {
 // mapped to a required scope (requiredScope) -- per-tool granularity, enforced
 // at the transport edge. Non-tools/call methods (initialize, tools/list, ping)
 // require only a valid token so a read-only client can still handshake.
+//
+// The body may be a SINGLE JSON-RPC message OR a batch array (the go-sdk accepts
+// batches whenever the negotiated protocol version predates 2025-06-18, which is
+// the default when the client sends no MCP-Protocol-Version header). A batch is
+// gated by the most-privileged scope any of its tools/call elements requires --
+// so a scrim:read token cannot smuggle a write tool inside a one-element array.
+// A present-but-unparseable body fails CLOSED (requires scopeWrite) rather than
+// slipping through the gate; see requiredScopeForBody.
 func (o *oauthValidator) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metaURL := o.metadataURL(r)
@@ -216,7 +224,8 @@ func (o *oauthValidator) middleware(next http.Handler) http.Handler {
 			o.challenge(w, http.StatusUnauthorized, metaURL, "", "", "missing bearer token")
 			return
 		}
-		if _, err := o.verifier.Verify(r.Context(), token); err != nil {
+		idt, err := o.verifier.Verify(r.Context(), token)
+		if err != nil {
 			// Signature/issuer/audience/expiry all funnel here as an invalid token.
 			// The error is deliberately not surfaced to the client or logged --
 			// it can echo token contents.
@@ -224,19 +233,18 @@ func (o *oauthValidator) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Re-derive scopes from the (already-verified) token for the scope gate.
-		scopes := tokenScopes(r.Context(), token, o.verifier)
-		tool, isCall, tooLarge := peekToolCall(r)
+		// Scope gate: derive the single scope this request requires -- the
+		// most-privileged across every tools/call in the (possibly batched)
+		// JSON-RPC body -- and check the already-verified token holds it.
+		// requiredScopeForBody restores the body so the SDK reads it intact.
+		need, tooLarge := requiredScopeForBody(r)
 		if tooLarge {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		if isCall {
-			need := requiredScope(tool)
-			if !satisfiesScope(scopes, need) {
-				o.challenge(w, http.StatusForbidden, metaURL, "insufficient_scope", need, "insufficient scope")
-				return
-			}
+		if need != "" && !satisfiesScope(tokenScopeClaim(idt), need) {
+			o.challenge(w, http.StatusForbidden, metaURL, "insufficient_scope", need, "insufficient scope")
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -270,16 +278,10 @@ func bearerToken(r *http.Request) (string, bool) {
 	return fields[1], true
 }
 
-// tokenScopes verifies token again (cheap -- the RemoteKeySet is cached) purely
-// to read its `scope` claim as a space-delimited list (RFC 8693 / OAuth). A
-// verify error here is treated as no scopes; the caller only reaches this after
-// a successful verify, so that path is defensive. strings.Fields drops empty
-// entries and any whitespace run.
-func tokenScopes(ctx context.Context, token string, verifier *coreoidc.IDTokenVerifier) []string {
-	idt, err := verifier.Verify(ctx, token)
-	if err != nil {
-		return nil
-	}
+// tokenScopeClaim reads a verified token's `scope` claim as a space-delimited
+// list (RFC 8693 / OAuth). strings.Fields drops empty entries and any whitespace
+// run. A claims-decode error yields no scopes (deny by default).
+func tokenScopeClaim(idt *coreoidc.IDToken) []string {
 	var c struct {
 		Scope string `json:"scope"`
 	}
@@ -339,37 +341,88 @@ func satisfiesScope(scopes []string, need string) bool {
 	return false
 }
 
-// peekToolCall reads the JSON-RPC method and, for a tools/call, its tool name
-// from a POST /mcp body WITHOUT consuming it: the body is buffered (bounded by
-// maxRPCPeekBytes) and restored so the downstream MCP handler reads it intact.
-// It returns tooLarge=true for a body over the cap (refused 413 by the caller,
-// never a valid call). A non-POST, bodyless, or unparseable request returns
-// isCall=false -- authentication already passed and the MCP handler rejects a
-// malformed body, so scope enforcement simply doesn't apply.
-func peekToolCall(r *http.Request) (tool string, isCall, tooLarge bool) {
+// requiredScopeForBody determines the scope a POST /mcp body requires WITHOUT
+// consuming it: the body is buffered (bounded by maxRPCPeekBytes) and restored
+// so the downstream MCP handler reads it intact. The return is "" when the body
+// carries no tools/call (initialize/tools-list/ping, or a bodyless/non-POST
+// request), scopeRead or scopeWrite for a single call, or the most-privileged
+// scope across a JSON-RPC BATCH (array body). It returns tooLarge=true for a
+// body over the cap (refused 413 by the caller -- never a valid call).
+//
+// Fail-closed rules: a present-but-unparseable body -- one that is neither a
+// JSON object nor a JSON array, or an array/object that fails to unmarshal --
+// requires scopeWrite, so garbage can never slip past the gate as "no scope
+// needed". An empty (or whitespace-only) body needs no scope; the SDK rejects it.
+func requiredScopeForBody(r *http.Request) (need string, tooLarge bool) {
 	if r.Method != http.MethodPost || r.Body == nil {
-		return "", false, false
+		return "", false
 	}
 	buf, err := io.ReadAll(io.LimitReader(r.Body, maxRPCPeekBytes+1))
 	if err != nil {
 		// A read error: restore whatever was read and let the MCP handler surface
 		// the failure; don't gate scope on an unreadable body.
 		r.Body = io.NopCloser(bytes.NewReader(buf))
-		return "", false, false
+		return "", false
 	}
 	if len(buf) > maxRPCPeekBytes {
-		return "", false, true
+		return "", true
 	}
 	r.Body = io.NopCloser(bytes.NewReader(buf))
 
+	trimmed := bytes.TrimSpace(buf)
+	if len(trimmed) == 0 {
+		return "", false
+	}
+	switch trimmed[0] {
+	case '[':
+		// JSON-RPC batch: gate by the most-privileged scope any element requires.
+		var msgs []json.RawMessage
+		if json.Unmarshal(trimmed, &msgs) != nil {
+			return scopeWrite, false // unparseable array -> fail closed
+		}
+		need = ""
+		for _, m := range msgs {
+			need = maxScope(need, scopeForMessage(m))
+		}
+		return need, false
+	case '{':
+		return scopeForMessage(trimmed), false
+	default:
+		// Present but neither object nor array (a bare string/number/garbage):
+		// fail closed.
+		return scopeWrite, false
+	}
+}
+
+// scopeForMessage returns the scope a single JSON-RPC message requires: "" when
+// it is not a tools/call, else the mapped scope for the named tool. A message
+// that fails to unmarshal fails CLOSED (scopeWrite) -- a malformed element must
+// never lower the batch's requirement.
+func scopeForMessage(raw []byte) string {
 	var msg struct {
 		Method string `json:"method"`
 		Params struct {
 			Name string `json:"name"`
 		} `json:"params"`
 	}
-	if json.Unmarshal(buf, &msg) != nil || msg.Method != "tools/call" {
-		return "", false, false
+	if json.Unmarshal(raw, &msg) != nil {
+		return scopeWrite
 	}
-	return msg.Params.Name, true, false
+	if msg.Method != "tools/call" {
+		return ""
+	}
+	return requiredScope(msg.Params.Name)
+}
+
+// maxScope returns the more-privileged of two required scopes, ordered
+// scopeWrite > scopeRead > "" (no requirement). It folds a batch's per-element
+// requirements into the single scope the whole request must satisfy.
+func maxScope(a, b string) string {
+	if a == scopeWrite || b == scopeWrite {
+		return scopeWrite
+	}
+	if a == scopeRead || b == scopeRead {
+		return scopeRead
+	}
+	return ""
 }

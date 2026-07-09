@@ -329,6 +329,47 @@ func TestOAuthMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("batch-wrapped write tool with a read token is 403 (no fail-open)", func(t *testing.T) {
+		// A one-element JSON-RPC array wrapping a write tool must NOT bypass the
+		// scope gate: the batch requires scrim:write.
+		body := `[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{}}}]`
+		rec, reached := callMCP(t, v, valid(scopeRead), body)
+		if reached {
+			t.Fatal("array-wrapped write tool must not reach the handler without scrim:write")
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("code = %d, want 403", rec.Code)
+		}
+		assertChallenge(t, rec, "insufficient_scope", scopeWrite, wantMeta)
+	})
+
+	t.Run("batch of two reads with a read token is allowed", func(t *testing.T) {
+		body := `[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list"}},` +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file"}}]`
+		rec, reached := callMCP(t, v, valid(scopeRead), body)
+		if !reached || rec.Code != http.StatusOK {
+			t.Fatalf("code = %d reached = %v, want 200 + reached", rec.Code, reached)
+		}
+	})
+
+	t.Run("batch mixing a read and a write with a read token is 403", func(t *testing.T) {
+		body := `[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list"}},` +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"share_canvas"}}]`
+		rec, reached := callMCP(t, v, valid(scopeRead), body)
+		if reached || rec.Code != http.StatusForbidden {
+			t.Fatalf("code = %d reached = %v, want 403", rec.Code, reached)
+		}
+		assertChallenge(t, rec, "insufficient_scope", scopeWrite, wantMeta)
+	})
+
+	t.Run("garbage body that is neither object nor array fails closed (403)", func(t *testing.T) {
+		rec, reached := callMCP(t, v, valid(scopeRead), `not json at all`)
+		if reached || rec.Code != http.StatusForbidden {
+			t.Fatalf("code = %d reached = %v, want 403 (fail closed)", rec.Code, reached)
+		}
+		assertChallenge(t, rec, "insufficient_scope", scopeWrite, wantMeta)
+	})
+
 	t.Run("oversized body is 413", func(t *testing.T) {
 		big := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{"content":"` +
 			strings.Repeat("A", maxRPCPeekBytes+1) + `"}}}`
