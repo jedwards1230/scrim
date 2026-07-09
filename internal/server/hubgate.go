@@ -287,6 +287,41 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 
+	// Grant mutation by a browser session. The session-cookie plane is otherwise
+	// read-only (writes need a machine credential), but adding/removing a
+	// canvas's OWN sharing grants is a legitimate owner action the share dialog
+	// must perform natively in the browser -- so a session that OWNS the target
+	// canvas may POST/DELETE its grants. This is CSRF-safe for exactly the reason
+	// POST /api/tokens already is (PR1): the session cookie is HttpOnly +
+	// SameSite=Lax, so a cross-site POST/DELETE can never carry it -- only a
+	// same-site request the owner actually initiated reaches here. Grants were
+	// simply an inconsistent omission in PR1's session-writable surface.
+	//
+	// Ownership is the whole gate: the handler bodies additionally bound a USER
+	// TOKEN's allowance, but a session owner is unrestricted over its own canvas,
+	// which is correct. The admin (served earlier), user-token, and CF-actor
+	// grant paths are handled above and stay unchanged.
+	if isGrantMutationPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
+		id, ok := writeTargetCanvasID(r.URL.Path)
+		if !ok {
+			http.Error(w, "bad request: invalid canvas id", http.StatusBadRequest)
+			return
+		}
+		owner, _, err := canvas.GetOwnerGrants(s.metaDir, id)
+		if err != nil {
+			http.Error(w, "forbidden: cannot determine canvas ownership", http.StatusForbidden)
+			return
+		}
+		if !identity.CanWrite(ownerOrAdmin(owner), c) {
+			// 403, not 404: the caller is a logged-in principal that named the id,
+			// so "not yours" leaks nothing it doesn't already know.
+			http.Error(w, "forbidden: you do not own this canvas", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+		return
+	}
+
 	// Every other write is a machine-API mutation: it needs the admin push token
 	// (served earlier) or a user bearer token. A session/anonymous write is
 	// unauthorized -- the browser plane is read-only.
@@ -348,6 +383,35 @@ func isTokenPath(path string) bool {
 func isClaimPath(path string) bool {
 	rest, ok := strings.CutPrefix(path, "/api/canvases/")
 	return ok && strings.HasSuffix(rest, "/claim") && !strings.Contains(strings.TrimSuffix(rest, "/claim"), "/")
+}
+
+// isGrantMutationPath reports whether method+path addresses a per-canvas
+// grant-mutation endpoint: POST /api/canvases/{id}/grants (add) or DELETE
+// /api/canvases/{id}/grants/{grantRef} (remove). It's the discriminator
+// serveWrite uses to let a session OWNER manage its own canvas's sharing --
+// every other verb/shape on the grants routes is not a session-writable
+// mutation and falls through to the machine-plane rules.
+func isGrantMutationPath(method, path string) bool {
+	rest, ok := strings.CutPrefix(path, "/api/canvases/")
+	if !ok {
+		return false
+	}
+	// rest is "{id}/grants" (add) or "{id}/grants/{ref}" (remove); split off the id.
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return false
+	}
+	sub := rest[slash+1:]
+	switch method {
+	case http.MethodPost:
+		return sub == "grants"
+	case http.MethodDelete:
+		// A non-empty grantRef must follow -- "grants/" with nothing after is not
+		// a real delete target.
+		return strings.HasPrefix(sub, "grants/") && len(sub) > len("grants/")
+	default:
+		return false
+	}
 }
 
 // writeTargetCanvasID extracts the canvas id a write path mutates, covering the

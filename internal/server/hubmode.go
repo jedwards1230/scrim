@@ -114,6 +114,9 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 	// read by enforcement). It lives under the hub's meta dir alongside the
 	// canvas sidecars.
 	s.principals = principal.New(s.metaDir)
+	// The share dialog's autocomplete reads through this seam; it defaults to
+	// the display-only registry and #54 swaps in a directory driver behind it.
+	s.directory = s.principals
 	// The user-token store backs the direct (machine) plane's per-principal
 	// credentials: a bearer that isn't the admin push token is resolved here.
 	s.tokens = usertoken.New(s.metaDir)

@@ -88,20 +88,76 @@
   .viewers.live .dot { background: #22c55e; }
   .empty { color: var(--muted); max-width: 72rem; margin: 0 auto; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.85rem; max-width: 72rem; margin-left: auto; margin-right: auto; }
+  /* Identity chrome (rendered only under OIDC): header chip, card badges, the
+     Share dialog, and their controls. Themed with the same CSS variables as
+     everything above so light/dark carry through untouched. */
+  .header-actions { display: flex; align-items: center; gap: 0.5rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    border: 1px solid var(--border); background: var(--card-bg);
+    border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.85rem;
+    max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .btn {
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+    border-radius: 0.5rem; padding: 0.35rem 0.7rem; cursor: pointer; font-size: 0.85rem;
+    text-decoration: none; display: inline-block;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .logout-form { margin: 0; display: inline; }
+  .badges { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0 0 0.6rem; }
+  .pill {
+    font-size: 0.7rem; border-radius: 999px; padding: 0.1rem 0.5rem;
+    border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pill-owned { border-color: #22c55e; color: #16a34a; }
+  .pill-shared { border-color: #3b82f6; color: #2563eb; }
+  .card-wrap { position: relative; display: flex; flex-direction: column; }
+  .card-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; }
+  .card-btn {
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+    border-radius: 0.5rem; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem;
+  }
+  .card-btn:hover { border-color: var(--muted); }
+  dialog {
+    border: 1px solid var(--border); border-radius: 0.75rem;
+    background: var(--card-bg); color: var(--fg);
+    padding: 1.25rem; max-width: 32rem; width: 90%;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+  .dialog-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 0.5rem; }
+  .dialog-head h2 { font-size: 1.1rem; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  dialog section { margin-top: 1rem; }
+  dialog h3 { font-size: 0.85rem; margin: 0 0 0.5rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  #grant-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  #grant-list li { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.85rem; }
+  .add-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+  .add-row select, .add-row input { font-size: 0.85rem; padding: 0.35rem 0.5rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+  .add-row input { flex: 1; min-width: 8rem; }
+  .link-output { margin-top: 0.6rem; }
+  .link-output input { width: 100%; font-size: 0.8rem; padding: 0.4rem 0.5rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--bg); color: var(--fg); margin-bottom: 0.4rem; }
+  .muted { color: var(--muted); font-size: 0.82rem; }
+  .share-error { color: #dc2626; font-size: 0.82rem; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
 <header>
   <h1>scrim</h1>
-  <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
+  <div class="header-actions">
+    {{if .OIDC}}{{if .Principal}}<span class="chip" title="{{.Principal}}">{{.Principal}}</span>{{end}}<a class="btn" href="/tokens">Tokens</a><form class="logout-form" method="POST" action="/auth/logout"><button class="btn" type="submit">Log out</button></form>{{end}}
+    <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
+  </div>
 </header>
 {{if .Canvases}}
 <div class="grid">
   {{range .Canvases}}
+  {{if $.OIDC}}<div class="card-wrap">{{end}}
   <a class="card" href="{{.URL}}" data-id="{{.ID}}">
     <div class="icon" style="background:{{.Color}}22;">{{.Icon}}</div>
     <h2>{{if .Title}}{{.Title}}{{else}}{{.ID}}{{end}}</h2>
     <p class="desc">{{.Description}}</p>
+    {{if $.OIDC}}<div class="badges">{{if .Owned}}<span class="pill pill-owned">Owned</span>{{end}}{{if .SharedWithYou}}<span class="pill pill-shared">Shared with you</span>{{end}}{{if .Visibility}}<span class="pill">{{.Visibility}}</span>{{end}}{{if .OwnerLabel}}<span class="pill" title="owner">{{.OwnerLabel}}</span>{{end}}</div>{{end}}
     <div class="meta">
       <span>{{.ModTime}}</span>
       <span class="viewers" data-viewers>
@@ -110,12 +166,45 @@
       </span>
     </div>
   </a>
+  {{if $.OIDC}}<div class="card-actions">{{if .CanShare}}<button class="card-btn" type="button" data-share="{{.ID}}" data-title="{{if .Title}}{{.Title}}{{else}}{{.ID}}{{end}}">Share</button>{{end}}{{if .CanClaim}}<button class="card-btn" type="button" data-claim="{{.ID}}">Claim</button>{{end}}</div></div>{{end}}
   {{end}}
 </div>
 {{else}}
 <p class="empty">No canvases yet. Use <code>scrim add &lt;id&gt;</code> to create one.</p>
 {{end}}
 <footer>scrim {{.Version}}</footer>
+{{if .OIDC}}
+<dialog id="share-dialog">
+  <form class="dialog-head" method="dialog">
+    <h2 id="share-title">Share</h2>
+    <button class="btn" value="close">Close</button>
+  </form>
+  <div id="share-error" class="share-error" hidden></div>
+  <section>
+    <h3>Current sharing</h3>
+    <ul id="grant-list"><li class="muted">Loading&hellip;</li></ul>
+  </section>
+  <section>
+    <h3>Add access</h3>
+    <div class="add-row">
+      <select id="grant-kind">
+        <option value="user">User (email)</option>
+        <option value="group">Group</option>
+        <option value="everyone">Everyone (logged-in)</option>
+        <option value="link">Share link</option>
+      </select>
+      <input id="grant-target" list="principal-list" placeholder="email or group" autocomplete="off">
+      <datalist id="principal-list"></datalist>
+      <button id="grant-add" class="btn" type="button">Add</button>
+    </div>
+    <div id="link-output" class="link-output" hidden>
+      <p class="muted">Copy this link now &mdash; the secret is shown only once:</p>
+      <input id="link-url" readonly>
+      <button id="link-copy" class="btn" type="button">Copy link</button>
+    </div>
+  </section>
+</dialog>
+{{end}}
 <script>
 (function () {
   // Dashboard-chrome-only light/dark toggle: individual canvases are never
@@ -168,6 +257,202 @@
   }
   setInterval(refresh, POLL_INTERVAL_MS);
 })();
+{{if .OIDC}}
+(function () {
+  // Share dialog (#53). Plain <dialog> + vanilla fetch, no framework, matching
+  // the rest of this page. Every principal-supplied string (grant target, owner
+  // email, autocomplete suggestion) is written via textContent / .value, never
+  // innerHTML, so nothing user-influenced is ever parsed as markup.
+  var dialog = document.getElementById("share-dialog");
+  if (!dialog || typeof dialog.showModal !== "function") return;
+  var titleEl = document.getElementById("share-title");
+  var errEl = document.getElementById("share-error");
+  var listEl = document.getElementById("grant-list");
+  var kindEl = document.getElementById("grant-kind");
+  var targetEl = document.getElementById("grant-target");
+  var datalistEl = document.getElementById("principal-list");
+  var addBtn = document.getElementById("grant-add");
+  var linkBox = document.getElementById("link-output");
+  var linkUrl = document.getElementById("link-url");
+  var linkCopy = document.getElementById("link-copy");
+  var currentId = null;
+
+  function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+  function clearError() { errEl.textContent = ""; errEl.hidden = true; }
+
+  function canvasBase(id) {
+    return window.location.origin + "/c/" + encodeURIComponent(id) + "/";
+  }
+
+  function grantRef(g) {
+    if (g.kind === "link") return g.link_id;
+    if (g.kind === "everyone") return "everyone";
+    return g.target;
+  }
+
+  function grantLabel(g) {
+    if (g.kind === "everyone") return "Everyone (logged-in)";
+    if (g.kind === "link") return "Share link";
+    return g.kind + ": " + g.target;
+  }
+
+  function renderGrants(grants) {
+    listEl.replaceChildren();
+    if (!grants || grants.length === 0) {
+      var li = document.createElement("li");
+      li.className = "muted";
+      li.textContent = "Not shared with anyone yet.";
+      listEl.appendChild(li);
+      return;
+    }
+    grants.forEach(function (g) {
+      var li = document.createElement("li");
+      var label = document.createElement("span");
+      label.textContent = grantLabel(g); // textContent: never parses target as markup
+      var revoke = document.createElement("button");
+      revoke.className = "card-btn";
+      revoke.type = "button";
+      revoke.textContent = "Revoke";
+      revoke.addEventListener("click", function () { revokeGrant(grantRef(g)); });
+      li.appendChild(label);
+      li.appendChild(revoke);
+      listEl.appendChild(li);
+    });
+  }
+
+  function loadGrants(id) {
+    fetch("/api/canvases/" + encodeURIComponent(id) + "/grants", { credentials: "same-origin" })
+      .then(function (resp) {
+        if (resp.status === 403) {
+          listEl.replaceChildren();
+          var li = document.createElement("li");
+          li.className = "muted";
+          li.textContent = "You can't view this canvas's sharing list.";
+          listEl.appendChild(li);
+          return null;
+        }
+        return resp.ok ? resp.json() : Promise.reject(new Error("HTTP " + resp.status));
+      })
+      .then(function (data) { if (data) renderGrants(data.grants); })
+      .catch(function () { showError("Couldn't load the current sharing list."); });
+  }
+
+  function addGrant() {
+    clearError();
+    var kind = kindEl.value;
+    var target = targetEl.value.trim();
+    if ((kind === "user" || kind === "group") && target === "") {
+      showError("A " + kind + " grant needs a target.");
+      return;
+    }
+    var body = { kind: kind };
+    if (kind === "user" || kind === "group") body.target = target;
+    fetch("/api/canvases/" + encodeURIComponent(currentId) + "/grants", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (resp) {
+        if (!resp.ok) return resp.json().then(function (e) { throw new Error(e.error || ("HTTP " + resp.status)); });
+        return resp.json();
+      })
+      .then(function (g) {
+        targetEl.value = "";
+        if (g.kind === "link" && g.link_secret) {
+          linkUrl.value = canvasBase(currentId) + "?k=" + encodeURIComponent(g.link_secret);
+          linkBox.hidden = false;
+        }
+        loadGrants(currentId);
+      })
+      .catch(function (e) { showError(e.message || "Couldn't add that grant."); });
+  }
+
+  function revokeGrant(ref) {
+    clearError();
+    if (!ref) return;
+    fetch("/api/canvases/" + encodeURIComponent(currentId) + "/grants/" + encodeURIComponent(ref), {
+      method: "DELETE",
+      credentials: "same-origin"
+    })
+      .then(function (resp) {
+        if (!resp.ok && resp.status !== 404) throw new Error("HTTP " + resp.status);
+        loadGrants(currentId);
+      })
+      .catch(function () { showError("Couldn't revoke that grant."); });
+  }
+
+  // Debounced principal autocomplete: fill the datalist from GET /api/principals.
+  var acTimer = null;
+  function autocomplete() {
+    if (acTimer) clearTimeout(acTimer);
+    acTimer = setTimeout(function () {
+      var q = targetEl.value.trim();
+      fetch("/api/principals?q=" + encodeURIComponent(q), { credentials: "same-origin" })
+        .then(function (resp) { return resp.ok ? resp.json() : []; })
+        .then(function (people) {
+          datalistEl.replaceChildren();
+          (people || []).forEach(function (p) {
+            var opt = document.createElement("option");
+            opt.value = p.email; // .value assignment: never parsed as markup
+            if (p.display_name) opt.label = p.display_name;
+            datalistEl.appendChild(opt);
+          });
+        })
+        .catch(function () { /* autocomplete is best-effort; ignore */ });
+    }, 150);
+  }
+
+  function openShare(id, title) {
+    currentId = id;
+    clearError();
+    linkBox.hidden = true;
+    linkUrl.value = "";
+    targetEl.value = "";
+    datalistEl.replaceChildren();
+    titleEl.textContent = "Share “" + title + "”";
+    listEl.replaceChildren();
+    var li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "Loading…";
+    listEl.appendChild(li);
+    dialog.showModal();
+    loadGrants(id);
+  }
+
+  addBtn.addEventListener("click", addGrant);
+  targetEl.addEventListener("input", autocomplete);
+  linkCopy.addEventListener("click", function () {
+    linkUrl.select();
+    if (navigator.clipboard) navigator.clipboard.writeText(linkUrl.value).catch(function () {});
+    else document.execCommand("copy");
+  });
+
+  document.querySelectorAll("[data-share]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      openShare(btn.getAttribute("data-share"), btn.getAttribute("data-title") || "");
+    });
+  });
+
+  // Claim a legacy (admin-owned) canvas, then reload so its badges/controls
+  // reflect the new ownership.
+  document.querySelectorAll("[data-claim]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.getAttribute("data-claim");
+      btn.disabled = true;
+      fetch("/api/canvases/" + encodeURIComponent(id) + "/claim", {
+        method: "POST",
+        credentials: "same-origin"
+      })
+        .then(function (resp) {
+          if (resp.ok) { window.location.reload(); return; }
+          btn.disabled = false;
+        })
+        .catch(function () { btn.disabled = false; });
+    });
+  });
+})();
+{{end}}
 </script>
 </body>
 </html>

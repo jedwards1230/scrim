@@ -1243,6 +1243,25 @@ else
   bad "grant scenario: list_grants shows the grant, no secret (got: $GRANTS)"
 fi
 
+# --- Principal autocomplete (#53) ---
+# The share dialog's grantee-autocomplete source. A shape check (a JSON array),
+# runnable here because it's a session-gated READ that a loopback caller reaches
+# through this non-OIDC hub's CIDR gate. Granting erin above observed her in the
+# display-only registry, so the unfiltered list is a non-empty array.
+PRINCIPALS=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/api/principals" || true)
+case "$PRINCIPALS" in
+  \[*\]) ok "principals scenario: GET /api/principals returns a JSON array" ;;
+  *) bad "principals scenario: GET /api/principals returns a JSON array (got: $PRINCIPALS)" ;;
+esac
+
+# The q= prefix filter still returns an array, and finds the observed grantee.
+PRINCIPALS_Q=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/api/principals?q=erin" || true)
+case "$PRINCIPALS_Q" in
+  \[*erin@example.com*\]) ok "principals scenario: GET /api/principals?q= filters to the matching principal" ;;
+  \[*\]) bad "principals scenario: prefix filter should surface the observed grantee (got: $PRINCIPALS_Q)" ;;
+  *) bad "principals scenario: prefix-filtered principals returns an array (got: $PRINCIPALS_Q)" ;;
+esac
+
 # --- Legacy migration + claim (#55) ---
 # A canvas created via the admin push token is admin-owned (the legacy/bootstrap
 # state the startup sweep guarantees). A logged-in principal (dave's token)

@@ -62,6 +62,12 @@ type Server struct {
 	// (set in NewHub); the default daemon leaves it nil.
 	principals *principal.Registry
 
+	// directory is the source GET /api/principals autocompletes from. It
+	// defaults to the lazy principals registry above (set in NewHub) but is an
+	// interface seam so #54 can layer an Authentik directory driver behind the
+	// same handler without touching it. Nil for the default daemon.
+	directory principalLister
+
 	// tokens is the hub's user-minted bearer-token store: a bearer that isn't
 	// the admin push token is looked up here and, when valid, acts AS its owner
 	// (owner attribution + owner-only writes). Non-nil only for a hub (set in

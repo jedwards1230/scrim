@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>scrim &mdash; tokens</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --fg: #1a1a1a;
+    --muted: #666;
+    --card-bg: #ffffff;
+    --border: #e2e2e2;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a;
+    --fg: #e8e8e8;
+    --muted: #9a9a9a;
+    --card-bg: #212226;
+    --border: #33343a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --card-bg: #212226;
+      --border: #33343a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    padding: 2rem;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 48rem;
+    margin: 0 auto 1.5rem;
+  }
+  h1 { font-size: 1.25rem; margin: 0; }
+  main { max-width: 48rem; margin: 0 auto; }
+  .header-actions { display: flex; align-items: center; gap: 0.5rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    border: 1px solid var(--border); background: var(--card-bg);
+    border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.85rem;
+    max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .btn {
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+    border-radius: 0.5rem; padding: 0.35rem 0.7rem; cursor: pointer; font-size: 0.85rem;
+    text-decoration: none; display: inline-block;
+  }
+  .btn:hover { border-color: var(--muted); }
+  section { margin-bottom: 1.5rem; }
+  h2 { font-size: 0.95rem; margin: 0 0 0.6rem; }
+  .card {
+    border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 1rem; background: var(--card-bg); margin-bottom: 0.75rem;
+  }
+  .mint-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  input[type="text"], input[type="email"] {
+    font-size: 0.85rem; padding: 0.4rem 0.55rem; border-radius: 0.5rem;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  .mint-row input { flex: 1; min-width: 10rem; }
+  .options { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.6rem; font-size: 0.82rem; color: var(--muted); }
+  .options label { display: inline-flex; align-items: center; gap: 0.3rem; }
+  .options input[type="text"] { flex: none; width: 12rem; }
+  .token { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
+  .token .name { font-weight: 600; }
+  .token .detail { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+  .token.revoked { opacity: 0.55; }
+  .pill { font-size: 0.7rem; border-radius: 999px; padding: 0.1rem 0.5rem; border: 1px solid var(--border); color: var(--muted); }
+  .secret-box { margin-top: 0.6rem; }
+  .secret-box input { width: 100%; font-size: 0.8rem; padding: 0.4rem 0.5rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--bg); color: var(--fg); margin-bottom: 0.4rem; }
+  .muted { color: var(--muted); font-size: 0.82rem; }
+  .error { color: #dc2626; font-size: 0.82rem; margin-top: 0.5rem; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.85rem; max-width: 48rem; margin-left: auto; margin-right: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Your tokens</h1>
+  <div class="header-actions">
+    {{if .Principal}}<span class="chip" title="{{.Principal}}">{{.Principal}}</span>{{end}}
+    <a class="btn" href="/">&larr; Gallery</a>
+    <button id="theme-toggle" class="btn" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
+  </div>
+</header>
+<main>
+  <section>
+    <h2>Mint a token</h2>
+    <div class="card">
+      <div class="mint-row">
+        <input id="mint-name" type="text" placeholder="Token name (e.g. laptop CLI)">
+        <button id="mint-btn" class="btn" type="button">Mint</button>
+      </div>
+      <div class="options">
+        <label><input id="allow-everyone" type="checkbox"> allow sharing to everyone</label>
+        <label><input id="allow-links" type="checkbox"> allow minting share links</label>
+        <label>allow user emails: <input id="allow-emails" type="text" placeholder="comma-separated"></label>
+        <label>allow groups: <input id="allow-groups" type="text" placeholder="comma-separated"></label>
+        <label><input id="autoshare-everyone" type="checkbox"> auto-share new canvases to everyone</label>
+      </div>
+      <div id="secret-box" class="secret-box" hidden>
+        <p class="muted">Copy this token now &mdash; it is shown only once:</p>
+        <input id="secret-value" readonly>
+        <button id="secret-copy" class="btn" type="button">Copy token</button>
+      </div>
+      <div id="mint-error" class="error" hidden></div>
+    </div>
+  </section>
+  <section>
+    <h2>Existing tokens</h2>
+    <div id="token-list"><p class="muted">Loading&hellip;</p></div>
+  </section>
+</main>
+<footer>scrim {{.Version}}</footer>
+<script>
+(function () {
+  // Shared dashboard-chrome light/dark toggle (see index page).
+  var toggle = document.getElementById("theme-toggle");
+  var root = document.documentElement;
+  var stored = localStorage.getItem("scrim-theme");
+  if (stored) root.setAttribute("data-theme", stored);
+  toggle.addEventListener("click", function () {
+    var current = root.getAttribute("data-theme");
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var next;
+    if (current === "dark") next = "light";
+    else if (current === "light") next = "dark";
+    else next = prefersDark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    localStorage.setItem("scrim-theme", next);
+  });
+})();
+
+(function () {
+  // My-tokens management (#53): list, mint, revoke via the /api/tokens JSON
+  // endpoints. Every principal-supplied value (name, owner email, allowance
+  // targets) is written via textContent / .value, never innerHTML.
+  var listEl = document.getElementById("token-list");
+  var nameEl = document.getElementById("mint-name");
+  var mintBtn = document.getElementById("mint-btn");
+  var errEl = document.getElementById("mint-error");
+  var secretBox = document.getElementById("secret-box");
+  var secretVal = document.getElementById("secret-value");
+  var secretCopy = document.getElementById("secret-copy");
+  var allowEveryone = document.getElementById("allow-everyone");
+  var allowLinks = document.getElementById("allow-links");
+  var allowEmails = document.getElementById("allow-emails");
+  var allowGroups = document.getElementById("allow-groups");
+  var autoshareEveryone = document.getElementById("autoshare-everyone");
+
+  function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+  function clearError() { errEl.textContent = ""; errEl.hidden = true; }
+
+  function csv(s) {
+    return s.split(",").map(function (x) { return x.trim(); }).filter(function (x) { return x !== ""; });
+  }
+
+  function allowanceSummary(a) {
+    if (!a) return "no sharing allowance";
+    var parts = [];
+    if (a.everyone) parts.push("everyone");
+    if (a.links) parts.push("links");
+    if (a.emails && a.emails.length) parts.push("users: " + a.emails.join(", "));
+    if (a.groups && a.groups.length) parts.push("groups: " + a.groups.join(", "));
+    return parts.length ? "may share to " + parts.join("; ") : "no sharing allowance";
+  }
+
+  function autoShareSummary(grants) {
+    if (!grants || !grants.length) return "";
+    var kinds = grants.map(function (g) { return g.kind === "user" || g.kind === "group" ? g.kind + ":" + g.target : g.kind; });
+    return "auto-shares: " + kinds.join(", ");
+  }
+
+  function renderTokens(tokens) {
+    listEl.replaceChildren();
+    if (!tokens || tokens.length === 0) {
+      var p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No tokens yet.";
+      listEl.appendChild(p);
+      return;
+    }
+    tokens.forEach(function (t) {
+      var card = document.createElement("div");
+      card.className = "card token" + (t.revoked ? " revoked" : "");
+
+      var left = document.createElement("div");
+      var name = document.createElement("div");
+      name.className = "name";
+      name.textContent = t.name || "(unnamed)";
+      left.appendChild(name);
+
+      var detail = document.createElement("div");
+      detail.className = "detail";
+      var bits = ["created " + new Date(t.created_at).toLocaleString()];
+      if (t.last_used) bits.push("last used " + new Date(t.last_used).toLocaleString());
+      bits.push(allowanceSummary(t.allowed_grant_targets));
+      var as = autoShareSummary(t.auto_share);
+      if (as) bits.push(as);
+      detail.textContent = bits.join(" · ");
+      left.appendChild(detail);
+      card.appendChild(left);
+
+      if (t.revoked) {
+        var pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = "revoked";
+        card.appendChild(pill);
+      } else {
+        var btn = document.createElement("button");
+        btn.className = "btn";
+        btn.type = "button";
+        btn.textContent = "Revoke";
+        btn.addEventListener("click", function () { revoke(t.id); });
+        card.appendChild(btn);
+      }
+      listEl.appendChild(card);
+    });
+  }
+
+  function load() {
+    fetch("/api/tokens", { credentials: "same-origin" })
+      .then(function (resp) { return resp.ok ? resp.json() : []; })
+      .then(renderTokens)
+      .catch(function () {
+        listEl.replaceChildren();
+        var p = document.createElement("p");
+        p.className = "muted";
+        p.textContent = "Couldn't load tokens.";
+        listEl.appendChild(p);
+      });
+  }
+
+  function mint() {
+    clearError();
+    secretBox.hidden = true;
+    var body = {
+      name: nameEl.value.trim(),
+      allowed_grant_targets: {
+        everyone: allowEveryone.checked,
+        links: allowLinks.checked,
+        emails: csv(allowEmails.value),
+        groups: csv(allowGroups.value)
+      }
+    };
+    if (autoshareEveryone.checked) body.auto_share = [{ kind: "everyone" }];
+    mintBtn.disabled = true;
+    fetch("/api/tokens", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (resp) {
+        if (!resp.ok) return resp.json().then(function (e) { throw new Error(e.error || ("HTTP " + resp.status)); });
+        return resp.json();
+      })
+      .then(function (r) {
+        secretVal.value = r.token;
+        secretBox.hidden = false;
+        nameEl.value = "";
+        load();
+      })
+      .catch(function (e) { showError(e.message || "Couldn't mint a token."); })
+      .finally(function () { mintBtn.disabled = false; });
+  }
+
+  function revoke(id) {
+    clearError();
+    fetch("/api/tokens/" + encodeURIComponent(id), { method: "DELETE", credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok && resp.status !== 404) throw new Error("HTTP " + resp.status);
+        load();
+      })
+      .catch(function () { showError("Couldn't revoke that token."); });
+  }
+
+  mintBtn.addEventListener("click", mint);
+  secretCopy.addEventListener("click", function () {
+    secretVal.select();
+    if (navigator.clipboard) navigator.clipboard.writeText(secretVal.value).catch(function () {});
+    else document.execCommand("copy");
+  });
+  load();
+})();
+</script>
+</body>
+</html>
