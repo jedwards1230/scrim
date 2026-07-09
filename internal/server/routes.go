@@ -38,6 +38,12 @@ func (s *Server) routes() http.Handler {
 		// wire. All bearer-gated via withHubGate (reads included -- the push
 		// token authorizes any method). Registered ONLY in hub mode so the
 		// default daemon gets zero new surface (hub_test.go invariant).
+		// Per-canvas machine-API reads are private-by-default enforced at the
+		// gate (withHubGate resolves claims + CanView by canvas id for any
+		// /api/canvases/{id}/… read under OIDC); writes are admin-gated there.
+		// TODO(#50): user-token writes will additionally need per-handler
+		// identity.CanWrite here, using claimsFrom(r.Context()), once resolveClaims
+		// returns a user-token principal.
 		mux.HandleFunc("GET /api/canvases/{id}/files", s.handleListCanvasFiles)
 		mux.HandleFunc("GET /api/canvases/{id}/files/{path...}", s.handleReadCanvasFile)
 		mux.HandleFunc("PUT /api/canvases/{id}/files/{path...}", s.handleWriteCanvasFile)
@@ -71,7 +77,11 @@ func (s *Server) routes() http.Handler {
 		if s.oidcAuth != nil {
 			mux.HandleFunc("GET "+oidc.LoginPath, s.oidcAuth.HandleLogin)
 			mux.HandleFunc("GET "+oidc.CallbackPath, s.oidcAuth.HandleCallback)
-			mux.HandleFunc("GET "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
+			// Logout is POST-only: a plain GET logout is CSRF-able (any page
+			// could force a logout via an <img>/link), so the mux answers a GET
+			// with 405. isAuthPath still exempts the path (it matches by path,
+			// method-agnostic), so the POST reaches the handler.
+			mux.HandleFunc("POST "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
 		}
 	}
 

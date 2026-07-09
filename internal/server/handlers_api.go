@@ -26,6 +26,10 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	idleSeconds := now.Sub(s.activity.last()).Seconds()
 	sseClients := s.hub.clientCount()
 
+	// Under OIDC the count reflects only canvases this request may see (private
+	// by default); on a non-OIDC hub / the default daemon visibleTo is a no-op.
+	visibleCount := len(s.visibleTo(infos, r))
+
 	resp := apiclient.StatusResponse{
 		PID:                os.Getpid(),
 		Host:               s.cfg.Host,
@@ -33,7 +37,7 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 		Version:            version.Short(),
 		StartedAt:          s.startedAt,
 		UptimeSeconds:      now.Sub(s.startedAt).Seconds(),
-		CanvasCount:        len(infos),
+		CanvasCount:        visibleCount,
 		IdleTimeoutSeconds: s.cfg.IdleTimeout.Seconds(),
 		IdleSeconds:        idleSeconds,
 		SSEClients:         sseClients,
@@ -89,6 +93,7 @@ func (s *Server) handleListCanvases(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	infos = s.visibleTo(infos, r)
 	resp := make([]apiclient.CanvasResponse, 0, len(infos))
 	for _, info := range infos {
 		resp = append(resp, s.canvasResponse(info))
@@ -136,7 +141,23 @@ func (s *Server) canvasResponse(info canvas.Info) apiclient.CanvasResponse {
 		URL:         url,
 		ModifiedAt:  info.ModTime,
 		SSEClients:  s.hub.canvasClientCount(info.ID),
+		Owner:       info.Owner,
+		Grants:      publicGrants(info.Grants),
 	}
+}
+
+// publicGrants projects a canvas's stored grants into the secret-free shape
+// exposed on the API (kind/target/link id only) -- a link grant's secret hash
+// is never serialized. Returns nil for no grants so the field omits cleanly.
+func publicGrants(grants []canvas.Grant) []apiclient.CanvasGrant {
+	if len(grants) == 0 {
+		return nil
+	}
+	out := make([]apiclient.CanvasGrant, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, apiclient.CanvasGrant{Kind: g.Kind, Target: g.Target, LinkID: g.LinkID})
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -1123,6 +1123,15 @@ else
   bad "hub scenario: unauthenticated GET /healthz gets 200 (got $STATUS)"
 fi
 
+# NOTE: the #49 identity scenarios -- private-by-default (unauth API/SSE 401,
+# browser 302 login), owner-only visibility, and each share-grant kind
+# (user/group/everyone/link via ?k=) -- require a live OIDC IdP, which an
+# OIDC-configured hub fails closed without at startup. Standing up a real IdP
+# in shell is impractical, so those scenarios live as Go httptest+oidctest
+# integration tests in internal/server/hubgate_identity_test.go instead (per
+# the PR contract). healthz above is the identity-adjacent scenario doable
+# here (it needs no OIDC).
+
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely
 # unauthenticated (401).

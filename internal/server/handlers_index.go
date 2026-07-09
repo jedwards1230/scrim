@@ -46,6 +46,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Under OIDC the gallery shows only canvases this request may see (private
+	// by default); on a non-OIDC hub / the default daemon visibleTo is a no-op.
+	infos = s.visibleTo(infos, r)
+
 	data := indexData{Version: version.Short()}
 	for _, info := range infos {
 		data.Canvases = append(data.Canvases, indexCanvas{

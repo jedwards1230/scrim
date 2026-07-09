@@ -18,6 +18,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/mdns"
 	"github.com/jedwards1230/scrim/internal/oidc"
+	"github.com/jedwards1230/scrim/internal/principal"
 	"github.com/jedwards1230/scrim/internal/state"
 	"github.com/jedwards1230/scrim/internal/version"
 )
@@ -53,6 +54,12 @@ type Server struct {
 	// and for a hub with no OIDC config, so the fail-closed/opt-in contract is
 	// a simple nil check.
 	oidcAuth *oidc.Authenticator
+
+	// principals is the hub's lazily-populated principal registry, fed on
+	// login (and, later, from CF headers and grant targets). Display/
+	// autocomplete only -- enforcement NEVER reads it. Non-nil only for a hub
+	// (set in NewHub); the default daemon leaves it nil.
+	principals *principal.Registry
 }
 
 // New returns a Server configured from cfg. Call Run to start it.

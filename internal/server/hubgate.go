@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/identity"
 	"github.com/jedwards1230/scrim/internal/oidc"
 )
 
@@ -75,51 +77,142 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			return
 		}
 
-		// A valid push token authorizes ANY method, reads included -- it's the
-		// machine-API credential (MCP client / push), distinct from the browser
-		// read gate (OIDC/CIDR/read-token) below.
-		if s.hasValidPushToken(r) {
+		// Resolve the request's identity ONCE and stash it in the context so
+		// every downstream handler (gallery/list filtering, owner attribution)
+		// reads the same claims without re-deriving them.
+		c := s.resolveClaims(r)
+		r = r.WithContext(withClaims(r.Context(), c))
+
+		// The admin push token is the machine/bootstrap credential: it
+		// authorizes ANY method, reads included, and is a visibility superuser
+		// (see identity.CanView). It is distinct from the browser read gate
+		// (OIDC / CIDR / read-token) below.
+		//
+		// TODO(#51): resolveClaims will additionally return a CF-forwarded actor
+		// (Admin=false) when a valid admin push token carries verified
+		// X-Scrim-Actor-* headers; such a request is authorized as that actor
+		// (still not admin) rather than served here unconditionally.
+		if c.Admin {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Reaching here means the bearer check above already failed, so any
-		// write is unauthorized -- no second token check.
+
+		// No admin credential. Every write (any method other than GET/HEAD) is
+		// unauthorized -- the machine API is admin-gated in this phase.
+		//
+		// TODO(#50): a valid user bearer token whose owner CanWrite the target
+		// canvas authorizes its own writes here (resolveClaims resolves it, the
+		// per-canvas handlers enforce CanWrite) before this rejection.
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "unauthorized: missing or invalid push token", http.StatusUnauthorized)
 			return
 		}
 
-		// Reads. OIDC, when configured, is the entire read gate.
+		// Reads. OIDC, when configured, makes the hub private by default:
+		// visibility is decided from the canvas's owner+grants and the request's
+		// claims, never the caller's network position.
 		if s.oidcAuth != nil {
-			if _, ok := s.oidcAuth.SessionFromRequest(r); ok {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Unauthenticated: send a browser into the login flow (preserving
-			// where it was headed), but hand a non-browser client (the SSE
-			// EventSource, curl, an API caller) a 401 it can act on rather than
-			// an HTML redirect it can't follow meaningfully.
-			if wantsHTML(r) {
-				target := oidc.LoginPath + "?return_to=" + url.QueryEscape(r.URL.RequestURI())
-				http.Redirect(w, r, target, http.StatusFound)
-				return
-			}
-			http.Error(w, "unauthorized: OIDC login required", http.StatusUnauthorized)
+			s.serveOIDCRead(w, r, next, c)
 			return
 		}
 
+		// No OIDC: the hub keeps its exact legacy read gate -- a CIDR allowlist
+		// match plus, if configured, a separate read token. There is no
+		// per-canvas visibility here (no identity to enforce against); the CIDR
+		// gate is the whole read security, as it was before #49.
 		ip, err := clientIP(r)
 		if err != nil || !ipAllowed(ip, s.hubCfg.allowedNets) {
 			http.Error(w, "forbidden: client is not in the allowed range", http.StatusForbidden)
 			return
 		}
-
 		if s.hubCfg.readToken == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		checkToken(w, r, next, s.hubCfg.readToken)
 	})
+}
+
+// resolveClaims determines the identity a hub request carries, in precedence
+// order. It never mutates the request and never calls out to the IdP -- it
+// reads the presented credential only.
+func (s *Server) resolveClaims(r *http.Request) identity.Claims {
+	// 1. The global admin push token: the machine/bootstrap credential.
+	if s.hasValidPushToken(r) {
+		// TODO(#51): when r additionally carries verified HMAC-signed
+		// X-Scrim-Actor-* headers, return the forwarded CF principal
+		// (Claims{Subject/Email/Groups: actor…, Admin: false}) and feed the
+		// principal registry with source "cf-header". X-Scrim-Actor-* is trusted
+		// ONLY on this branch (a request bearing the admin token); it is never
+		// honored otherwise, so a spoofed header on a tokenless request is
+		// ignored by construction.
+		return identity.Claims{Admin: true}
+	}
+
+	// 2. TODO(#50): a valid user bearer token (looked up in usertoken.Store,
+	// constant-time hash compare over non-revoked tokens) resolves to
+	// Claims{Email: token.OwnerEmail}; stash the *Token too, for its auto_share
+	// grants + grant-target allowance. It sits ABOVE the session check so a
+	// machine client presenting a user token is attributed to that token's owner.
+
+	// 3. A valid OIDC session cookie.
+	if s.oidcAuth != nil {
+		if sess, ok := s.oidcAuth.SessionFromRequest(r); ok {
+			return identity.Claims{
+				Subject: sess.Subject,
+				Email:   sess.Email,
+				Name:    sess.Name,
+				Groups:  sess.Groups,
+			}
+		}
+	}
+
+	// 4. Anonymous.
+	return identity.Claims{}
+}
+
+// serveOIDCRead applies private-by-default read enforcement for a hub with OIDC
+// configured. A per-canvas path (a canvas view, its SSE stream or favicon, or a
+// per-canvas machine-API read) is served only when the claims (or a presented
+// share-link secret) CanView the canvas; anything else is a general
+// authenticated read (the index, the canvas list, status), served to any
+// authenticated principal and privacy-filtered by the handler.
+func (s *Server) serveOIDCRead(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims) {
+	if id, ok := canvasIDFromURLPath(r.URL.Path); ok {
+		owner, grants, _ := canvas.GetOwnerGrants(s.metaDir, id)
+		if identity.CanView(ownerOrAdmin(owner), grants, c, linkSecretFrom(r)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.denyRead(w, r, c)
+		return
+	}
+	// A non-canvas read (index / list / status): any authenticated principal may
+	// reach it; the handler filters what it returns by CanView.
+	if c.Authenticated() {
+		next.ServeHTTP(w, r)
+		return
+	}
+	s.denyRead(w, r, c)
+}
+
+// denyRead answers a read the caller may not have. An unauthenticated caller
+// (no session and no valid link) is sent into the login flow if it's a browser
+// navigation, or given a plain 401 it can act on otherwise (an SSE EventSource,
+// curl, an API client). An authenticated-but-not-permitted caller gets a 404 --
+// never a 403 -- so the response never reveals that a canvas it can't see even
+// exists.
+func (s *Server) denyRead(w http.ResponseWriter, r *http.Request, c identity.Claims) {
+	if c.Authenticated() {
+		http.NotFound(w, r)
+		return
+	}
+	if wantsHTML(r) {
+		target := oidc.LoginPath + "?return_to=" + url.QueryEscape(r.URL.RequestURI())
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	http.Error(w, "unauthorized: OIDC login required", http.StatusUnauthorized)
 }
 
 // isAuthPath reports whether path is exactly one of the OIDC login routes the

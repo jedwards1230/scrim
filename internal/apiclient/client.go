@@ -79,6 +79,22 @@ type CanvasResponse struct {
 	URL        string    `json:"url"`
 	ModifiedAt time.Time `json:"modified_at"`
 	SSEClients int       `json:"sse_clients"`
+	// Owner and Grants describe the canvas's ownership + sharing (hub mode).
+	// Additive and omitempty: the default daemon leaves them empty and older
+	// clients that don't know the fields ignore them. Owner is a principal id
+	// (email; "admin" for legacy). Grants mirrors internal/canvas.Grant, but the
+	// server never populates a link grant's secret hash into this response.
+	Owner  string        `json:"owner,omitempty"`
+	Grants []CanvasGrant `json:"grants,omitempty"`
+}
+
+// CanvasGrant is one sharing entry in a CanvasResponse, so a hub UI can render
+// who a canvas is shared with. It carries no secret -- a link grant's stored
+// hash is never serialized here, only its public id + kind.
+type CanvasGrant struct {
+	Kind   string `json:"kind"`             // "user" | "group" | "everyone" | "link"
+	Target string `json:"target,omitempty"` // email (user) or group name (group)
+	LinkID string `json:"link_id,omitempty"`
 }
 
 // ErrStatus is returned when the daemon responds with a non-2xx status.

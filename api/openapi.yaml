@@ -130,7 +130,12 @@ paths:
     get:
       tags: [canvases]
       operationId: listCanvases
-      summary: List all canvases.
+      summary: List canvases visible to the caller.
+      description: >-
+        Lists canvases. On an OIDC hub the list is private by default — only canvases the caller
+        owns or has been granted (or, with a `?k=` share-link secret, that link's canvas) are
+        returned; the admin push token sees all. On a non-OIDC hub / the local daemon every canvas
+        is returned.
       responses:
         '200':
           description: Every canvas, each as a Canvas object.
@@ -642,14 +647,19 @@ paths:
           description: Redirect onward (to return_to or the dashboard) after establishing a session.
 
   /auth/logout:
-    get:
+    post:
       tags: [auth]
       operationId: authLogout
       summary: Clear the browser session (browser-flow, not machine API).
+      description: >-
+        POST-only: a plain GET logout is CSRF-able, so the hub registers only POST and answers a
+        GET with 405. Clears the session cookie and redirects to the dashboard.
       security: []
       responses:
         '302':
           description: Session cleared; redirect to the dashboard.
+        '405':
+          description: Returned for any method other than POST (e.g. a GET), by the mux.
 
 components:
   securitySchemes:
@@ -769,6 +779,9 @@ components:
           type: number
         canvas_count:
           type: integer
+          description: >-
+            Number of canvases. On an OIDC hub this is the count VISIBLE to the caller (private by
+            default); on a non-OIDC hub / local daemon it is the total.
         idle_timeout_seconds:
           type: number
           description: The configured idle timeout; <= 0 means idle reaping is disabled.
@@ -822,6 +835,18 @@ components:
         sse_clients:
           type: integer
           description: Current number of SSE clients connected to this canvas.
+        owner:
+          type: string
+          description: >-
+            The canvas's owning principal id (an email; "admin" for legacy/bootstrap canvases).
+            Present on a hub; the local daemon omits it. Additive.
+        grants:
+          type: array
+          description: >-
+            The canvas's sharing list (hub). Secret-free — a share-link grant's secret hash is
+            never serialized here, only its public id + kind. Additive; omitted when empty.
+          items:
+            $ref: '#/components/schemas/Grant'
       required:
         - id
         - icon
@@ -830,6 +855,24 @@ components:
         - url
         - modified_at
         - sse_clients
+
+    Grant:
+      type: object
+      description: >-
+        One sharing entry on a canvas, so a UI can render who it is shared with. Carries no
+        secret.
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+          description: The class of principal this grant widens visibility to.
+        target:
+          type: string
+          description: The grant target — an email (user) or group name (group); empty for everyone/link.
+        link_id:
+          type: string
+          description: A share-link grant's public id (link kind only).
+      required: [kind]
 
     CreateCanvasRequest:
       type: object

@@ -142,3 +142,9 @@ func outf(w io.Writer, format string, args ...any) {
 func errOut(w io.Writer, err error) {
 	_, _ = fmt.Fprintln(w, "error:", err)
 }
+
+// warn writes a non-fatal configuration warning to w (stderr), prefixed so it's
+// visibly distinct from an error and greppable in logs.
+func warn(w io.Writer, msg string) {
+	_, _ = fmt.Fprintln(w, "warning:", msg)
+}

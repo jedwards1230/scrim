@@ -11,6 +11,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
+	"github.com/jedwards1230/scrim/internal/principal"
 )
 
 // HubOptions configures a Server constructed via NewHub -- the hub-specific
@@ -107,6 +108,10 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		readToken:   opts.ReadToken,
 		allowedNets: nets,
 	}
+	// The principal registry is a lazily-populated, display-only feeder (never
+	// read by enforcement). It lives under the hub's meta dir alongside the
+	// canvas sidecars.
+	s.principals = principal.New(s.metaDir)
 
 	// OIDC discovery happens here so NewHub fails closed: a hub with OIDC
 	// configured but an unreachable/misconfigured issuer refuses to start
@@ -123,6 +128,17 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		if oc.LogAuthFailure == nil {
 			oc.LogAuthFailure = func(reason string) {
 				logging.Error(logging.CategoryAuth, errors.New(reason))
+			}
+		}
+		// Feed the principal registry on every successful login. Best-effort: a
+		// registry write failure is logged (scrubbed) but never fails the login
+		// -- the registry is display-only and enforcement never reads it.
+		if oc.OnLogin == nil {
+			registry := s.principals
+			oc.OnLogin = func(email, name string, groups []string) {
+				if err := registry.Observe(email, name, groups, principal.SourceLogin); err != nil {
+					logging.Error(logging.CategoryAuth, fmt.Errorf("principal registry: %w", err))
+				}
 			}
 		}
 		auth, err := oidc.New(context.Background(), oc)
