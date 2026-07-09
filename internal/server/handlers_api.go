@@ -9,6 +9,8 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/logging"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 	"github.com/jedwards1230/scrim/internal/version"
 )
 
@@ -71,12 +73,18 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 	// visibility-filtered), so it alone stamps an owner -- keeping the default
 	// daemon's on-disk behavior byte-for-byte unchanged (hub_test.go invariant).
 	owner := ""
+	// A create is idempotent, so apply auto-share only for a genuinely new
+	// canvas (checked before Create), never on a repeat POST for an existing id.
+	isNew := !canvas.Exists(s.canvasesDir, body.ID)
 	if s.isHub() {
 		owner = ownerFromClaims(claimsFrom(r.Context()))
 	}
 	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon, owner); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if s.isHub() && isNew {
+		s.applyAutoShare(body.ID, tokenFrom(r.Context()))
 	}
 	info, err := canvas.Get(s.canvasesDir, s.metaDir, body.ID)
 	if err != nil {
@@ -143,6 +151,29 @@ func (s *Server) canvasResponse(info canvas.Info) apiclient.CanvasResponse {
 		SSEClients:  s.hub.canvasClientCount(info.ID),
 		Owner:       info.Owner,
 		Grants:      publicGrants(info.Grants),
+	}
+}
+
+// applyAutoShare adds a resolving user token's auto-share grants to a
+// newly-created canvas, attributing each to the token's owner. It is best-effort
+// -- a grant-write failure is logged (scrubbed) but never fails the create/push
+// that already succeeded, and a nil token (admin/session/anonymous create) is a
+// no-op. The caller must apply it only for genuinely new canvases so a re-push
+// never duplicates grants.
+func (s *Server) applyAutoShare(id string, tok *usertoken.Token) {
+	if tok == nil || len(tok.AutoShare) == 0 {
+		return
+	}
+	now := time.Now()
+	for _, g := range tok.AutoShare {
+		g.CreatedBy = tok.OwnerEmail
+		if g.CreatedAt.IsZero() {
+			g.CreatedAt = now
+		}
+		if err := canvas.AddGrant(s.metaDir, id, g); err != nil {
+			logging.Error(logging.CategoryAuth, fmt.Errorf("applying auto-share grant: %w", err))
+			return
+		}
 	}
 }
 

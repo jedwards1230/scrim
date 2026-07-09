@@ -58,6 +58,10 @@ tags:
     description: Whole-canvas transfer — tar push and server-side copy. Hub-only.
   - name: snapshots
     description: Canvas versioning — list, create, and revert. Hub-only.
+  - name: tokens
+    description: >-
+      User-minted bearer tokens that act as their owner on the machine plane (mint, list, revoke).
+      Hub-only.
   - name: auth
     description: >-
       Browser OIDC login flow. NOT part of the machine API — a human's browser drives these to
@@ -510,6 +514,89 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/tokens:
+    get:
+      tags: [tokens]
+      operationId: listTokens
+      summary: List the caller's user tokens.
+      description: >-
+        Lists the calling principal's own user tokens (scoped by principal email), never their
+        hashes or raw secrets. On an OIDC hub the caller is a browser session or a user-token
+        principal; the admin push token has no email of its own and lists nothing here.
+      responses:
+        '200':
+          description: The caller's tokens (secret-free).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TokenMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [tokens]
+      operationId: createToken
+      summary: Mint a user token.
+      description: >-
+        Mints a named user bearer token that acts AS its owner on the machine plane. Authorized for
+        a logged-in browser session (mints for itself) or the admin push token (mints for a named
+        `owner_email`); a user-token principal is rejected (`403`, no privilege escalation). The raw
+        secret is returned ONCE in the response and never again — only its SHA-256 hash is stored.
+        `auto_share` grants are applied to canvases the token creates; `allowed_grant_targets`
+        bounds what it may later share (enforced by the grant endpoints).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTokenRequest'
+      responses:
+        '201':
+          description: Token minted; the raw secret is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MintTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/tokens/{id}:
+    delete:
+      tags: [tokens]
+      operationId: revokeToken
+      summary: Revoke one of the caller's tokens.
+      description: >-
+        Revokes a token. A principal may revoke only its OWN tokens; the admin push token may revoke
+        any. A token that does not exist (or belongs to another principal) is `404` — never
+        revealing that a token the caller can't touch exists.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The token id, as returned by mint/list.
+      responses:
+        '204':
+          description: Token revoked. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/canvases/{id}/snapshots:
     parameters:
       - $ref: '#/components/parameters/CanvasId'
@@ -873,6 +960,79 @@ components:
           type: string
           description: A share-link grant's public id (link kind only).
       required: [kind]
+
+    Allowance:
+      type: object
+      description: >-
+        Bounds which grant targets a token's owner may share to (enforced by the grant endpoints).
+        The zero value permits nothing.
+      properties:
+        emails:
+          type: array
+          items:
+            type: string
+          description: Emails a user grant may target.
+        groups:
+          type: array
+          items:
+            type: string
+          description: Group names a group grant may target.
+        everyone:
+          type: boolean
+          description: Whether an everyone grant is permitted.
+        links:
+          type: boolean
+          description: Whether a share-link grant is permitted.
+
+    CreateTokenRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: A human-readable label for the token.
+        owner_email:
+          type: string
+          description: >-
+            Admin-only — the principal to mint the token for. A session ignores this and mints for
+            itself.
+        auto_share:
+          type: array
+          description: Grants automatically applied to canvases this token creates.
+          items:
+            $ref: '#/components/schemas/Grant'
+        allowed_grant_targets:
+          $ref: '#/components/schemas/Allowance'
+
+    TokenMeta:
+      type: object
+      description: A user token's secret-free metadata (no hash, no raw secret).
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner_email:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+      required: [id, name, owner_email, created_at]
+
+    MintTokenResponse:
+      type: object
+      description: The one-time result of minting a token — the raw secret plus its metadata.
+      properties:
+        token:
+          type: string
+          description: The raw token secret, shown ONCE and never recoverable afterward.
+        meta:
+          $ref: '#/components/schemas/TokenMeta'
+      required: [token, meta]
 
     CreateCanvasRequest:
       type: object

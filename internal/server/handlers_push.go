@@ -184,12 +184,18 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	// to canvas.Create leaves any existing owner in place and preserves grants,
 	// so this also records metadata even when no title/description/icon is given.
 	owner := ownerFromClaims(claimsFrom(r.Context()))
-	if existing, _, err := canvas.GetOwnerGrants(s.metaDir, id); err == nil && existing != "" {
-		owner = existing
+	existingOwner, _, _ := canvas.GetOwnerGrants(s.metaDir, id)
+	if existingOwner != "" {
+		owner = existingOwner
 	}
 	if _, err := canvas.Create(s.canvasesDir, s.metaDir, id, title, description, icon, owner); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "writing canvas metadata: "+err.Error())
 		return
+	}
+	// Apply the pushing token's auto-share grants, but only when this push
+	// created the canvas (no prior owner) -- a re-push must never re-add them.
+	if existingOwner == "" {
+		s.applyAutoShare(id, tokenFrom(r.Context()))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{

@@ -10,6 +10,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/identity"
 	"github.com/jedwards1230/scrim/internal/oidc"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
 // pushAuthHeader is the header a write request must present the hub's push
@@ -77,11 +78,16 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			return
 		}
 
-		// Resolve the request's identity ONCE and stash it in the context so
-		// every downstream handler (gallery/list filtering, owner attribution)
-		// reads the same claims without re-deriving them.
-		c := s.resolveClaims(r)
-		r = r.WithContext(withClaims(r.Context(), c))
+		// Resolve the request's identity ONCE and stash it (plus the resolving
+		// user token, if any) in the context so every downstream handler
+		// (gallery/list filtering, owner attribution, auto-share) reads the same
+		// claims without re-deriving them.
+		c, tok := s.resolveClaims(r)
+		ctx := withClaims(r.Context(), c)
+		if tok != nil {
+			ctx = withToken(ctx, tok)
+		}
+		r = r.WithContext(ctx)
 
 		// The admin push token is the machine/bootstrap credential: it
 		// authorizes ANY method, reads included, and is a visibility superuser
@@ -97,14 +103,9 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			return
 		}
 
-		// No admin credential. Every write (any method other than GET/HEAD) is
-		// unauthorized -- the machine API is admin-gated in this phase.
-		//
-		// TODO(#50): a valid user bearer token whose owner CanWrite the target
-		// canvas authorizes its own writes here (resolveClaims resolves it, the
-		// per-canvas handlers enforce CanWrite) before this rejection.
+		// Writes (any method other than GET/HEAD).
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "unauthorized: missing or invalid push token", http.StatusUnauthorized)
+			s.serveWrite(w, r, next, c, tok)
 			return
 		}
 
@@ -134,9 +135,10 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 }
 
 // resolveClaims determines the identity a hub request carries, in precedence
-// order. It never mutates the request and never calls out to the IdP -- it
+// order, returning the resolving user token too (nil unless a user bearer token
+// matched). It never mutates the request and never calls out to the IdP -- it
 // reads the presented credential only.
-func (s *Server) resolveClaims(r *http.Request) identity.Claims {
+func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Token) {
 	// 1. The global admin push token: the machine/bootstrap credential.
 	if s.hasValidPushToken(r) {
 		// TODO(#51): when r additionally carries verified HMAC-signed
@@ -146,14 +148,17 @@ func (s *Server) resolveClaims(r *http.Request) identity.Claims {
 		// ONLY on this branch (a request bearing the admin token); it is never
 		// honored otherwise, so a spoofed header on a tokenless request is
 		// ignored by construction.
-		return identity.Claims{Admin: true}
+		return identity.Claims{Admin: true}, nil
 	}
 
-	// 2. TODO(#50): a valid user bearer token (looked up in usertoken.Store,
-	// constant-time hash compare over non-revoked tokens) resolves to
-	// Claims{Email: token.OwnerEmail}; stash the *Token too, for its auto_share
-	// grants + grant-target allowance. It sits ABOVE the session check so a
-	// machine client presenting a user token is attributed to that token's owner.
+	// 2. A valid user bearer token acts AS its owner. Looked up ABOVE the
+	// session check so a machine client presenting a user token is attributed to
+	// that token's owner, not to any session cookie it also happens to carry.
+	if raw, ok := bearerToken(r); ok && s.tokens != nil {
+		if tok, ok := s.tokens.Lookup(raw); ok {
+			return identity.Claims{Email: tok.OwnerEmail}, tok
+		}
+	}
 
 	// 3. A valid OIDC session cookie.
 	if s.oidcAuth != nil {
@@ -163,12 +168,119 @@ func (s *Server) resolveClaims(r *http.Request) identity.Claims {
 				Email:   sess.Email,
 				Name:    sess.Name,
 				Groups:  sess.Groups,
-			}
+			}, nil
 		}
 	}
 
 	// 4. Anonymous.
-	return identity.Claims{}
+	return identity.Claims{}, nil
+}
+
+// serveWrite authorizes a write (a non-GET/HEAD request) for a non-admin caller
+// (admin is served earlier). The token-management endpoints are open to any
+// session (a logged-in principal mints/revokes its own tokens); every other
+// write requires a user bearer token whose owner may write the target canvas.
+func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims, tok *usertoken.Token) {
+	// Token management: a logged-in OIDC session mints/revokes its OWN tokens.
+	// A user-token principal may not mint further tokens (no privilege
+	// escalation), and an anonymous caller may not either.
+	if isTokenPath(r.URL.Path) {
+		if c.Email != "" && tok == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c.Authenticated() {
+			http.Error(w, "forbidden: token management requires a browser session", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "unauthorized: login required", http.StatusUnauthorized)
+		return
+	}
+
+	// Every other write is a machine-API mutation: it needs the admin push token
+	// (served earlier) or a user bearer token. A session/anonymous write is
+	// unauthorized -- the browser plane is read-only.
+	if tok == nil {
+		http.Error(w, "unauthorized: missing or invalid token", http.StatusUnauthorized)
+		return
+	}
+	// A user token may write only canvases its owner owns (admin is a superuser,
+	// handled earlier). Centralized here so every mutating machine-API route is
+	// covered uniformly without per-handler checks.
+	if !s.userTokenMayWrite(r, c) {
+		// 403, not 404: the caller supplied a valid token and named the id, so a
+		// "not yours" answer leaks nothing it doesn't already know.
+		http.Error(w, "forbidden: your token does not own this canvas", http.StatusForbidden)
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// userTokenMayWrite reports whether a user-token principal may perform this
+// write. Creating a brand-new canvas is always allowed (the principal will own
+// it); the daemon-lifecycle stop is admin-only; every other write targets a
+// canvas the principal must be able to CanWrite (a not-yet-existing target is
+// allowed -- it's a create, or the handler will 404).
+func (s *Server) userTokenMayWrite(r *http.Request, c identity.Claims) bool {
+	// Stopping the hub is an admin-only lifecycle operation.
+	if r.URL.Path == "/api/stop" {
+		return false
+	}
+	// Creating a brand-new canvas: allowed, the principal owns it.
+	if r.Method == http.MethodPost && r.URL.Path == "/api/canvases" {
+		return true
+	}
+	id, ok := writeTargetCanvasID(r.URL.Path)
+	if !ok {
+		// An unrecognized write target -- fail closed.
+		return false
+	}
+	if !canvas.Exists(s.canvasesDir, id) {
+		// A not-yet-existing canvas: a first push creates it (owned by the
+		// principal); a file write/edit will 404 at the handler. Either way the
+		// principal isn't writing over someone else's canvas.
+		return true
+	}
+	owner, _, err := canvas.GetOwnerGrants(s.metaDir, id)
+	if err != nil {
+		return false
+	}
+	return identity.CanWrite(ownerOrAdmin(owner), c)
+}
+
+// isTokenPath reports whether path addresses the token-management endpoints.
+func isTokenPath(path string) bool {
+	return path == "/api/tokens" || strings.HasPrefix(path, "/api/tokens/")
+}
+
+// writeTargetCanvasID extracts the canvas id a write path mutates, covering the
+// whole-canvas push route and the per-canvas machine-API routes.
+func writeTargetCanvasID(p string) (string, bool) {
+	for _, prefix := range []string{"/api/push/", "/api/canvases/"} {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok {
+			continue
+		}
+		id := rest
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			id = rest[:i]
+		}
+		if id == "" || canvas.ValidateID(id) != nil {
+			return "", false
+		}
+		return id, true
+	}
+	return "", false
+}
+
+// bearerToken returns the token presented in the Authorization: Bearer header,
+// or ("", false) when absent/malformed.
+func bearerToken(r *http.Request) (string, bool) {
+	authz := r.Header.Get(pushAuthHeader)
+	if !strings.HasPrefix(authz, bearerPrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(authz, bearerPrefix), true
 }
 
 // serveOIDCRead applies private-by-default read enforcement for a hub with OIDC

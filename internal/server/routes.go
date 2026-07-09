@@ -40,10 +40,10 @@ func (s *Server) routes() http.Handler {
 		// default daemon gets zero new surface (hub_test.go invariant).
 		// Per-canvas machine-API reads are private-by-default enforced at the
 		// gate (withHubGate resolves claims + CanView by canvas id for any
-		// /api/canvases/{id}/… read under OIDC); writes are admin-gated there.
-		// TODO(#50): user-token writes will additionally need per-handler
-		// identity.CanWrite here, using claimsFrom(r.Context()), once resolveClaims
-		// returns a user-token principal.
+		// /api/canvases/{id}/… read under OIDC); writes are authorized there too
+		// (admin push token, or a user token whose owner CanWrite the canvas --
+		// see serveWrite/userTokenMayWrite), so these handlers need no per-route
+		// auth.
 		mux.HandleFunc("GET /api/canvases/{id}/files", s.handleListCanvasFiles)
 		mux.HandleFunc("GET /api/canvases/{id}/files/{path...}", s.handleReadCanvasFile)
 		mux.HandleFunc("PUT /api/canvases/{id}/files/{path...}", s.handleWriteCanvasFile)
@@ -51,6 +51,13 @@ func (s *Server) routes() http.Handler {
 		// every other machine-API write -- no extra gate code.
 		mux.HandleFunc("PATCH /api/canvases/{id}/files/{path...}", s.handleEditCanvasFile)
 		mux.HandleFunc("POST /api/canvases/{id}/copy", s.handleCopyCanvas)
+
+		// User-token management (#50). Hub-only. POST/DELETE are authorized in
+		// withHubGate for a browser session (or admin); GET lists the caller's
+		// own tokens. Raw secrets are returned only once, by POST.
+		mux.HandleFunc("POST /api/tokens", s.handleCreateToken)
+		mux.HandleFunc("GET /api/tokens", s.handleListTokens)
+		mux.HandleFunc("DELETE /api/tokens/{id}", s.handleRevokeToken)
 		mux.HandleFunc("GET /api/canvases/{id}/snapshots", s.handleListSnapshots)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)

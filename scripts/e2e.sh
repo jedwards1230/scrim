@@ -1123,14 +1123,76 @@ else
   bad "hub scenario: unauthenticated GET /healthz gets 200 (got $STATUS)"
 fi
 
+# --- User-minted tokens acting as their owner (#50) ---
+# The admin push token mints per-principal user tokens (owner_email); a canvas
+# created with a user token is owned by that principal, and another principal's
+# token can't WRITE it. (The "can't SEE it" half is private-by-default, an
+# OIDC-only read feature, covered as a Go integration test.) All against the
+# already-running non-OIDC hub1.
+ALICE_TOK=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"alice-laptop","owner_email":"alice@example.com"}' \
+  "http://127.0.0.1:$HUB1_PORT/api/tokens" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+BOB_TOK=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"bob-laptop","owner_email":"bob@example.com"}' \
+  "http://127.0.0.1:$HUB1_PORT/api/tokens" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+if [ -n "$ALICE_TOK" ] && [ -n "$BOB_TOK" ]; then
+  ok "token scenario: admin minted user tokens for alice + bob"
+else
+  bad "token scenario: admin minted user tokens for alice + bob"
+fi
+
+# Alice's token creates a canvas -> owned by alice (owner echoed in the response).
+CREATE_RESP=$(curl -fsS -X POST -H "Authorization: Bearer $ALICE_TOK" -H "Content-Type: application/json" \
+  -d '{"id":"alice-canvas"}' "http://127.0.0.1:$HUB1_PORT/api/canvases" || true)
+if echo "$CREATE_RESP" | grep -q '"owner":"alice@example.com"'; then
+  ok "token scenario: canvas created with alice's token is owned by alice"
+else
+  bad "token scenario: canvas created with alice's token is owned by alice (got: $CREATE_RESP)"
+fi
+
+# Bob's token cannot write alice's canvas -> 403.
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $BOB_TOK" \
+  --data-binary "nope" "http://127.0.0.1:$HUB1_PORT/api/canvases/alice-canvas/files/x.html")
+if [ "$STATUS" = "403" ]; then
+  ok "token scenario: bob's token cannot write alice's canvas (403)"
+else
+  bad "token scenario: bob's token cannot write alice's canvas (got $STATUS)"
+fi
+
+# Bob's token can create + write his OWN canvas.
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $BOB_TOK" -H "Content-Type: application/json" \
+  -d '{"id":"bob-canvas"}' "http://127.0.0.1:$HUB1_PORT/api/canvases")
+if [ "$STATUS" = "201" ]; then
+  ok "token scenario: bob's token creates his own canvas (201)"
+else
+  bad "token scenario: bob's token creates his own canvas (got $STATUS)"
+fi
+
+# A revoked token stops authorizing. Mint a throwaway token, revoke it as
+# admin via DELETE, then confirm a create with it is rejected (401).
+THROWAWAY_TOK=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"alice-revoke-me","owner_email":"alice@example.com"}' \
+  "http://127.0.0.1:$HUB1_PORT/api/tokens")
+REVOKE_ID=$(echo "$THROWAWAY_TOK" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+REVOKE_RAW=$(echo "$THROWAWAY_TOK" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+curl -s -o /dev/null -X DELETE -H "Authorization: Bearer $HUB_PUSH_TOKEN" "http://127.0.0.1:$HUB1_PORT/api/tokens/$REVOKE_ID"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $REVOKE_RAW" -H "Content-Type: application/json" \
+  -d '{"id":"should-fail"}' "http://127.0.0.1:$HUB1_PORT/api/canvases")
+if [ "$STATUS" = "401" ]; then
+  ok "token scenario: a revoked token no longer authorizes writes (401)"
+else
+  bad "token scenario: a revoked token no longer authorizes writes (got $STATUS)"
+fi
+
 # NOTE: the #49 identity scenarios -- private-by-default (unauth API/SSE 401,
 # browser 302 login), owner-only visibility, and each share-grant kind
-# (user/group/everyone/link via ?k=) -- require a live OIDC IdP, which an
+# (user/group/everyone/link via ?k=) -- plus the #50 "second token can't SEE
+# the first's canvas" read half all require a live OIDC IdP, which an
 # OIDC-configured hub fails closed without at startup. Standing up a real IdP
 # in shell is impractical, so those scenarios live as Go httptest+oidctest
-# integration tests in internal/server/hubgate_identity_test.go instead (per
-# the PR contract). healthz above is the identity-adjacent scenario doable
-# here (it needs no OIDC).
+# integration tests in internal/server/hubgate_identity_test.go and
+# handlers_tokens_test.go instead (per the PR contract). healthz + the
+# token-as-owner writes above are the identity scenarios doable here (no OIDC).
 
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely

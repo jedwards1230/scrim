@@ -20,6 +20,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/principal"
 	"github.com/jedwards1230/scrim/internal/state"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 	"github.com/jedwards1230/scrim/internal/version"
 )
 
@@ -60,6 +61,12 @@ type Server struct {
 	// autocomplete only -- enforcement NEVER reads it. Non-nil only for a hub
 	// (set in NewHub); the default daemon leaves it nil.
 	principals *principal.Registry
+
+	// tokens is the hub's user-minted bearer-token store: a bearer that isn't
+	// the admin push token is looked up here and, when valid, acts AS its owner
+	// (owner attribution + owner-only writes). Non-nil only for a hub (set in
+	// NewHub); the default daemon leaves it nil. #52/#51 reach it via s.tokens.
+	tokens *usertoken.Store
 }
 
 // New returns a Server configured from cfg. Call Run to start it.

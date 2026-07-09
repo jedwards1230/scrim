@@ -12,6 +12,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/principal"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
 // HubOptions configures a Server constructed via NewHub -- the hub-specific
@@ -112,6 +113,9 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 	// read by enforcement). It lives under the hub's meta dir alongside the
 	// canvas sidecars.
 	s.principals = principal.New(s.metaDir)
+	// The user-token store backs the direct (machine) plane's per-principal
+	// credentials: a bearer that isn't the admin push token is resolved here.
+	s.tokens = usertoken.New(s.metaDir)
 
 	// OIDC discovery happens here so NewHub fails closed: a hub with OIDC
 	// configured but an unreachable/misconfigured issuer refuses to start

@@ -7,11 +7,29 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/identity"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
 // claimsCtxKey is the private context key under which withHubGate stashes the
 // request's resolved identity.Claims, read back by handlers via claimsFrom.
 type claimsCtxKey struct{}
+
+// tokenCtxKey is the private context key under which withHubGate stashes the
+// user token that resolved the request's claims (nil for admin/session/
+// anonymous), so handlers can apply its auto-share grants and allowance.
+type tokenCtxKey struct{}
+
+// withToken returns ctx carrying the resolving user token.
+func withToken(ctx context.Context, tok *usertoken.Token) context.Context {
+	return context.WithValue(ctx, tokenCtxKey{}, tok)
+}
+
+// tokenFrom returns the user token that resolved the request's claims, or nil
+// when the caller is admin, an OIDC session, or anonymous.
+func tokenFrom(ctx context.Context) *usertoken.Token {
+	tok, _ := ctx.Value(tokenCtxKey{}).(*usertoken.Token)
+	return tok
+}
 
 // withClaims returns ctx carrying c. The hub gate calls this once per request
 // after resolving identity, so every downstream handler reads the same claims
