@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/logging"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 	"github.com/jedwards1230/scrim/internal/version"
 )
 
@@ -26,6 +29,10 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	idleSeconds := now.Sub(s.activity.last()).Seconds()
 	sseClients := s.hub.clientCount()
 
+	// Under OIDC the count reflects only canvases this request may see (private
+	// by default); on a non-OIDC hub / the default daemon visibleTo is a no-op.
+	visibleCount := len(s.visibleTo(infos, r))
+
 	resp := apiclient.StatusResponse{
 		PID:                os.Getpid(),
 		Host:               s.cfg.Host,
@@ -33,7 +40,7 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 		Version:            version.Short(),
 		StartedAt:          s.startedAt,
 		UptimeSeconds:      now.Sub(s.startedAt).Seconds(),
-		CanvasCount:        len(infos),
+		CanvasCount:        visibleCount,
 		IdleTimeoutSeconds: s.cfg.IdleTimeout.Seconds(),
 		IdleSeconds:        idleSeconds,
 		SSEClients:         sseClients,
@@ -62,13 +69,29 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	// Ownership is a hub concept: only a hub resolves request identity (the
+	// default daemon has no gate, no OIDC, and its canvases are never
+	// visibility-filtered), so it alone stamps an owner -- keeping the default
+	// daemon's on-disk behavior byte-for-byte unchanged (hub_test.go invariant).
+	owner := ""
+	// A create is idempotent, so apply auto-share only for a genuinely new
+	// canvas (checked before Create), never on a repeat POST for an existing id.
+	isNew := !canvas.Exists(s.canvasesDir, body.ID)
+	if s.isHub() {
+		owner = ownerFromClaims(claimsFrom(r.Context()))
+	}
+	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon, owner); err != nil {
+		logging.Error(logging.CategoryHTTP, errors.New("create canvas: writing canvas failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to create canvas")
 		return
+	}
+	if s.isHub() && isNew {
+		s.applyAutoShare(body.ID, tokenFrom(r.Context()))
 	}
 	info, err := canvas.Get(s.canvasesDir, s.metaDir, body.ID)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("create canvas: reading canvas back failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to read canvas")
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.canvasResponse(info))
@@ -81,6 +104,7 @@ func (s *Server) handleListCanvases(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	infos = s.visibleTo(infos, r)
 	resp := make([]apiclient.CanvasResponse, 0, len(infos))
 	for _, info := range infos {
 		resp = append(resp, s.canvasResponse(info))
@@ -128,7 +152,46 @@ func (s *Server) canvasResponse(info canvas.Info) apiclient.CanvasResponse {
 		URL:         url,
 		ModifiedAt:  info.ModTime,
 		SSEClients:  s.hub.canvasClientCount(info.ID),
+		Owner:       info.Owner,
+		Grants:      publicGrants(info.Grants),
 	}
+}
+
+// applyAutoShare adds a resolving user token's auto-share grants to a
+// newly-created canvas, attributing each to the token's owner. It is best-effort
+// -- a grant-write failure is logged (scrubbed) but never fails the create/push
+// that already succeeded, and a nil token (admin/session/anonymous create) is a
+// no-op. The caller must apply it only for genuinely new canvases so a re-push
+// never duplicates grants.
+func (s *Server) applyAutoShare(id string, tok *usertoken.Token) {
+	if tok == nil || len(tok.AutoShare) == 0 {
+		return
+	}
+	now := time.Now()
+	for _, g := range tok.AutoShare {
+		g.CreatedBy = tok.OwnerEmail
+		if g.CreatedAt.IsZero() {
+			g.CreatedAt = now
+		}
+		if err := canvas.AddGrant(s.metaDir, id, g); err != nil {
+			logging.Error(logging.CategoryAuth, errors.New("applying auto-share grant failed"))
+			return
+		}
+	}
+}
+
+// publicGrants projects a canvas's stored grants into the secret-free shape
+// exposed on the API (kind/target/link id only) -- a link grant's secret hash
+// is never serialized. Returns nil for no grants so the field omits cleanly.
+func publicGrants(grants []canvas.Grant) []apiclient.CanvasGrant {
+	if len(grants) == 0 {
+		return nil
+	}
+	out := make([]apiclient.CanvasGrant, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, apiclient.CanvasGrant{Kind: g.Kind, Target: g.Target, LinkID: g.LinkID})
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

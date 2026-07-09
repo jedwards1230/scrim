@@ -58,6 +58,13 @@ tags:
     description: Whole-canvas transfer — tar push and server-side copy. Hub-only.
   - name: snapshots
     description: Canvas versioning — list, create, and revert. Hub-only.
+  - name: tokens
+    description: >-
+      User-minted bearer tokens that act as their owner on the machine plane (mint, list, revoke).
+      Hub-only.
+  - name: grants
+    description: >-
+      Per-canvas view-only sharing grants (list, add, remove) — user/group/everyone/link. Hub-only.
   - name: auth
     description: >-
       Browser OIDC login flow. NOT part of the machine API — a human's browser drives these to
@@ -87,6 +94,21 @@ paths:
               schema:
                 type: string
 
+  /healthz:
+    get:
+      tags: [status]
+      operationId: getHealthz
+      summary: Liveness/readiness probe.
+      description: >-
+        A dependency-free liveness/readiness probe for orchestrators (e.g. a kubelet). Returns `200`
+        with no body and reveals nothing (no canvas content, no identity). Hub-only and gate-exempt
+        (no bearer, OIDC session, or CIDR match required) so a cookie-less, non-browser probe is not
+        answered with the `401` an OIDC-configured read gate would otherwise return.
+      security: []
+      responses:
+        '200':
+          description: The hub is up. No body.
+
   /api/status:
     get:
       tags: [status]
@@ -115,7 +137,12 @@ paths:
     get:
       tags: [canvases]
       operationId: listCanvases
-      summary: List all canvases.
+      summary: List canvases visible to the caller.
+      description: >-
+        Lists canvases. On an OIDC hub the list is private by default — only canvases the caller
+        owns or has been granted (or, with a `?k=` share-link secret, that link's canvas) are
+        returned; the admin push token sees all. On a non-OIDC hub / the local daemon every canvas
+        is returned.
       responses:
         '200':
           description: Every canvas, each as a Canvas object.
@@ -490,6 +517,235 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/canvases/{id}/grants:
+    parameters:
+      - $ref: '#/components/parameters/CanvasId'
+    get:
+      tags: [grants]
+      operationId: listGrants
+      summary: List a canvas's owner and sharing grants.
+      description: >-
+        Returns the canvas's owner and its current view-only grants, secret-free — a share-link
+        grant appears only by its public `link_id`, never its secret or hash. The ACL is more
+        privileged than the canvas view: only the owner, the admin push token, a verified
+        CF-forwarded actor that owns the canvas, or a principal that is itself an explicit
+        `user`/`group` grantee may read it. A caller who can see the canvas only via a share link or
+        an `everyone` grant is refused (`403`), so a link holder cannot enumerate the owner's email
+        or the other grantees.
+      responses:
+        '200':
+          description: The canvas's owner and grants.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [grants]
+      operationId: createGrant
+      summary: Add a sharing grant to a canvas.
+      description: >-
+        Adds a view-only grant. Only the canvas owner, the admin push token, or a verified
+        CF-forwarded actor that owns the canvas may add a grant; a user token is additionally bounded
+        by its `allowed_grant_targets` allowance (`403` when a target is not permitted). For a `link`
+        grant the hub mints a fresh link id + secret and returns the raw secret ONCE — append it to
+        the canvas URL as `?k=<secret>`. Adding an already-present user/group/everyone grant is a
+        no-op (`200`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantRequest'
+      responses:
+        '200':
+          description: The grant already existed (idempotent add).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGrantResponse'
+        '201':
+          description: Grant added; a link grant's secret is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateGrantResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/grants/{grantRef}:
+    delete:
+      tags: [grants]
+      operationId: deleteGrant
+      summary: Remove a sharing grant.
+      description: >-
+        Removes matching grants. `grantRef` addresses a link grant by its public `link_id`, a
+        user/group grant by its `target`, and the everyone grant by the literal `everyone`. Owner or
+        admin only. No matching grant is `404`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+        - name: grantRef
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The grant reference (link id, target, or "everyone").
+      responses:
+        '204':
+          description: Grant(s) removed. No body.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/canvases/{id}/claim:
+    post:
+      tags: [canvases]
+      operationId: claimCanvas
+      summary: Claim ownership of a legacy (admin-owned) canvas.
+      description: >-
+        Lets a logged-in session or user-token principal take ownership of a canvas currently owned
+        by `admin` (a legacy/bootstrap canvas). Only admin-owned canvases are claimable: a canvas
+        already owned by a different principal is `409`, and claiming one the caller already owns is a
+        `200` no-op. A canvas that doesn't exist is `404`; an anonymous caller is `401`.
+      parameters:
+        - $ref: '#/components/parameters/CanvasId'
+      responses:
+        '200':
+          description: Ownership transferred to (or already held by) the caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  owner:
+                    type: string
+                required: [id, owner]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The canvas is already owned by a different principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/tokens:
+    get:
+      tags: [tokens]
+      operationId: listTokens
+      summary: List the caller's user tokens.
+      description: >-
+        Lists the calling principal's own user tokens (scoped by principal email), never their
+        hashes or raw secrets. On an OIDC hub the caller is a browser session or a user-token
+        principal; the admin push token has no email of its own and lists nothing here.
+      responses:
+        '200':
+          description: The caller's tokens (secret-free).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TokenMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [tokens]
+      operationId: createToken
+      summary: Mint a user token.
+      description: >-
+        Mints a named user bearer token that acts AS its owner on the machine plane. Authorized for
+        a logged-in browser session (mints for itself) or the admin push token (mints for a named
+        `owner_email`); a user-token principal is rejected (`403`, no privilege escalation). The raw
+        secret is returned ONCE in the response and never again — only its SHA-256 hash is stored.
+        `auto_share` grants are applied to canvases the token creates; `allowed_grant_targets`
+        bounds what it may later share (enforced by the grant endpoints).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTokenRequest'
+      responses:
+        '201':
+          description: Token minted; the raw secret is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MintTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/tokens/{id}:
+    delete:
+      tags: [tokens]
+      operationId: revokeToken
+      summary: Revoke one of the caller's tokens.
+      description: >-
+        Revokes a token. A principal may revoke only its OWN tokens; the admin push token may revoke
+        any. A token that does not exist (or belongs to another principal) is `404` — never
+        revealing that a token the caller can't touch exists.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The token id, as returned by mint/list.
+      responses:
+        '204':
+          description: Token revoked. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/canvases/{id}/snapshots:
     parameters:
       - $ref: '#/components/parameters/CanvasId'
@@ -627,14 +883,19 @@ paths:
           description: Redirect onward (to return_to or the dashboard) after establishing a session.
 
   /auth/logout:
-    get:
+    post:
       tags: [auth]
       operationId: authLogout
       summary: Clear the browser session (browser-flow, not machine API).
+      description: >-
+        POST-only: a plain GET logout is CSRF-able, so the hub registers only POST and answers a
+        GET with 405. Clears the session cookie and redirects to the dashboard.
       security: []
       responses:
         '302':
           description: Session cleared; redirect to the dashboard.
+        '405':
+          description: Returned for any method other than POST (e.g. a GET), by the mux.
 
 components:
   securitySchemes:
@@ -754,6 +1015,9 @@ components:
           type: number
         canvas_count:
           type: integer
+          description: >-
+            Number of canvases. On an OIDC hub this is the count VISIBLE to the caller (private by
+            default); on a non-OIDC hub / local daemon it is the total.
         idle_timeout_seconds:
           type: number
           description: The configured idle timeout; <= 0 means idle reaping is disabled.
@@ -807,6 +1071,18 @@ components:
         sse_clients:
           type: integer
           description: Current number of SSE clients connected to this canvas.
+        owner:
+          type: string
+          description: >-
+            The canvas's owning principal id (an email; "admin" for legacy/bootstrap canvases).
+            Present on a hub; the local daemon omits it. Additive.
+        grants:
+          type: array
+          description: >-
+            The canvas's sharing list (hub). Secret-free — a share-link grant's secret hash is
+            never serialized here, only its public id + kind. Additive; omitted when empty.
+          items:
+            $ref: '#/components/schemas/Grant'
       required:
         - id
         - icon
@@ -815,6 +1091,141 @@ components:
         - url
         - modified_at
         - sse_clients
+
+    Grant:
+      type: object
+      description: >-
+        One sharing entry on a canvas, so a UI can render who it is shared with. Carries no
+        secret.
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+          description: The class of principal this grant widens visibility to.
+        target:
+          type: string
+          description: The grant target — an email (user) or group name (group); empty for everyone/link.
+        link_id:
+          type: string
+          description: A share-link grant's public id (link kind only).
+      required: [kind]
+
+    GrantList:
+      type: object
+      description: A canvas's owner and its current secret-free grants.
+      properties:
+        owner:
+          type: string
+          description: The owning principal id (email; "admin" for legacy/bootstrap canvases).
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/Grant'
+      required: [owner, grants]
+
+    CreateGrantRequest:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+          description: The class of principal to share with.
+        target:
+          type: string
+          description: Required for user (email) and group (group name) kinds; omitted for everyone/link.
+      required: [kind]
+
+    CreateGrantResponse:
+      type: object
+      description: >-
+        The added grant. link_secret is present ONLY for a link grant, carrying the raw secret shown
+        once (only its hash is stored).
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+        target:
+          type: string
+        link_id:
+          type: string
+          description: A share-link grant's public id (link kind only).
+        link_secret:
+          type: string
+          description: A share-link grant's raw secret, returned ONCE (link kind only). Append as ?k=<secret>.
+      required: [kind]
+
+    Allowance:
+      type: object
+      description: >-
+        Bounds which grant targets a token's owner may share to (enforced by the grant endpoints).
+        The zero value permits nothing.
+      properties:
+        emails:
+          type: array
+          items:
+            type: string
+          description: Emails a user grant may target.
+        groups:
+          type: array
+          items:
+            type: string
+          description: Group names a group grant may target.
+        everyone:
+          type: boolean
+          description: Whether an everyone grant is permitted.
+        links:
+          type: boolean
+          description: Whether a share-link grant is permitted.
+
+    CreateTokenRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: A human-readable label for the token.
+        owner_email:
+          type: string
+          description: >-
+            Admin-only — the principal to mint the token for. A session ignores this and mints for
+            itself.
+        auto_share:
+          type: array
+          description: Grants automatically applied to canvases this token creates.
+          items:
+            $ref: '#/components/schemas/Grant'
+        allowed_grant_targets:
+          $ref: '#/components/schemas/Allowance'
+
+    TokenMeta:
+      type: object
+      description: A user token's secret-free metadata (no hash, no raw secret).
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner_email:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+      required: [id, name, owner_email, created_at]
+
+    MintTokenResponse:
+      type: object
+      description: The one-time result of minting a token — the raw secret plus its metadata.
+      properties:
+        token:
+          type: string
+          description: The raw token secret, shown ONCE and never recoverable afterward.
+        meta:
+          $ref: '#/components/schemas/TokenMeta'
+      required: [token, meta]
 
     CreateCanvasRequest:
       type: object

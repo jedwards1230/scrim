@@ -46,7 +46,7 @@ func TestCreateGetListDelete(t *testing.T) {
 	dir := t.TempDir()
 	metaDir := filepath.Join(t.TempDir(), "meta")
 
-	canvasDir, err := Create(dir, metaDir, "report", "My Report", "A description", "")
+	canvasDir, err := Create(dir, metaDir, "report", "My Report", "A description", "", "")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestCreateGetListDelete(t *testing.T) {
 		t.Errorf("Get().Icon = %q, want deterministic default %q", info.Icon, DefaultIcon("report"))
 	}
 
-	if _, err := Create(dir, metaDir, "untitled", "", "", ""); err != nil {
+	if _, err := Create(dir, metaDir, "untitled", "", "", "", ""); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestDeleteInvalidID(t *testing.T) {
 func TestLastModifiedReflectsNestedWrites(t *testing.T) {
 	dir := t.TempDir()
 	metaDir := t.TempDir()
-	canvasDir, err := Create(dir, metaDir, "report", "", "", "")
+	canvasDir, err := Create(dir, metaDir, "report", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestMetadataStoredExternally(t *testing.T) {
 	canvasesDir := t.TempDir()
 	metaDir := t.TempDir()
 
-	canvasDir, err := Create(canvasesDir, metaDir, "report", "My Report", "desc", "")
+	canvasDir, err := Create(canvasesDir, metaDir, "report", "My Report", "desc", "", "")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -216,7 +216,7 @@ func TestMetadataStoredExternally(t *testing.T) {
 func TestMetadataDeletedWithCanvas(t *testing.T) {
 	canvasesDir := t.TempDir()
 	metaDir := t.TempDir()
-	if _, err := Create(canvasesDir, metaDir, "report", "My Report", "", ""); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "report", "My Report", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := Delete(canvasesDir, metaDir, "report"); err != nil {
@@ -233,7 +233,7 @@ func TestMetadataDeletedWithCanvas(t *testing.T) {
 func TestDeleteMissingMetadataIsNotAnError(t *testing.T) {
 	canvasesDir := t.TempDir()
 	metaDir := t.TempDir()
-	if _, err := Create(canvasesDir, metaDir, "report", "", "", ""); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "report", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := Delete(canvasesDir, metaDir, "report"); err != nil {
@@ -367,7 +367,7 @@ func TestDefaultIconAndColorDistinguishDifferentIDs(t *testing.T) {
 func TestExplicitIconOverridesDefault(t *testing.T) {
 	canvasesDir := t.TempDir()
 	metaDir := t.TempDir()
-	if _, err := Create(canvasesDir, metaDir, "report", "", "", "🐸"); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "report", "", "", "🐸", ""); err != nil {
 		t.Fatal(err)
 	}
 	info, err := Get(canvasesDir, metaDir, "report")
@@ -386,7 +386,7 @@ func TestExplicitIconOverridesDefault(t *testing.T) {
 func TestFiles(t *testing.T) {
 	canvasesDir := t.TempDir()
 	metaDir := t.TempDir()
-	if _, err := Create(canvasesDir, metaDir, "c1", "", "", ""); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "c1", "", "", "", ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	dir := Dir(canvasesDir, "c1")
@@ -421,7 +421,7 @@ func TestFiles(t *testing.T) {
 
 func TestFilesEmptyCanvas(t *testing.T) {
 	canvasesDir := t.TempDir()
-	if _, err := Create(canvasesDir, t.TempDir(), "c1", "", "", ""); err != nil {
+	if _, err := Create(canvasesDir, t.TempDir(), "c1", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	files, err := Files(canvasesDir, "c1")
@@ -443,14 +443,14 @@ func TestCopyMeta(t *testing.T) {
 	metaDir := t.TempDir()
 	canvasesDir := t.TempDir()
 	// Source has explicit title + icon.
-	if _, err := Create(canvasesDir, metaDir, "from", "My Title", "desc", "🎯"); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "from", "My Title", "desc", "🎯", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := CopyMeta(metaDir, "from", "to"); err != nil {
 		t.Fatalf("CopyMeta: %v", err)
 	}
 	// The target must exist to read Info; create its dir.
-	if _, err := Create(canvasesDir, metaDir, "to", "", "", ""); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "to", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	info, err := Get(canvasesDir, metaDir, "to")
@@ -466,10 +466,10 @@ func TestCopyMetaNoSourceMetaClearsTarget(t *testing.T) {
 	metaDir := t.TempDir()
 	canvasesDir := t.TempDir()
 	// Source has NO explicit meta; target has stale meta.
-	if _, err := Create(canvasesDir, metaDir, "from", "", "", ""); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "from", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(canvasesDir, metaDir, "to", "Stale", "", "📌"); err != nil {
+	if _, err := Create(canvasesDir, metaDir, "to", "Stale", "", "📌", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := CopyMeta(metaDir, "from", "to"); err != nil {
@@ -478,5 +478,209 @@ func TestCopyMetaNoSourceMetaClearsTarget(t *testing.T) {
 	// The stale metadata file must be gone.
 	if _, err := os.Stat(metaPath(metaDir, "to")); !os.IsNotExist(err) {
 		t.Errorf("target meta file still exists (err=%v), want it cleared", err)
+	}
+}
+
+func TestCreatePersistsAndPreservesOwnerAndGrants(t *testing.T) {
+	canvasesDir := t.TempDir()
+	metaDir := t.TempDir()
+
+	// Create with an owner records it.
+	if _, err := Create(canvasesDir, metaDir, "c", "T", "", "", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	owner, grants, err := GetOwnerGrants(metaDir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != "alice@example.com" || len(grants) != 0 {
+		t.Fatalf("owner=%q grants=%v, want alice, no grants", owner, grants)
+	}
+
+	// Add a grant, then re-Create with a title change and an EMPTY owner: the
+	// owner must be preserved and the grant must survive (Create never drops
+	// sharing state).
+	if err := AddGrant(metaDir, "c", Grant{Kind: GrantUser, Target: "bob@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(canvasesDir, metaDir, "c", "New Title", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Get(canvasesDir, metaDir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != "New Title" {
+		t.Errorf("title = %q, want New Title", info.Title)
+	}
+	if info.Owner != "alice@example.com" {
+		t.Errorf("owner = %q, want preserved alice@example.com", info.Owner)
+	}
+	if len(info.Grants) != 1 || info.Grants[0].Target != "bob@example.com" {
+		t.Errorf("grants = %+v, want the single bob grant preserved", info.Grants)
+	}
+}
+
+func TestSetOwnerPreservesOtherFields(t *testing.T) {
+	canvasesDir := t.TempDir()
+	metaDir := t.TempDir()
+	if _, err := Create(canvasesDir, metaDir, "c", "T", "D", "🎯", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetOwner(metaDir, "c", "carol@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Get(canvasesDir, metaDir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Owner != "carol@example.com" || info.Title != "T" || info.Description != "D" || info.Icon != "🎯" {
+		t.Errorf("SetOwner clobbered fields: %+v", info)
+	}
+}
+
+func TestAddAndRemoveGrant(t *testing.T) {
+	canvasesDir := t.TempDir()
+	metaDir := t.TempDir()
+	if _, err := Create(canvasesDir, metaDir, "c", "", "", "", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddGrant(metaDir, "c", Grant{Kind: GrantGroup, Target: "team"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddGrant(metaDir, "c", Grant{Kind: GrantUser, Target: "bob@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveGrant(metaDir, "c", func(g Grant) bool {
+		return g.Kind == GrantUser && g.Target == "bob@example.com"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	_, grants, err := GetOwnerGrants(metaDir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 || grants[0].Kind != GrantGroup {
+		t.Errorf("grants after remove = %+v, want only the group grant", grants)
+	}
+
+	// Removing something that doesn't match is a no-op (0 removed, no error).
+	removed, err = RemoveGrant(metaDir, "c", func(g Grant) bool { return g.Kind == GrantEveryone })
+	if err != nil || removed != 0 {
+		t.Errorf("RemoveGrant no-match = (%d, %v), want (0, nil)", removed, err)
+	}
+}
+
+func TestGetOwnerGrantsMissingMeta(t *testing.T) {
+	canvasesDir := t.TempDir()
+	metaDir := t.TempDir()
+	if _, err := Create(canvasesDir, metaDir, "bare", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	owner, grants, err := GetOwnerGrants(metaDir, "bare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != "" || grants != nil {
+		t.Errorf("bare canvas owner/grants = (%q, %v), want empty", owner, grants)
+	}
+}
+
+func TestHashLinkSecretIsStableHex(t *testing.T) {
+	h1 := HashLinkSecret("s3cr3t")
+	h2 := HashLinkSecret("s3cr3t")
+	if h1 != h2 {
+		t.Errorf("HashLinkSecret not stable: %q vs %q", h1, h2)
+	}
+	if len(h1) != 64 {
+		t.Errorf("HashLinkSecret len = %d, want 64 hex chars", len(h1))
+	}
+	if HashLinkSecret("other") == h1 {
+		t.Error("HashLinkSecret collided on different inputs")
+	}
+}
+
+// TestGrantRMWSerializedUnderConcurrency proves the per-id metadata lock
+// serializes concurrent read-modify-write on the same canvas: many AddGrant
+// calls interleaved with a RemoveGrant never lose an update, and a removed
+// grant stays removed (a revoke racing an add must not resurrect it). Without
+// the lock, a last-writer-wins over a stale read drops adds and/or re-adds the
+// revoked grant. Run under -race to also catch any unsynchronized map access.
+func TestGrantRMWSerializedUnderConcurrency(t *testing.T) {
+	tests := []struct {
+		name     string
+		adders   int
+		removers int
+	}{
+		{"many adds, one revoke", 64, 1},
+		{"many adds, several revokes", 64, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canvasesDir := t.TempDir()
+			metaDir := t.TempDir()
+			if _, err := Create(canvasesDir, metaDir, "c", "", "", "", "alice@example.com"); err != nil {
+				t.Fatal(err)
+			}
+			// Seed the grant that the concurrent revokes target. It must not
+			// survive: not one adder's stale read may write it back.
+			if err := AddGrant(metaDir, "c", Grant{Kind: GrantUser, Target: "victim@example.com"}); err != nil {
+				t.Fatal(err)
+			}
+
+			isVictim := func(g Grant) bool {
+				return g.Kind == GrantUser && g.Target == "victim@example.com"
+			}
+
+			var wg sync.WaitGroup
+			for i := 0; i < tt.adders; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					g := Grant{Kind: GrantUser, Target: fmt.Sprintf("u%d@example.com", i)}
+					if err := AddGrant(metaDir, "c", g); err != nil {
+						t.Errorf("AddGrant(u%d): %v", i, err)
+					}
+				}(i)
+			}
+			for i := 0; i < tt.removers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := RemoveGrant(metaDir, "c", isVictim); err != nil {
+						t.Errorf("RemoveGrant(victim): %v", err)
+					}
+				}()
+			}
+			wg.Wait()
+
+			_, grants, err := GetOwnerGrants(metaDir, "c")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			seen := make(map[string]int, len(grants))
+			for _, g := range grants {
+				if isVictim(g) {
+					t.Errorf("revoked grant resurrected: %+v", g)
+				}
+				seen[g.Target]++
+			}
+			// Every adder's grant must be present exactly once (no lost update,
+			// no duplicate), and nothing else should remain.
+			if len(grants) != tt.adders {
+				t.Fatalf("final grant count = %d, want %d (adds lost or duplicated): %+v", len(grants), tt.adders, grants)
+			}
+			for i := 0; i < tt.adders; i++ {
+				target := fmt.Sprintf("u%d@example.com", i)
+				if seen[target] != 1 {
+					t.Errorf("grant %s present %d times, want 1", target, seen[target])
+				}
+			}
+		})
 	}
 }

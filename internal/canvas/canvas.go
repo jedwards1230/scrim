@@ -7,6 +7,10 @@
 package canvas
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,8 +19,116 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 )
+
+// metaLocks serializes the read-modify-write of a single canvas's metadata
+// file (<id>.json). Create/SetOwner/AddGrant/RemoveGrant each do
+// read -> mutate -> writeMeta, and without a per-id lock two concurrent
+// writers race on the same file: a last-writer-wins over a stale read loses an
+// update -- most dangerously, a grant revoke (RemoveGrant) racing a concurrent
+// AddGrant/auto-share can RESURRECT a revoked share. Keyed by canvas id so
+// different canvases never contend; the same id is mutually exclusive across
+// every caller. Package-level so the serialization holds regardless of which
+// handler/goroutine drives the write, mirroring the whole-file mutex the
+// usertoken.Store and principal.Registry hold over their own RMW.
+var metaLocks keyedMutex
+
+// keyedMutex hands out a distinct mutex per string key, so callers can
+// serialize work on the same key while letting different keys run in parallel.
+// Entries are created on demand and never reclaimed -- the key space is canvas
+// ids, which is small and bounded, so the leak is negligible and dropping an
+// entry would reintroduce the very race the lock exists to prevent (same
+// rationale as internal/server's keyedMutex).
+type keyedMutex struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+// lock acquires (creating if needed) the mutex for key and returns its unlock
+// func for the caller to defer.
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = make(map[string]*sync.Mutex)
+	}
+	mu, ok := k.m[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		k.m[key] = mu
+	}
+	k.mu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
+
+// Grant kinds. A canvas is private by default (visible only to its owner);
+// each grant on a canvas widens that visibility for one class of principal.
+// These are the exact JSON values stored in a Grant.Kind and interpreted by
+// the identity package's CanView.
+const (
+	// GrantUser grants view access to one principal, matched on Grant.Target
+	// (their email/principal id).
+	GrantUser = "user"
+	// GrantGroup grants view access to every principal carrying Grant.Target as
+	// one of their groups claim values.
+	GrantGroup = "group"
+	// GrantEveryone grants view access to any authenticated principal (Target
+	// is empty).
+	GrantEveryone = "everyone"
+	// GrantLink grants view access to any caller presenting the matching share
+	// link secret; only the secret's SHA-256 hash is stored (Grant.LinkSecretHash),
+	// never the secret itself.
+	GrantLink = "link"
+)
+
+// Grant is one entry on a canvas's sharing list. It widens the canvas's
+// visibility beyond its owner for the class of principal named by Kind. Grants
+// are view-only; write access stays owner/admin-only.
+type Grant struct {
+	Kind           string    `json:"kind"`                       // "user" | "group" | "everyone" | "link"
+	Target         string    `json:"target,omitempty"`           // email (user) or group name (group); empty for everyone/link
+	LinkID         string    `json:"link_id,omitempty"`          // link kind only: public id in the share URL
+	LinkSecretHash string    `json:"link_secret_hash,omitempty"` // link kind only: SHA-256 hex of the link secret
+	CreatedBy      string    `json:"created_by,omitempty"`
+	CreatedAt      time.Time `json:"created_at,omitempty"`
+}
+
+// NewLink mints a fresh share-link identity: a short public link id (safe to
+// embed in a share URL) and a high-entropy raw secret (256 bits, base64url).
+// Only the secret's hash (see HashLinkSecret) is ever stored on a grant; the
+// raw secret is returned here ONCE for the caller to hand back to the sharer.
+func NewLink() (linkID, secret string, err error) {
+	linkID, err = randB64(9) // 12 base64url chars, ample to avoid collisions
+	if err != nil {
+		return "", "", err
+	}
+	secret, err = randB64(32) // 256 bits of entropy
+	if err != nil {
+		return "", "", err
+	}
+	return linkID, secret, nil
+}
+
+// randB64 returns n cryptographically-random bytes as unpadded base64url.
+func randB64(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("canvas: reading randomness: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// HashLinkSecret returns the lowercase-hex SHA-256 of a share-link secret, the
+// form stored in Grant.LinkSecretHash. The raw secret is never persisted; a
+// caller presenting a ?k=<secret> is checked by hashing it and comparing
+// (constant-time) against this value -- see internal/identity.CanView.
+func HashLinkSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
 
 // idPattern restricts canvas IDs to a safe, portable charset: no path
 // separators, no "..", no leading dot. This is what keeps IDs safe to use
@@ -52,6 +164,13 @@ type Info struct {
 	Color   string
 	Dir     string
 	ModTime time.Time
+	// Owner is the canvas's owning principal id (email; "admin" for
+	// bootstrap/legacy canvases). Empty when the canvas has no meta file yet --
+	// callers treat an empty owner as "admin" for enforcement (see
+	// internal/identity).
+	Owner string
+	// Grants is the canvas's sharing list. Nil/empty means owner-only.
+	Grants []Grant
 }
 
 // Dir returns the on-disk directory for the given canvas ID under
@@ -61,13 +180,19 @@ func Dir(canvasesDir, id string) string {
 }
 
 // Create makes a new canvas directory (idempotent -- an existing directory
-// is fine) and records its title/description/icon, if any are given, in an
-// external metadata file under metaDir (keyed by id, not a sidecar file
+// is fine) and records its title/description/icon/owner, if any are given, in
+// an external metadata file under metaDir (keyed by id, not a sidecar file
 // inside the canvas directory). This is a deliberate v0.2 behavior change
 // from the v0.1 ".scrim.json" sidecar: anything under canvasesDir is
 // servable and filesystem-watched, and metadata must be neither. It returns
 // the canvas's directory.
-func Create(canvasesDir, metaDir, id, title, description, icon string) (string, error) {
+//
+// owner is the canvas's owning principal id (email, or "admin" for
+// bootstrap/legacy). An empty owner leaves any existing owner in place rather
+// than clearing it, so re-recording title/description on a push never orphans
+// an already-owned canvas. Existing grants are always preserved -- Create
+// never drops a canvas's sharing state.
+func Create(canvasesDir, metaDir, id, title, description, icon, owner string) (string, error) {
 	if err := ValidateID(id); err != nil {
 		return "", err
 	}
@@ -75,13 +200,95 @@ func Create(canvasesDir, metaDir, id, title, description, icon string) (string, 
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // canvas dirs are user-owned working files, not sensitive
 		return "", fmt.Errorf("creating canvas dir %s: %w", id, err)
 	}
-	if title != "" || description != "" || icon != "" {
-		m := meta{Title: title, Description: description, Icon: icon}
-		if err := writeMeta(metaDir, id, m); err != nil {
-			return "", err
-		}
+	// Serialize the metadata read->mutate->write against every other writer of
+	// this id, so a concurrent grant op (or another Create) can't clobber it.
+	defer metaLocks.lock(id)()
+	existing := readMeta(metaDir, id)
+	m := meta{
+		Title:       title,
+		Description: description,
+		Icon:        icon,
+		Owner:       owner,
+		Grants:      existing.Grants,
+	}
+	if owner == "" {
+		m.Owner = existing.Owner
+	}
+	// Nothing worth persisting (a bare canvas with no metadata, no owner, no
+	// grants) leaves no metadata file at all -- matching the pre-owner
+	// behavior, so a delete of such a canvas has nothing to remove.
+	if m.Title == "" && m.Description == "" && m.Icon == "" && m.Owner == "" && len(m.Grants) == 0 {
+		return dir, nil
+	}
+	if err := writeMeta(metaDir, id, m); err != nil {
+		return "", err
 	}
 	return dir, nil
+}
+
+// GetOwnerGrants returns canvas id's owner and grants straight from its
+// metadata, tolerating a missing/empty metadata file as owner-only ("" owner,
+// no grants). Callers must validate id first is unnecessary -- it validates.
+func GetOwnerGrants(metaDir, id string) (owner string, grants []Grant, err error) {
+	if err := ValidateID(id); err != nil {
+		return "", nil, err
+	}
+	m := readMeta(metaDir, id)
+	return m.Owner, m.Grants, nil
+}
+
+// SetOwner writes canvas id's owner, preserving every other metadata field
+// (title/description/icon/grants). The write is atomic (temp+rename via
+// writeMeta).
+func SetOwner(metaDir, id, owner string) error {
+	if err := ValidateID(id); err != nil {
+		return err
+	}
+	defer metaLocks.lock(id)()
+	m := readMeta(metaDir, id)
+	m.Owner = owner
+	return writeMeta(metaDir, id, m)
+}
+
+// AddGrant appends g to canvas id's grants, preserving every other metadata
+// field. It does no de-duplication -- the caller (a grant endpoint, #52) is
+// responsible for rejecting a duplicate before calling. The write is atomic.
+func AddGrant(metaDir, id string, g Grant) error {
+	if err := ValidateID(id); err != nil {
+		return err
+	}
+	defer metaLocks.lock(id)()
+	m := readMeta(metaDir, id)
+	m.Grants = append(m.Grants, g)
+	return writeMeta(metaDir, id, m)
+}
+
+// RemoveGrant drops every grant on canvas id for which match reports true,
+// preserving every other metadata field, and returns how many were removed. A
+// zero return means no grant matched (the caller can surface a 404). The write
+// is atomic and is skipped entirely when nothing matched.
+func RemoveGrant(metaDir, id string, match func(Grant) bool) (removed int, err error) {
+	if err := ValidateID(id); err != nil {
+		return 0, err
+	}
+	defer metaLocks.lock(id)()
+	m := readMeta(metaDir, id)
+	kept := m.Grants[:0:0]
+	for _, g := range m.Grants {
+		if match(g) {
+			removed++
+			continue
+		}
+		kept = append(kept, g)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	m.Grants = kept
+	if err := writeMeta(metaDir, id, m); err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 // Delete removes a canvas directory and everything under it, along with its
@@ -243,11 +450,15 @@ func CopyMeta(metaDir, from, to string) error {
 }
 
 type meta struct {
-	Title       string `json:"title"`
+	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
 	// Icon is only populated here when explicitly given (e.g. `scrim add
 	// --icon`); an empty Icon means Info.Icon falls back to DefaultIcon(id).
 	Icon string `json:"icon,omitempty"`
+	// Owner is the owning principal id (email; "admin" for bootstrap/legacy).
+	Owner string `json:"owner,omitempty"`
+	// Grants is the canvas's sharing list; empty means owner-only.
+	Grants []Grant `json:"grants,omitempty"`
 }
 
 // metaPath returns the external metadata file path for id under metaDir.
@@ -320,6 +531,8 @@ func readInfo(canvasesDir, metaDir, id string) Info {
 		Color:       DefaultColor(id),
 		Dir:         dir,
 		ModTime:     lastModified(dir),
+		Owner:       m.Owner,
+		Grants:      m.Grants,
 	}
 }
 

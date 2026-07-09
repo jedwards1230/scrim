@@ -116,6 +116,19 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 		}
 	}
 
+	// When OIDC is on it is the whole read gate; a leftover --read-token or a
+	// widened --allow is then dead config that no longer restricts reads. Warn
+	// loudly (to stderr) so an operator doesn't believe a stale read-token/
+	// allowlist is still protecting anything (#49 hardening).
+	if *oidcIssuer != "" {
+		if *readToken != "" {
+			warn(stderr, "--read-token (SCRIM_READ_TOKEN) is ignored when OIDC is configured: OIDC is the entire read gate")
+		}
+		if strings.TrimSpace(*allow) != "" && strings.TrimSpace(*allow) != defaultHubAllowCSV {
+			warn(stderr, "--allow (SCRIM_HUB_ALLOW) is ignored when OIDC is configured: OIDC replaces the CIDR read gate")
+		}
+	}
+
 	srv, err := server.NewHub(cfg, opts)
 	if err != nil {
 		errOut(stderr, err)

@@ -94,6 +94,12 @@ type Config struct {
 	// contain tokens, URLs, claim values, or any request-derived text -- the
 	// caller wires this to the hub's scrubbed logging surface.
 	LogAuthFailure func(reason string)
+	// OnLogin, if non-nil, is called after a successful login with the
+	// authenticated principal's email, display name, and groups, so the hub can
+	// feed its principal registry. It keeps oidc decoupled from the registry (a
+	// nil-safe hook, not an import). Called synchronously in HandleCallback
+	// after the session is minted; it must not block.
+	OnLogin func(email, name string, groups []string)
 }
 
 // DefaultSessionTTL is the session lifetime used when Config.SessionTTL is
@@ -110,11 +116,17 @@ const minSessionSecretLen = 32
 type Authenticator struct {
 	oauth2   oauth2.Config
 	verifier *coreoidc.IDTokenVerifier
-	signer   signer
+
+	// sessionSigner and flowSigner are keyed from the same secret but carry
+	// distinct domain tags ("session" vs "flow"), so a session cookie can never
+	// verify as a flow cookie or vice versa (domain separation, #38 review).
+	sessionSigner signer
+	flowSigner    signer
 
 	sessionTTL time.Duration
 	secure     bool
 	logFailure func(reason string)
+	onLogin    func(email, name string, groups []string)
 
 	// now is time.Now in production; overridable in tests for deterministic
 	// expiry.
@@ -190,12 +202,14 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       withOpenID(cfg.Scopes),
 		},
-		verifier:   provider.Verifier(&coreoidc.Config{ClientID: cfg.ClientID}),
-		signer:     signer{key: secret},
-		sessionTTL: ttl,
-		secure:     cfg.SecureCookies,
-		logFailure: cfg.LogAuthFailure,
-		now:        time.Now,
+		verifier:      provider.Verifier(&coreoidc.Config{ClientID: cfg.ClientID}),
+		sessionSigner: signer{key: secret, domain: "session"},
+		flowSigner:    signer{key: secret, domain: "flow"},
+		sessionTTL:    ttl,
+		secure:        cfg.SecureCookies,
+		logFailure:    cfg.LogAuthFailure,
+		onLogin:       cfg.OnLogin,
+		now:           time.Now,
 	}, nil
 }
 
@@ -215,19 +229,19 @@ func withOpenID(scopes []string) []string {
 }
 
 // SessionFromRequest reports whether r carries a valid, unexpired,
-// correctly-signed session cookie, returning the authenticated subject when
-// it does. It is the hub read gate's authentication check and never mutates
-// r or w.
-func (a *Authenticator) SessionFromRequest(r *http.Request) (subject string, ok bool) {
+// correctly-signed session cookie, returning the authenticated Session (subject
+// plus the captured email/name/groups claims) when it does. It is the hub read
+// gate's authentication check and never mutates r or w.
+func (a *Authenticator) SessionFromRequest(r *http.Request) (Session, bool) {
 	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil {
-		return "", false
+		return Session{}, false
 	}
-	subject, err = a.signer.decodeSession(cookie.Value, a.now())
+	sess, err := a.sessionSigner.decodeSession(cookie.Value, a.now())
 	if err != nil {
-		return "", false
+		return Session{}, false
 	}
-	return subject, true
+	return sess, true
 }
 
 // HandleLogin initiates the authorization-code flow: it mints fresh state,
@@ -250,7 +264,7 @@ func (a *Authenticator) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.URL.Query().Get("return_to"))
 
 	fs := flowState{State: state, Nonce: nonce, Verifier: verifier, ReturnTo: returnTo}
-	a.setCookie(w, flowCookieName, a.signer.encodeFlow(fs, a.now().Add(flowTTL)), flowTTL)
+	a.setCookie(w, flowCookieName, a.flowSigner.encodeFlow(fs, a.now().Add(flowTTL)), flowTTL)
 
 	authURL := a.oauth2.AuthCodeURL(state,
 		coreoidc.Nonce(nonce),
@@ -276,7 +290,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, http.StatusBadRequest, "callback: missing flow cookie")
 		return
 	}
-	fs, err := a.signer.decodeFlow(cookie.Value, a.now())
+	fs, err := a.flowSigner.decodeFlow(cookie.Value, a.now())
 	if err != nil {
 		a.fail(w, r, http.StatusBadRequest, "callback: invalid or expired flow cookie")
 		return
@@ -327,16 +341,44 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-registration: any subject the IdP authenticated is accepted. The
-	// session keys on `sub` only; email/email_verified are intentionally not
-	// consulted, so an IdP returning email_verified=false does not lock the
-	// user out.
-	a.setCookie(w, SessionCookieName, a.signer.encodeSession(idToken.Subject, a.now().Add(a.sessionTTL)), a.sessionTTL)
+	// Capture the profile claims the hub's ownership + grant enforcement needs.
+	// The ACCESS decision still keys on `sub` only (auto-registration; any
+	// subject the IdP authenticated is accepted, and email_verified is
+	// deliberately not consulted -- an IdP returning email_verified=false does
+	// not lock anyone out). email/name/groups are best-effort profile data: an
+	// IdP that omits any of them yields empty fields, never a failed login.
+	var claims struct {
+		Email  string   `json:"email"`
+		Name   string   `json:"name"`
+		Groups []string `json:"groups"`
+	}
+	// A claims-extraction error is non-fatal: the token already verified, so
+	// fall back to an empty profile rather than rejecting an authenticated user.
+	_ = idToken.Claims(&claims)
+
+	sess := Session{
+		Subject: idToken.Subject,
+		Email:   claims.Email,
+		Name:    claims.Name,
+		Groups:  claims.Groups,
+	}
+	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, a.now().Add(a.sessionTTL)), a.sessionTTL)
+
+	// Feed the principal registry (display/autocomplete only; never consulted
+	// by enforcement). Nil-safe and best-effort by contract -- a registry write
+	// must never break a completed login.
+	if a.onLogin != nil {
+		a.onLogin(claims.Email, claims.Name, claims.Groups)
+	}
+
 	http.Redirect(w, r, sanitizeReturnTo(fs.ReturnTo), http.StatusFound)
 }
 
 // HandleLogout clears the session cookie and redirects to the hub root. It
-// clears only local state -- it does not initiate IdP single-logout.
+// clears only local state -- it does not initiate IdP single-logout. It is
+// registered POST-only (see routes.go): a plain GET logout is CSRF-able (any
+// page could force a logout via an <img> or link), so the route requires POST
+// and the mux answers a GET with 405.
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	a.clearCookie(w, SessionCookieName)
 	http.Redirect(w, r, "/", http.StatusFound)

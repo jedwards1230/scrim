@@ -612,13 +612,13 @@ func TestNewServerRegistersAllTools(t *testing.T) {
 		got[tool.Name] = true
 	}
 	// Local mode registers every tool, including path (local-only).
-	for _, want := range []string{"add", "list", "link", "copy_canvas", "path", "rm", "snap", "snaps", "revert", "status", "list_files", "read_file", "write_file", "edit_file", "push"} {
+	for _, want := range []string{"add", "list", "link", "copy_canvas", "path", "rm", "snap", "snaps", "revert", "status", "list_files", "read_file", "write_file", "edit_file", "push", "share_canvas", "list_grants"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
 		}
 	}
-	if len(got) != 15 {
-		t.Errorf("registered %d tools, want 15: %v", len(got), got)
+	if len(got) != 17 {
+		t.Errorf("registered %d tools, want 17: %v", len(got), got)
 	}
 }
 

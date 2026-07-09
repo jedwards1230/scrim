@@ -47,6 +47,13 @@ type IdP struct {
 	// Subject is the `sub` claim placed in issued ID tokens. Defaults to
 	// "user-abc"; set it to test a different identity.
 	Subject string
+	// Email, Name, and Groups, when set, are emitted as the corresponding ID
+	// token claims -- so a test can drive the hub's email-keyed ownership and
+	// group-based grants. Email defaults to "user@example.com" (see
+	// signIDToken); Name and Groups are omitted from the token when empty.
+	Email  string
+	Name   string
+	Groups []string
 	// ForceNonce, when non-empty, overrides the nonce echoed into the ID
 	// token, so a test can drive the callback's nonce-mismatch rejection.
 	ForceNonce string
@@ -189,6 +196,10 @@ func (i *IdP) handleToken(w http.ResponseWriter, r *http.Request) {
 func (i *IdP) signIDToken(nonce string) string {
 	now := time.Now()
 	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": i.kid}
+	email := i.Email
+	if email == "" {
+		email = "user@example.com"
+	}
 	claims := map[string]any{
 		"iss":   i.server.URL,
 		"sub":   i.Subject,
@@ -198,8 +209,17 @@ func (i *IdP) signIDToken(nonce string) string {
 		"nonce": nonce,
 		// A default Authentik mapping returns email_verified=false; include it
 		// to prove scrim accepts the login regardless (identity keys on sub).
-		"email":          "user@example.com",
+		"email":          email,
 		"email_verified": false,
+	}
+	// name/groups are optional profile claims -- emitted only when the test set
+	// them, so the "IdP omits them" path (empty session fields, still a valid
+	// login) stays exercised by default.
+	if i.Name != "" {
+		claims["name"] = i.Name
+	}
+	if len(i.Groups) > 0 {
+		claims["groups"] = i.Groups
 	}
 	hb, _ := json.Marshal(header)
 	cb, _ := json.Marshal(claims)

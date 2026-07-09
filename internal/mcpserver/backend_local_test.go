@@ -258,3 +258,49 @@ func TestLocalBackendCopyCanvas(t *testing.T) {
 		t.Errorf("overwrite copy: %v", err)
 	}
 }
+
+// TestLocalBackendShareAndListGrants exercises share_canvas/list_grants against
+// the on-disk canvas store: user/everyone/link grants are added and listed
+// (never leaking a link secret hash), and a link grant returns its secret once.
+func TestLocalBackendShareAndListGrants(t *testing.T) {
+	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 7799}
+	b := newLocalBackend(cfg)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(filepath.Join(cfg.CanvasesDir(), "c1"), 0o755); err != nil {
+		t.Fatalf("mkdir canvas: %v", err)
+	}
+
+	if _, err := b.ShareCanvas(ctx, "c1", "user", "bob@example.com"); err != nil {
+		t.Fatalf("ShareCanvas user: %v", err)
+	}
+	if _, err := b.ShareCanvas(ctx, "c1", "everyone", ""); err != nil {
+		t.Fatalf("ShareCanvas everyone: %v", err)
+	}
+	link, err := b.ShareCanvas(ctx, "c1", "link", "")
+	if err != nil {
+		t.Fatalf("ShareCanvas link: %v", err)
+	}
+	if link.LinkSecret == "" || link.LinkID == "" {
+		t.Errorf("link grant missing secret/id: %+v", link)
+	}
+
+	res, err := b.ListGrants(ctx, "c1")
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if len(res.Grants) != 3 {
+		t.Fatalf("listed %d grants, want 3: %+v", len(res.Grants), res.Grants)
+	}
+	// No grant entry ever carries a secret field (GrantEntry has none by design).
+	for _, g := range res.Grants {
+		if g.Kind == "link" && g.LinkID == "" {
+			t.Errorf("link grant listed without a public link id: %+v", g)
+		}
+	}
+
+	// A missing target for a user grant is rejected before any write.
+	if _, err := b.ShareCanvas(ctx, "missing-canvas", "user", "x@y.z"); err == nil {
+		t.Error("ShareCanvas on a missing canvas: err = nil, want an error")
+	}
+}

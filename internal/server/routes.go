@@ -38,6 +38,12 @@ func (s *Server) routes() http.Handler {
 		// wire. All bearer-gated via withHubGate (reads included -- the push
 		// token authorizes any method). Registered ONLY in hub mode so the
 		// default daemon gets zero new surface (hub_test.go invariant).
+		// Per-canvas machine-API reads are private-by-default enforced at the
+		// gate (withHubGate resolves claims + CanView by canvas id for any
+		// /api/canvases/{id}/… read under OIDC); writes are authorized there too
+		// (admin push token, or a user token whose owner CanWrite the canvas --
+		// see serveWrite/userTokenMayWrite), so these handlers need no per-route
+		// auth.
 		mux.HandleFunc("GET /api/canvases/{id}/files", s.handleListCanvasFiles)
 		mux.HandleFunc("GET /api/canvases/{id}/files/{path...}", s.handleReadCanvasFile)
 		mux.HandleFunc("PUT /api/canvases/{id}/files/{path...}", s.handleWriteCanvasFile)
@@ -45,6 +51,26 @@ func (s *Server) routes() http.Handler {
 		// every other machine-API write -- no extra gate code.
 		mux.HandleFunc("PATCH /api/canvases/{id}/files/{path...}", s.handleEditCanvasFile)
 		mux.HandleFunc("POST /api/canvases/{id}/copy", s.handleCopyCanvas)
+
+		// Per-canvas sharing grants (#52). GET is a read (visibility-gated like
+		// any other per-canvas read); POST/DELETE are writes authorized in
+		// withHubGate (owner/admin/CF-actor), with POST additionally bounded by a
+		// user token's allowance in the handler.
+		mux.HandleFunc("GET /api/canvases/{id}/grants", s.handleListGrants)
+		mux.HandleFunc("POST /api/canvases/{id}/grants", s.handleCreateGrant)
+		mux.HandleFunc("DELETE /api/canvases/{id}/grants/{grantRef}", s.handleDeleteGrant)
+
+		// Legacy-canvas ownership claim (#55). A write, but authorized for any
+		// authenticated principal in withHubGate (serveWrite's claim branch): it
+		// is how a logged-in principal takes ownership of an admin-owned canvas.
+		mux.HandleFunc("POST /api/canvases/{id}/claim", s.handleClaimCanvas)
+
+		// User-token management (#50). Hub-only. POST/DELETE are authorized in
+		// withHubGate for a browser session (or admin); GET lists the caller's
+		// own tokens. Raw secrets are returned only once, by POST.
+		mux.HandleFunc("POST /api/tokens", s.handleCreateToken)
+		mux.HandleFunc("GET /api/tokens", s.handleListTokens)
+		mux.HandleFunc("DELETE /api/tokens/{id}", s.handleRevokeToken)
 		mux.HandleFunc("GET /api/canvases/{id}/snapshots", s.handleListSnapshots)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots", s.handleCreateSnapshot)
 		mux.HandleFunc("POST /api/canvases/{id}/snapshots/{name}/revert", s.handleRevertSnapshot)
@@ -54,6 +80,12 @@ func (s *Server) routes() http.Handler {
 		// default daemon never serves it (hub_test.go invariant). Gate-exempt in
 		// withHubGate -- the spec is public and must be fetchable without a token.
 		mux.HandleFunc("GET "+openAPISpecPath, s.handleOpenAPISpec)
+
+		// A dependency-free liveness/readiness probe for orchestrators (e.g.
+		// kubelet). Hub-only like the machine API it fronts, and gate-exempt in
+		// withHubGate (exact match) so a cookie-less probe gets a 200 rather than
+		// the 401 an OIDC read gate would otherwise return (#47).
+		mux.HandleFunc("GET "+healthzPath, s.handleHealthz)
 
 		gate = s.withHubGate
 
@@ -65,7 +97,11 @@ func (s *Server) routes() http.Handler {
 		if s.oidcAuth != nil {
 			mux.HandleFunc("GET "+oidc.LoginPath, s.oidcAuth.HandleLogin)
 			mux.HandleFunc("GET "+oidc.CallbackPath, s.oidcAuth.HandleCallback)
-			mux.HandleFunc("GET "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
+			// Logout is POST-only: a plain GET logout is CSRF-able (any page
+			// could force a logout via an <img>/link), so the mux answers a GET
+			// with 405. isAuthPath still exempts the path (it matches by path,
+			// method-agnostic), so the POST reaches the handler.
+			mux.HandleFunc("POST "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
 		}
 	}
 

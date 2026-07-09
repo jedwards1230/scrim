@@ -8,9 +8,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
+	"github.com/jedwards1230/scrim/internal/principal"
+	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
 // HubOptions configures a Server constructed via NewHub -- the hub-specific
@@ -107,6 +110,13 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		readToken:   opts.ReadToken,
 		allowedNets: nets,
 	}
+	// The principal registry is a lazily-populated, display-only feeder (never
+	// read by enforcement). It lives under the hub's meta dir alongside the
+	// canvas sidecars.
+	s.principals = principal.New(s.metaDir)
+	// The user-token store backs the direct (machine) plane's per-principal
+	// credentials: a bearer that isn't the admin push token is resolved here.
+	s.tokens = usertoken.New(s.metaDir)
 
 	// OIDC discovery happens here so NewHub fails closed: a hub with OIDC
 	// configured but an unreachable/misconfigured issuer refuses to start
@@ -125,13 +135,52 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 				logging.Error(logging.CategoryAuth, errors.New(reason))
 			}
 		}
+		// Feed the principal registry on every successful login. Best-effort: a
+		// registry write failure is logged (scrubbed) but never fails the login
+		// -- the registry is display-only and enforcement never reads it.
+		if oc.OnLogin == nil {
+			registry := s.principals
+			oc.OnLogin = func(email, name string, groups []string) {
+				if err := registry.Observe(email, name, groups, principal.SourceLogin); err != nil {
+					logging.Error(logging.CategoryAuth, fmt.Errorf("principal registry: %w", err))
+				}
+			}
+		}
 		auth, err := oidc.New(context.Background(), oc)
 		if err != nil {
 			return nil, err
 		}
 		s.oidcAuth = auth
 	}
+
+	// One-time legacy-ownership sweep (#55): stamp owner="admin" on any canvas
+	// whose meta predates ownership, so every canvas has an explicit owner
+	// on disk. Idempotent -- a canvas that already has an owner is skipped -- so
+	// it is safe to run on every startup. Best-effort: a write failure is logged
+	// (scrubbed) but never blocks the hub from serving, since enforcement already
+	// treats an empty owner as admin-owned (ownerOrAdmin).
+	s.migrateLegacyOwners()
+
 	return s, nil
+}
+
+// migrateLegacyOwners assigns owner="admin" to every canvas that has no owner
+// recorded yet, creating an admin-owned meta file for a legacy canvas that has
+// none. Idempotent and best-effort (see NewHub).
+func (s *Server) migrateLegacyOwners() {
+	infos, err := canvas.List(s.canvasesDir, s.metaDir)
+	if err != nil {
+		logging.Error(logging.CategoryConfig, fmt.Errorf("legacy owner sweep: listing canvases: %w", err))
+		return
+	}
+	for _, info := range infos {
+		if info.Owner != "" {
+			continue
+		}
+		if err := canvas.SetOwner(s.metaDir, info.ID, "admin"); err != nil {
+			logging.Error(logging.CategoryConfig, errors.New("legacy owner sweep: recording owner failed"))
+		}
+	}
 }
 
 // parseCIDRs parses every entry in cidrs, returning an error on the first

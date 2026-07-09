@@ -6,7 +6,9 @@ import (
 	"time"
 )
 
-func testSigner() signer { return signer{key: []byte("a-test-hmac-secret-key-32-bytes!")} }
+func testSigner() signer {
+	return signer{key: []byte("a-test-hmac-secret-key-32-bytes!"), domain: "session"}
+}
 
 func TestSignerRoundTrip(t *testing.T) {
 	s := testSigner()
@@ -52,21 +54,51 @@ func TestSignerRejectsWrongKey(t *testing.T) {
 func TestSessionRoundTrip(t *testing.T) {
 	s := testSigner()
 	now := time.Unix(1_000_000, 0)
-	cookie := s.encodeSession("user-123", now.Add(time.Hour))
+	cookie := s.encodeSession(Session{
+		Subject: "user-123",
+		Email:   "user@example.com",
+		Name:    "User",
+		Groups:  []string{"eng", "ops"},
+	}, now.Add(time.Hour))
 
-	subject, err := s.decodeSession(cookie, now)
+	sess, err := s.decodeSession(cookie, now)
 	if err != nil {
 		t.Fatalf("decodeSession error = %v, want nil", err)
 	}
-	if subject != "user-123" {
-		t.Errorf("subject = %q, want %q", subject, "user-123")
+	if sess.Subject != "user-123" {
+		t.Errorf("subject = %q, want %q", sess.Subject, "user-123")
+	}
+	if sess.Email != "user@example.com" || sess.Name != "User" {
+		t.Errorf("session profile = %+v, want email/name round-tripped", sess)
+	}
+	if len(sess.Groups) != 2 || sess.Groups[0] != "eng" || sess.Groups[1] != "ops" {
+		t.Errorf("session groups = %v, want [eng ops]", sess.Groups)
+	}
+}
+
+// TestSignerDomainSeparation proves a session cookie cannot verify as a flow
+// cookie or vice versa, even though both signers use the same HMAC key -- the
+// #38 cross-cookie-replay hardening.
+func TestSignerDomainSeparation(t *testing.T) {
+	key := []byte("a-test-hmac-secret-key-32-bytes!")
+	sessionSigner := signer{key: key, domain: "session"}
+	flowSigner := signer{key: key, domain: "flow"}
+
+	sessionCookie := sessionSigner.sign([]byte(`{"sub":"u"}`))
+	if _, err := flowSigner.verify(sessionCookie); err == nil {
+		t.Error("flow signer verified a session cookie, want a domain-separation rejection")
+	}
+
+	flowCookie := flowSigner.sign([]byte(`{"state":"s"}`))
+	if _, err := sessionSigner.verify(flowCookie); err == nil {
+		t.Error("session signer verified a flow cookie, want a domain-separation rejection")
 	}
 }
 
 func TestSessionExpiry(t *testing.T) {
 	s := testSigner()
 	issued := time.Unix(1_000_000, 0)
-	cookie := s.encodeSession("user-123", issued.Add(time.Hour))
+	cookie := s.encodeSession(Session{Subject: "user-123"}, issued.Add(time.Hour))
 
 	// Exactly at expiry is already invalid (>=), as is anything after.
 	for _, now := range []time.Time{issued.Add(time.Hour), issued.Add(2 * time.Hour)} {
@@ -83,7 +115,7 @@ func TestSessionExpiry(t *testing.T) {
 func TestSessionRejectsEmptySubject(t *testing.T) {
 	s := testSigner()
 	now := time.Unix(1_000_000, 0)
-	cookie := s.encodeSession("", now.Add(time.Hour))
+	cookie := s.encodeSession(Session{}, now.Add(time.Hour))
 	if _, err := s.decodeSession(cookie, now); err == nil {
 		t.Error("decodeSession with empty subject error = nil, want rejection")
 	}

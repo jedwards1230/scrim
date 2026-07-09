@@ -69,6 +69,40 @@ type backend interface {
 	// error unless overwrite is set, in which case the target is snapshotted
 	// first (see #43).
 	CopyCanvas(ctx context.Context, from, to string, overwrite bool) (CopyInfo, error)
+	// ShareCanvas adds a view-only grant to canvas id (see #52). kind is one of
+	// canvas.Grant{User,Group,Everyone,Link}; target is the email/group for
+	// user/group kinds and empty otherwise. In hub mode the hub enforces
+	// ownership and the calling token's allowance and returns an actionable
+	// rejection; in local mode the grant is applied directly. A link grant mints
+	// a fresh secret returned ONCE in GrantResult.LinkSecret.
+	ShareCanvas(ctx context.Context, id, kind, target string) (GrantResult, error)
+	// ListGrants returns canvas id's owner and current grants, never any
+	// share-link secret or hash.
+	ListGrants(ctx context.Context, id string) (GrantsResult, error)
+}
+
+// GrantResult is the outcome of a ShareCanvas call: the grant that was added,
+// plus -- for a link grant only -- the raw secret, returned ONCE (only its hash
+// is stored). LinkSecret is empty for every non-link kind.
+type GrantResult struct {
+	Kind       string
+	Target     string
+	LinkID     string
+	LinkSecret string
+}
+
+// GrantEntry is one secret-free grant in a ListGrants result.
+type GrantEntry struct {
+	Kind   string
+	Target string
+	LinkID string
+}
+
+// GrantsResult is the outcome of a ListGrants call: the canvas's owner and its
+// current grants, carrying no secrets.
+type GrantsResult struct {
+	Owner  string
+	Grants []GrantEntry
 }
 
 // CanvasInfo is one canvas as returned by List/Add. URL is the view URL

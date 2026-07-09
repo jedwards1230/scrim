@@ -474,3 +474,52 @@ func TestHubBackendNearCapIncompressibleRoundTrip(t *testing.T) {
 		t.Errorf("near-cap incompressible round-trip mismatch (%d vs %d bytes)", len(got), len(raw))
 	}
 }
+
+// TestHubBackendGrantsRoundTrip is the #52 wire-contract test: share_canvas and
+// list_grants against a real in-process hub prove the hubBackend and the hub's
+// grant routes agree on paths, payloads, and the once-only link secret.
+func TestHubBackendGrantsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newHubBackendAgainstRealHub(t)
+
+	if _, err := b.Add(ctx, "g1", "", "", ""); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Share to a user and to everyone (admin bearer is unrestricted).
+	if _, err := b.ShareCanvas(ctx, "g1", "user", "bob@example.com"); err != nil {
+		t.Fatalf("ShareCanvas user: %v", err)
+	}
+	link, err := b.ShareCanvas(ctx, "g1", "link", "")
+	if err != nil {
+		t.Fatalf("ShareCanvas link: %v", err)
+	}
+	if link.LinkSecret == "" {
+		t.Error("hub did not return a link secret on a link grant")
+	}
+
+	res, err := b.ListGrants(ctx, "g1")
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if res.Owner != "admin" {
+		t.Errorf("owner = %q, want admin (created via the admin push token)", res.Owner)
+	}
+	if len(res.Grants) != 2 {
+		t.Fatalf("listed %d grants, want 2: %+v", len(res.Grants), res.Grants)
+	}
+	// list_grants never leaks a secret: GrantEntry has no secret field, and the
+	// link grant appears only by its public id.
+	var sawLink bool
+	for _, g := range res.Grants {
+		if g.Kind == "link" {
+			sawLink = true
+			if g.LinkID == "" {
+				t.Error("link grant listed without a public link id")
+			}
+		}
+	}
+	if !sawLink {
+		t.Error("link grant not present in list")
+	}
+}
