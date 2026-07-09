@@ -7,12 +7,15 @@ import (
 	"github.com/jedwards1230/scrim/internal/principal"
 )
 
-// principalLister is the seam GET /api/principals reads its autocomplete
-// suggestions from. It resolves to the hub's lazily-populated, display-only
-// principal registry (*principal.Registry) today; #54 will swap in an
-// Authentik directory driver behind this same interface without touching the
-// handler. Kept deliberately minimal -- a single List() -- so the alternate
-// driver has the smallest possible contract to satisfy.
+// principalLister is the formal feeder seam GET /api/principals reads its
+// autocomplete suggestions from. It resolves to the hub's lazily-populated,
+// display-only principal registry (*principal.Registry) when Authentik is
+// unconfigured, or to a compositeLister merging that registry with the
+// read-only Authentik directory driver (#54) when it is -- see directory.go for
+// the three feeder slots (lazy / Authentik / documented-only SCIM) and the
+// merge rules. Kept deliberately minimal -- a single List() -- so any driver
+// has the smallest possible contract to satisfy, and so enforcement (which
+// reads verified claims, never this seam) can never accidentally depend on it.
 type principalLister interface {
 	List() []principal.Principal
 }

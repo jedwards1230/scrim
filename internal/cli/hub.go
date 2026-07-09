@@ -12,6 +12,7 @@ import (
 
 	"time"
 
+	"github.com/jedwards1230/scrim/internal/authentik"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/server"
@@ -69,6 +70,16 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 	sessionTTL := fs.Duration("oidc-session-ttl", envDurationOr("SCRIM_OIDC_SESSION_TTL", oidc.DefaultSessionTTL), "how long an OIDC session cookie stays valid (env SCRIM_OIDC_SESSION_TTL)")
 	secureCookies := fs.Bool("oidc-secure-cookies", envBoolOr("SCRIM_OIDC_SECURE_COOKIES", true), "set the Secure attribute on OIDC cookies; leave true in production, pass =false only for a plain-HTTP local test hub (env SCRIM_OIDC_SECURE_COOKIES)")
 
+	// Authentik directory feeder (all optional): setting BOTH --authentik-url
+	// and --authentik-token turns on a read-only pull of users/groups that
+	// enriches the share-dialog autocomplete (GET /api/principals) with display
+	// names and groups. It is cached in memory only, never persisted, and never
+	// consulted for access enforcement -- unset (or unreachable) leaves
+	// autocomplete on the lazily-observed registry alone.
+	authentikURL := fs.String("authentik-url", os.Getenv("SCRIM_AUTHENTIK_URL"), "optional Authentik base URL; with --authentik-token, turns on the read-only directory feeder for share-dialog autocomplete (env SCRIM_AUTHENTIK_URL)")
+	authentikToken := fs.String("authentik-token", os.Getenv("SCRIM_AUTHENTIK_TOKEN"), "read-only Authentik API token for the directory feeder (env SCRIM_AUTHENTIK_TOKEN)")
+	authentikTTL := fs.Duration("authentik-cache-ttl", envDurationOr("SCRIM_AUTHENTIK_CACHE_TTL", authentik.DefaultTTL), "how long pulled Authentik directory entries are cached in memory (env SCRIM_AUTHENTIK_CACHE_TTL)")
+
 	if err := parseArgs(fs, args); err != nil {
 		return exitForParseErr(err)
 	}
@@ -114,6 +125,21 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 			SessionTTL:    *sessionTTL,
 			SecureCookies: *secureCookies,
 		}
+	}
+
+	// The directory feeder needs BOTH a URL and a token to do anything; only
+	// build it when both are present. A malformed URL becomes a startup error
+	// inside server.NewHub (authentik.New), mirroring the CIDR-parse behavior.
+	if *authentikURL != "" && *authentikToken != "" {
+		opts.Authentik = &authentik.Config{
+			BaseURL: *authentikURL,
+			Token:   *authentikToken,
+			TTL:     *authentikTTL,
+		}
+	} else if (*authentikURL != "") != (*authentikToken != "") {
+		// Exactly one of the pair is set: the feeder stays OFF. Warn so an
+		// operator who set only half doesn't believe autocomplete is enriched.
+		warn(stderr, "--authentik-url and --authentik-token must BOTH be set to enable the directory feeder; it is disabled")
 	}
 
 	// When OIDC is on it is the whole read gate; a leftover --read-token or a
