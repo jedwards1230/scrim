@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -80,7 +81,8 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 		owner = ownerFromClaims(claimsFrom(r.Context()))
 	}
 	if _, err := canvas.Create(s.canvasesDir, s.metaDir, body.ID, body.Title, body.Description, body.Icon, owner); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("create canvas: writing canvas failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to create canvas")
 		return
 	}
 	if s.isHub() && isNew {
@@ -88,7 +90,8 @@ func (s *Server) handleCreateCanvas(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := canvas.Get(s.canvasesDir, s.metaDir, body.ID)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("create canvas: reading canvas back failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to read canvas")
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.canvasResponse(info))
@@ -171,7 +174,7 @@ func (s *Server) applyAutoShare(id string, tok *usertoken.Token) {
 			g.CreatedAt = now
 		}
 		if err := canvas.AddGrant(s.metaDir, id, g); err != nil {
-			logging.Error(logging.CategoryAuth, fmt.Errorf("applying auto-share grant: %w", err))
+			logging.Error(logging.CategoryAuth, errors.New("applying auto-share grant failed"))
 			return
 		}
 	}

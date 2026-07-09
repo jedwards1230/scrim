@@ -1,9 +1,11 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
+	"github.com/jedwards1230/scrim/internal/logging"
 )
 
 // handleClaimCanvas serves POST /api/canvases/{id}/claim (hub only, #55): a
@@ -35,7 +37,8 @@ func (s *Server) handleClaimCanvas(w http.ResponseWriter, r *http.Request) {
 
 	owner, _, err := canvas.GetOwnerGrants(s.metaDir, id)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("claim canvas: reading canvas owner failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to read canvas owner")
 		return
 	}
 	current := ownerOrAdmin(owner)
@@ -51,6 +54,7 @@ func (s *Server) handleClaimCanvas(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := canvas.SetOwner(s.metaDir, id, c.Email); err != nil {
+		logging.Error(logging.CategoryHTTP, errors.New("claim canvas: recording new owner failed"))
 		writeJSONError(w, http.StatusInternalServerError, "recording new owner failed")
 		return
 	}

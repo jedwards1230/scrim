@@ -178,7 +178,7 @@ func (s *Server) migrateLegacyOwners() {
 			continue
 		}
 		if err := canvas.SetOwner(s.metaDir, info.ID, "admin"); err != nil {
-			logging.Error(logging.CategoryConfig, fmt.Errorf("legacy owner sweep: %w", err))
+			logging.Error(logging.CategoryConfig, errors.New("legacy owner sweep: recording owner failed"))
 		}
 	}
 }

@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/apiclient"
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/identity"
+	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/principal"
 )
 
@@ -30,9 +32,13 @@ type createGrantResponse struct {
 }
 
 // handleListGrants serves GET /api/canvases/{id}/grants (hub only): the canvas's
-// owner and grants, secret-free. Visibility is already enforced at the gate
-// (serveOIDCRead CanView / CIDR / admin bearer), so any caller who reaches here
-// may see who the canvas is shared with.
+// owner and grants, secret-free. The GATE only proved the caller may VIEW the
+// canvas -- and a share-link secret conveys exactly that, a view of the canvas,
+// NOT of its access-control list. So a link-secret-only (anonymous) viewer, or
+// any caller who reached the view via an "everyone" grant rather than being an
+// explicit grantee, must not learn the owner's email or the other grantees:
+// only the owner, an admin, or a principal that is itself an explicit
+// user/group grantee may enumerate the ACL. Everyone else gets 403.
 func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := canvas.ValidateID(id); err != nil {
@@ -45,7 +51,12 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, grants, err := canvas.GetOwnerGrants(s.metaDir, id)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("list grants: reading canvas metadata failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to read canvas grants")
+		return
+	}
+	if !canSeeACL(ownerOrAdmin(owner), grants, claimsFrom(r.Context())) {
+		writeJSONError(w, http.StatusForbidden, "not permitted to view this canvas's sharing list")
 		return
 	}
 	pub := publicGrants(grants)
@@ -53,6 +64,44 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 		pub = []apiclient.CanvasGrant{}
 	}
 	writeJSON(w, http.StatusOK, grantsResponse{Owner: ownerOrAdmin(owner), Grants: pub})
+}
+
+// canSeeACL reports whether claims may enumerate a canvas's full sharing list
+// (its owner email and every grantee target) -- a strictly narrower permission
+// than viewing the canvas. Admin, the owner, or a principal that is itself an
+// explicit user/group grantee may see it; a link-secret-only (anonymous)
+// viewer, or a caller admitted only by an "everyone" grant, may view the canvas
+// but may not learn who else it is shared with.
+func canSeeACL(owner string, grants []canvas.Grant, c identity.Claims) bool {
+	if c.Admin {
+		return true
+	}
+	if c.Email != "" && c.Email == owner {
+		return true
+	}
+	for _, g := range grants {
+		switch g.Kind {
+		case canvas.GrantUser:
+			if c.Email != "" && c.Email == g.Target {
+				return true
+			}
+		case canvas.GrantGroup:
+			if g.Target != "" && containsGroup(c.Groups, g.Target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// containsGroup reports whether target is one of groups.
+func containsGroup(groups []string, target string) bool {
+	for _, g := range groups {
+		if g == target {
+			return true
+		}
+	}
+	return false
 }
 
 // handleCreateGrant serves POST /api/canvases/{id}/grants (hub only): it adds a
@@ -137,7 +186,8 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request) {
 		resp.LinkSecret = secret
 	}
 	if err := canvas.AddGrant(s.metaDir, id, g); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("create grant: writing canvas metadata failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to record grant")
 		return
 	}
 	// Record a user/group grant target in the display-only registry (best-effort).
@@ -170,7 +220,8 @@ func (s *Server) handleDeleteGrant(w http.ResponseWriter, r *http.Request) {
 		return grantMatchesRef(g, ref)
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		logging.Error(logging.CategoryHTTP, errors.New("delete grant: writing canvas metadata failed"))
+		writeJSONError(w, http.StatusInternalServerError, "failed to remove grant")
 		return
 	}
 	if removed == 0 {

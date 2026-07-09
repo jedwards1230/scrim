@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
@@ -97,6 +100,61 @@ func TestGrantRoutesRoundTrip(t *testing.T) {
 	// A second delete of the same ref is 404.
 	if rec := do(t, s, adminReq(http.MethodDelete, "/api/canvases/c1/grants/"+linkResp.LinkID, nil)); rec.Code != http.StatusNotFound {
 		t.Errorf("delete missing grant = %d, want 404", rec.Code)
+	}
+}
+
+// TestListGrantsRedactedFromLinkOnlyViewer proves a share-link secret conveys a
+// view of the CANVAS but not of its ACL (M1): an anonymous caller presenting a
+// valid ?k=<secret> can see the canvas, yet a GET of its grants is refused
+// (403) and discloses neither the owner nor any grantee -- while the owner
+// (admin here) still enumerates the full list.
+func TestListGrantsRedactedFromLinkOnlyViewer(t *testing.T) {
+	s, _, _ := newOIDCHub(t)
+
+	if rec := do(t, s, adminReq(http.MethodPost, "/api/canvases", []byte(`{"id":"c1"}`))); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+	// A user grantee plus a share link: the ACL now names a real grantee we can
+	// assert never leaks to the link-only viewer.
+	if rec := do(t, s, adminReq(http.MethodPost, "/api/canvases/c1/grants", []byte(`{"kind":"user","target":"bob@example.com"}`))); rec.Code != http.StatusCreated {
+		t.Fatalf("add user grant = %d", rec.Code)
+	}
+	rec := do(t, s, adminReq(http.MethodPost, "/api/canvases/c1/grants", []byte(`{"kind":"link"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add link grant = %d", rec.Code)
+	}
+	var link struct {
+		LinkSecret string `json:"link_secret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &link); err != nil || link.LinkSecret == "" {
+		t.Fatalf("link secret missing: %v (%s)", err, rec.Body.String())
+	}
+
+	// Write servable content so the link genuinely resolves to a canvas view.
+	if err := os.WriteFile(filepath.Join(s.canvasesDir, "c1", "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The link secret DOES convey a view of the canvas itself.
+	viewReq := httptest.NewRequest(http.MethodGet, "/c/c1/?k="+link.LinkSecret, nil)
+	viewReq.Header.Set("Accept", "text/html")
+	if rec := do(t, s, viewReq); rec.Code != http.StatusOK {
+		t.Fatalf("link-only canvas view = %d, want 200 (link conveys canvas view)", rec.Code)
+	}
+
+	// ...but NOT the ACL: enumerating grants is refused, leaking neither the
+	// owner nor the grantee.
+	grantsRec := do(t, s, httptest.NewRequest(http.MethodGet, "/api/canvases/c1/grants?k="+link.LinkSecret, nil))
+	if grantsRec.Code != http.StatusForbidden {
+		t.Fatalf("link-only grants list = %d, want 403", grantsRec.Code)
+	}
+	if body := grantsRec.Body.String(); strings.Contains(body, "bob@example.com") || strings.Contains(body, "admin") {
+		t.Errorf("link-only grants 403 leaked ACL content: %s", body)
+	}
+
+	// The owner-equivalent admin still enumerates the full ACL.
+	if rec := do(t, s, adminReq(http.MethodGet, "/api/canvases/c1/grants", nil)); rec.Code != http.StatusOK {
+		t.Errorf("admin grants list = %d, want 200", rec.Code)
 	}
 }
 
