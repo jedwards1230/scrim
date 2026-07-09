@@ -7,7 +7,9 @@
 package canvas
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -50,6 +52,31 @@ type Grant struct {
 	LinkSecretHash string    `json:"link_secret_hash,omitempty"` // link kind only: SHA-256 hex of the link secret
 	CreatedBy      string    `json:"created_by,omitempty"`
 	CreatedAt      time.Time `json:"created_at,omitempty"`
+}
+
+// NewLink mints a fresh share-link identity: a short public link id (safe to
+// embed in a share URL) and a high-entropy raw secret (256 bits, base64url).
+// Only the secret's hash (see HashLinkSecret) is ever stored on a grant; the
+// raw secret is returned here ONCE for the caller to hand back to the sharer.
+func NewLink() (linkID, secret string, err error) {
+	linkID, err = randB64(9) // 12 base64url chars, ample to avoid collisions
+	if err != nil {
+		return "", "", err
+	}
+	secret, err = randB64(32) // 256 bits of entropy
+	if err != nil {
+		return "", "", err
+	}
+	return linkID, secret, nil
+}
+
+// randB64 returns n cryptographically-random bytes as unpadded base64url.
+func randB64(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("canvas: reading randomness: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // HashLinkSecret returns the lowercase-hex SHA-256 of a share-link secret, the
