@@ -15,7 +15,7 @@ func TestIsLoopbackHost(t *testing.T) {
 		{name: "ipv6 loopback", host: "::1", want: true},
 		{name: "ipv4 unspecified binds all interfaces", host: "0.0.0.0", want: false},
 		{name: "ipv6 unspecified binds all interfaces", host: "::", want: false},
-		{name: "specific LAN ipv4", host: "192.168.8.50", want: false},
+		{name: "specific LAN ipv4", host: "192.0.2.50", want: false},
 		{name: "specific ipv6", host: "2001:db8::1", want: false},
 		{name: "arbitrary hostname is not loopback", host: "scrim-host.lan", want: false},
 	}
@@ -53,7 +53,7 @@ func TestMaybeStartLoopbackNoOp(t *testing.T) {
 // entire contract: decouple "bound beyond loopback" from "advertises on
 // mDNS".
 func TestMaybeStartNoMDNSNoOp(t *testing.T) {
-	tests := []string{"0.0.0.0", "192.168.8.50", "127.0.0.1"}
+	tests := []string{"0.0.0.0", "192.0.2.50", "127.0.0.1"}
 	for _, host := range tests {
 		t.Run(host, func(t *testing.T) {
 			adv, err := MaybeStart(host, 7777, true)
@@ -129,11 +129,11 @@ func TestMaybeStartNonLoopbackAttemptsStart(t *testing.T) {
 func TestAdvertiseIPsRejectsAllLoopbackInterfaces(t *testing.T) {
 	// A concrete non-loopback literal is returned as-is without touching
 	// the network/interface list at all.
-	ips, err := advertiseIPs("192.168.8.50")
+	ips, err := advertiseIPs("192.0.2.50")
 	if err != nil {
 		t.Fatalf("advertiseIPs() error = %v", err)
 	}
-	if len(ips) != 1 || ips[0].String() != "192.168.8.50" {
-		t.Fatalf("advertiseIPs() = %v, want [192.168.8.50]", ips)
+	if len(ips) != 1 || ips[0].String() != "192.0.2.50" {
+		t.Fatalf("advertiseIPs() = %v, want [192.0.2.50]", ips)
 	}
 }

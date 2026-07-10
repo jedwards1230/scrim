@@ -84,11 +84,11 @@ func TestURLLines(t *testing.T) {
 		},
 		{
 			name:   "non-loopback host: mDNS line first, plain fallback second",
-			host:   "192.168.8.50",
-			rawURL: "http://192.168.8.50:7777/c/report/?t=abc123",
+			host:   "192.0.2.50",
+			rawURL: "http://192.0.2.50:7777/c/report/?t=abc123",
 			want: []string{
 				"http://scrim.local:7777/c/report/?t=abc123",
-				"http://192.168.8.50:7777/c/report/?t=abc123",
+				"http://192.0.2.50:7777/c/report/?t=abc123",
 			},
 		},
 		{
@@ -133,11 +133,11 @@ func TestPrintURLLines(t *testing.T) {
 		},
 		{
 			name:   "non-loopback: both mDNS and plain lines printed",
-			host:   "192.168.8.50",
-			rawURL: "http://192.168.8.50:7777/?t=xyz",
+			host:   "192.0.2.50",
+			rawURL: "http://192.0.2.50:7777/?t=xyz",
 			wantContains: []string{
 				"http://scrim.local:7777/?t=xyz",
-				"http://192.168.8.50:7777/?t=xyz",
+				"http://192.0.2.50:7777/?t=xyz",
 			},
 			wantLineCount: 2,
 		},
@@ -169,13 +169,13 @@ func TestRewriteURLHost(t *testing.T) {
 	}{
 		{
 			name:    "replaces host, keeps port/path/query",
-			rawURL:  "http://192.168.8.50:7777/c/report/?t=abc",
+			rawURL:  "http://192.0.2.50:7777/c/report/?t=abc",
 			newHost: "scrim.local",
 			want:    "http://scrim.local:7777/c/report/?t=abc",
 		},
 		{
 			name:    "no port in host",
-			rawURL:  "http://192.168.8.50/",
+			rawURL:  "http://192.0.2.50/",
 			newHost: "scrim.local",
 			want:    "http://scrim.local/",
 		},

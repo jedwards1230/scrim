@@ -23,8 +23,8 @@ func TestPrimaryURL(t *testing.T) {
 		},
 		{
 			name:     "mDNS active (LAN host): first line (scrim.local) used, not the raw URL",
-			host:     "192.168.8.50",
-			rawURL:   "http://192.168.8.50:7777/c/report/?t=abc123",
+			host:     "192.0.2.50",
+			rawURL:   "http://192.0.2.50:7777/c/report/?t=abc123",
 			wantOpen: "http://scrim.local:7777/c/report/?t=abc123",
 		},
 		{
