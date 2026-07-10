@@ -254,7 +254,8 @@ an `Accept-Encoding: gzip` request; the hub inflates/deflates transparently
 
 ### Identity on the streamable-HTTP transport
 
-Two identity layers apply to `--http`, and they're orthogonal:
+Two identity layers apply to `--http`. They compose, but for per-user
+attribution a validated OAuth token wins (see precedence below):
 
 - **ContextForge header-trust** (existing): when scrim mcp sits behind a
   trusted gateway, it verifies HMAC-signed `X-Forwarded-User-*` headers
@@ -270,8 +271,13 @@ Two identity layers apply to `--http`, and they're orthogonal:
   own service identity, auto-shared to the human, rather than depending on
   per-request forwarded identity.
 - **OAuth 2.0 resource mode** (below): authenticates the *client connection*
-  itself (the MCP host presenting a bearer JWT), independent of which end
-  user or service the ContextForge layer attributes a call to.
+  itself (the MCP host presenting a bearer JWT) and, on the same path, derives
+  per-user attribution from that validated token's `sub`/`email`/`groups`,
+  re-emitting it to the hub as the same `X-Scrim-Actor-*` headers. Because the
+  JWT is independently verified (signature/issuer/audience/expiry), the
+  JWT-derived actor is **authoritative**: when a request carries a valid bearer
+  the HMAC header plane above is not consulted, and it is only the fallback when
+  OAuth is off.
 
 ### OAuth 2.0 resource mode (`--http` only)
 

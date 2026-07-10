@@ -233,6 +233,23 @@ func (o *oauthValidator) middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Derive per-user attribution from the now-validated token and stash it in
+		// the request context. Because the token has been independently verified
+		// (signature/issuer/audience/expiry), this actor is AUTHORITATIVE over the
+		// separate HMAC X-Forwarded-User-* header plane -- actorContext promotes it
+		// to the final actor the hub is attributed to.
+		//
+		// Guard on a non-empty subject: coreoidc verifies sig/iss/aud/exp but does
+		// NOT enforce `sub` presence, so a valid-but-sub-less token yields an actor
+		// with an empty ID. Since OAuth precedence is absolute, stashing that empty
+		// actor would SHADOW a valid HMAC actor and emit blank X-Scrim-Actor-*
+		// headers -- an attribution downgrade, not a fallback. Only stashing when a
+		// subject is present keeps "OAuth wins" strictly an UPGRADE: a sub-less
+		// token falls through to the HMAC plane (or anonymous), fail-closed.
+		if a := actorFromToken(idt); a.ID != "" {
+			r = r.WithContext(ctxWithOAuthActor(r.Context(), a))
+		}
+
 		// Scope gate: derive the single scope this request requires -- the
 		// most-privileged across every tools/call in the (possibly batched)
 		// JSON-RPC body -- and check the already-verified token holds it.
@@ -289,6 +306,52 @@ func tokenScopeClaim(idt *coreoidc.IDToken) []string {
 		return nil
 	}
 	return strings.Fields(c.Scope)
+}
+
+// actorFromToken derives the attribution actor from an ALREADY-VALIDATED OAuth
+// token. The subject (`sub`) claim is the stable principal identifier and is
+// read directly from the verified IDToken's exported Subject field (never
+// re-decoded). Email and groups are a best-effort enrichment decoded from the
+// remaining claims and each yielded INDEPENDENTLY: a decode failure on one never
+// costs the other, and never fails the request -- the token has already
+// validated -- so at worst the actor is keyed by subject with an empty email
+// and nil groups.
+func actorFromToken(idt *coreoidc.IDToken) actor {
+	a := actor{ID: idt.Subject}
+	// Decode email on its own single-field struct so an exotic `groups` shape
+	// (e.g. a number array or an object) can never fail the unmarshal and drop a
+	// perfectly valid email alongside it.
+	var ec struct {
+		Email string `json:"email"`
+	}
+	if idt.Claims(&ec) == nil {
+		a.Email = ec.Email
+	}
+	a.Groups = tokenGroupsClaim(idt)
+	return a
+}
+
+// tokenGroupsClaim extracts the `groups` claim from a validated token. The
+// standard OIDC shape is a JSON array; a deployment that instead emits it as a
+// delimited string is handled defensively (the array decode fails, so a second
+// pass splits the string via parseGroups). Any other JSON shape (a number array,
+// an object, ...) fails both decodes and yields nil -- attribution degrades to
+// no groups rather than dropping the actor. An empty or absent claim leaves
+// Groups nil.
+func tokenGroupsClaim(idt *coreoidc.IDToken) []string {
+	var arr struct {
+		Groups []string `json:"groups"`
+	}
+	if idt.Claims(&arr) == nil && len(arr.Groups) > 0 {
+		return arr.Groups
+	}
+	var str struct {
+		Groups string `json:"groups"`
+	}
+	if idt.Claims(&str) == nil {
+		return parseGroups(str.Groups)
+	}
+	return nil
 }
 
 // toolScopes maps each MCP tool to the scope its invocation requires. Read tools
