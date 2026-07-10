@@ -18,7 +18,7 @@ import (
 // hub attributes it to the admin push token alone (no per-request actor). This
 // is the fail-closed default -- a misconfigured deployment forwards NO identity
 // rather than a spoofable one.
-const IdentitySecretEnv = "SCRIM_MCP_IDENTITY_HMAC_SECRET"
+const IdentitySecretEnv = "SCRIM_MCP_IDENTITY_HMAC_SECRET" //nolint:gosec // G101: env var name, not a hardcoded credential
 
 // Forwarded-identity request headers (trusted gateway → scrim-mcp). A trusted
 // reverse proxy / gateway authenticates the end user and forwards the resulting

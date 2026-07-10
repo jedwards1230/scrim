@@ -1,0 +1,44 @@
+# golangci-lint config: the default (standard) linter set plus gosec.
+#
+# Kept intentionally minimal — the point is to add security static analysis
+# (gosec) on top of golangci-lint's standard set without churning the other
+# linters. Individual false positives are annotated inline with //nolint:gosec.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        # G104 (unhandled errors) fully overlaps errcheck, which is already in
+        # the standard set and is stricter; keeping both just double-reports the
+        # same lines (already handled via //nolint:errcheck).
+        - G104
+        # gosec's taint-analysis rules (G703 path traversal, G704 SSRF,
+        # G705 XSS, G122 Walk symlink TOCTOU) are experimental and their
+        # findings shift between gosec/golangci-lint patch releases. Every hit
+        # here is a false positive on a path already guarded elsewhere
+        # (safeJoin / resolveServablePath traversal checks, HMAC-validated
+        # identity, server-authored SVG, operator-supplied push URLs). Disabling
+        # them keeps the lint result stable across golangci-lint versions rather
+        # than chasing version-variable inline directives.
+        - G703
+        - G704
+        - G705
+        - G122
+  exclusions:
+    rules:
+      # gosec's own default is -tests=false; golangci-lint runs it over test
+      # files too. Test fixtures legitimately use loose file modes and read
+      # temp-dir paths, so restore gosec's default and skip *_test.go.
+      - path: _test\.go
+        linters:
+          - gosec
+      # oidctest is an httptest-style test-support package (nothing in the
+      # production build imports it, only _test.go files do); the same
+      # -tests=false rationale applies.
+      - path: internal/oidc/oidctest/
+        linters:
+          - gosec

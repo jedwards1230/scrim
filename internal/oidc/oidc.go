@@ -66,7 +66,7 @@ type Config struct {
 	// ClientID and ClientSecret are the confidential client's credentials as
 	// registered with the IdP. Both required.
 	ClientID     string
-	ClientSecret string
+	ClientSecret string //nolint:gosec // G117: operator-supplied config field, not a hardcoded secret
 	// RedirectURL is the full external URL of CallbackPath (e.g.
 	// https://scrim.example.com/auth/callback). It must be provided explicitly
 	// -- behind a TLS-terminating proxy the hub cannot reliably derive its own
@@ -81,7 +81,7 @@ type Config struct {
 	// (a fresh key invalidates old cookies), which is a safe default, just not
 	// a persistent one. Provide a stable secret to persist sessions across
 	// restarts / replicas.
-	SessionSecret []byte
+	SessionSecret []byte //nolint:gosec // G117: operator-supplied config field, not a hardcoded secret
 	// SessionTTL is how long a minted session cookie stays valid. Defaults to
 	// DefaultSessionTTL.
 	SessionTTL time.Duration

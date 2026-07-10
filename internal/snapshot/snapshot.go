@@ -424,7 +424,7 @@ func copyFile(src, dst string, d fs.DirEntry) error {
 	}
 	defer in.Close() //nolint:errcheck // read-only handle, close error not actionable
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm()) //nolint:gosec // G304: dst is derived from a caller-provided canvas/snapshot dir walk, not arbitrary user input
 	if err != nil {
 		return err
 	}
