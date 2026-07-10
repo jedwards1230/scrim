@@ -22,7 +22,7 @@ const staleLockAge = 60 * time.Second
 func withSpawnLock(lockPath string, timeout time.Duration, fn func() error) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: lockPath is derived from the daemon's own data dir, not user input
 		if err == nil {
 			_, writeErr := fmt.Fprintf(f, "%d\n", os.Getpid())
 			closeErr := f.Close()

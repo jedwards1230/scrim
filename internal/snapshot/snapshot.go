@@ -396,7 +396,7 @@ func copyTree(src, dst string) error {
 			if err != nil {
 				return fmt.Errorf("reading symlink %s: %w", path, err)
 			}
-			return os.Symlink(linkTarget, target)
+			return os.Symlink(linkTarget, target) //nolint:gosec // G122: linkTarget/target derive from a walked caller-provided snapshot dir, not arbitrary input (no-op on golangci-lint versions without G122)
 		case d.IsDir():
 			info, err := d.Info()
 			if err != nil {
@@ -424,7 +424,7 @@ func copyFile(src, dst string, d fs.DirEntry) error {
 	}
 	defer in.Close() //nolint:errcheck // read-only handle, close error not actionable
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm()) //nolint:gosec // G304: dst is derived from a caller-provided canvas/snapshot dir walk, not arbitrary user input
 	if err != nil {
 		return err
 	}

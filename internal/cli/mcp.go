@@ -18,7 +18,7 @@ import (
 // hubTokenEnv is the environment variable the hub push token is read from when
 // --hub-token-file isn't given. It's the same token `scrim push` and the hub
 // itself use.
-const hubTokenEnv = "SCRIM_PUSH_TOKEN"
+const hubTokenEnv = "SCRIM_PUSH_TOKEN" //nolint:gosec // G101: env var name, not a hardcoded credential
 
 // OAuth resource-mode env vars, each a fallback for the matching --oauth-*
 // flag (the flag wins when both are set). Setting the issuer turns OAuth on;
@@ -147,7 +147,7 @@ func resolveHubTarget(hubURL, tokenFile, envToken string) (*mcpserver.HubTarget,
 
 	token := strings.TrimSpace(envToken)
 	if tokenFile != "" {
-		data, err := os.ReadFile(tokenFile)
+		data, err := os.ReadFile(tokenFile) //nolint:gosec // G304: tokenFile is an operator-supplied --hub-token-file path, not untrusted input
 		if err != nil {
 			return nil, false, fmt.Errorf("reading --hub-token-file: %w", err)
 		}
