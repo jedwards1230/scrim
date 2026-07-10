@@ -134,19 +134,19 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 	})
 }
 
-// CF-forwarded actor attribution headers. scrim-mcp verifies the HMAC-signed
-// X-Forwarded-User-* identity from ContextForge and re-emits the verified
-// principal to the hub as these headers, on top of the admin push-token bearer
-// (see internal/mcpserver's identity.go). The hub trusts them ONLY when they
-// ride a valid admin push token (resolveClaims branch 1); they are never
-// honored on any other request, so a spoofed header on a tokenless (or
-// session/user-token) request is ignored by construction.
+// Forwarded actor attribution headers. scrim-mcp verifies the HMAC-signed
+// X-Forwarded-User-* identity from the trusted gateway and re-emits the
+// verified principal to the hub as these headers, on top of the admin
+// push-token bearer (see internal/mcpserver's identity.go). The hub trusts them
+// ONLY when they ride a valid admin push token (resolveClaims branch 1); they
+// are never honored on any other request, so a spoofed header on a tokenless
+// (or session/user-token) request is ignored by construction.
 //
 // Two-sided defense: this admin-bearer trust rule is one half. The other is a
-// NetworkPolicy pinning the hub's machine-API ingress to scrim-mcp, so only the
-// trusted attributor can even present these headers. Neither alone suffices --
-// together they bound actor attribution to "scrim-mcp, holding the admin push
-// token, on the allowed network path".
+// network policy pinning the hub's machine-API ingress to scrim-mcp, so only
+// the trusted attributor can even present these headers. Neither alone suffices
+// -- together they bound actor attribution to "scrim-mcp, holding the admin
+// push token, on the allowed network path".
 const (
 	actorHeaderID     = "X-Scrim-Actor-Id"
 	actorHeaderEmail  = "X-Scrim-Actor-Email"

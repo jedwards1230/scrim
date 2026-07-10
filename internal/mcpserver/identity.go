@@ -20,10 +20,13 @@ import (
 // rather than a spoofable one.
 const IdentitySecretEnv = "SCRIM_MCP_IDENTITY_HMAC_SECRET"
 
-// Forwarded-identity request headers (ContextForge → scrim-mcp). The CF gateway
-// authenticates the claude.ai/agent user and forwards the resulting principal
-// as these headers, signed with the shared secret so scrim-mcp can verify the
-// gateway -- and only the gateway -- set them.
+// Forwarded-identity request headers (trusted gateway → scrim-mcp). A trusted
+// reverse proxy / gateway authenticates the end user and forwards the resulting
+// principal as these headers, signed with the shared secret so scrim-mcp can
+// verify the gateway -- and only the gateway -- set them. (In this project's
+// deployment the gateway is the ContextForge MCP gateway, but the mechanism is
+// generic: any proxy that authenticates the user and emits a signed principal
+// in this wire format works.)
 const (
 	hdrFwdUserID     = "X-Forwarded-User-Id"
 	hdrFwdUserEmail  = "X-Forwarded-User-Email"
@@ -104,17 +107,18 @@ func identitySecretFromEnv() string {
 
 // canonicalIdentityString builds the EXACT byte string the HMAC signature is
 // computed over, from the three forwarded identity values. This is the single
-// canonicalization point for the CF→scrim-mcp identity hop: a leading versioned
-// domain tag binds the signature to this scheme (so a signature can never be
-// replayed under a different one), then the id, email, and the raw groups
-// header value each on their own line.
+// canonicalization point for the gateway→scrim-mcp identity hop: a leading
+// versioned domain tag binds the signature to this scheme (so a signature can
+// never be replayed under a different one), then the id, email, and the raw
+// groups header value each on their own line.
 //
-// ASSUMPTION / #48 homelab task: the exact header NAMES (X-Forwarded-User-*)
-// and this canonicalization MUST be reconciled against ContextForge v1.0.4's
-// IDENTITY_SIGN_CLAIMS output before homelab enablement. Here we ship a
-// defined, self-consistent scheme with the canonicalization isolated in this
-// one function; aligning the wire format with CF is a configuration/adapter
-// task, not a redesign of the verification below.
+// This defines the wire-format contract a trusted-gateway adapter must emit to
+// authenticate as a principal: the header NAMES (X-Forwarded-User-*) and this
+// exact canonicalization + HMAC scheme. scrim ships a defined, self-consistent
+// scheme with the canonicalization isolated in this one function; pointing a
+// given gateway at it is a configuration/adapter task (make the gateway sign
+// these fields, in this order, with the shared secret), not a redesign of the
+// verification below.
 func canonicalIdentityString(id, email, groups string) string {
 	// groups is passed through verbatim (the raw comma-separated header value)
 	// so signer and verifier canonicalize identically without agreeing on any
@@ -124,7 +128,7 @@ func canonicalIdentityString(id, email, groups string) string {
 
 // verifyForwardedIdentity verifies the HMAC-signed X-Forwarded-User-* headers on
 // h against secret and, when valid, returns the trusted actor. It is the sole
-// trust gate for the ContextForge identity plane: a missing secret, a missing
+// trust gate for the forwarded-identity plane: a missing secret, a missing
 // signature, or a signature that fails the constant-time compare all yield
 // (zero actor, false) -- the caller then treats the request as anonymous. There
 // is deliberately no partial trust: identity is all-or-nothing per request.
@@ -156,9 +160,9 @@ func verifyForwardedIdentity(h http.Header, secret string) (actor, bool) {
 
 // signForwardedIdentity produces the base64url (unpadded) signature a gateway
 // would set as X-Forwarded-User-Signature for the given identity values. It is
-// the inverse of verifyForwardedIdentity's check and exists so tests (and, at
-// the homelab layer, a CF adapter reference) can mint a valid signature; the
-// production verify path never calls it.
+// the inverse of verifyForwardedIdentity's check and exists so tests (and a
+// gateway adapter implementing this wire format) can mint a valid signature;
+// the production verify path never calls it.
 func signForwardedIdentity(id, email, groups, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(canonicalIdentityString(id, email, groups)))
@@ -184,18 +188,18 @@ func parseGroups(raw string) []string {
 	return out
 }
 
-// actorContext extracts and verifies the CF-forwarded identity from req's inbound
+// actorContext extracts and verifies the forwarded identity from req's inbound
 // HTTP headers (populated by the streamable-HTTP transport; nil on stdio and in
 // unit tests) and, when trusted, returns ctx carrying it. An unverified/absent
 // identity leaves ctx unchanged -- the call proceeds anonymously and the hub
 // attributes it to the admin push token alone.
 //
 // Two-sided defense: this HMAC verification is one half. The other is a
-// NetworkPolicy that pins scrim-mcp's ingress to the ContextForge gateway, so a
-// pod that can't reach scrim-mcp can't present forged headers in the first
+// network policy that pins scrim-mcp's ingress to the trusted gateway, so a
+// peer that can't reach scrim-mcp can't present forged headers in the first
 // place. Neither is sufficient alone (a compromised gateway, or a secret leak);
-// together they bound the CF identity plane's trust to "the gateway, holding the
-// shared secret, on the allowed network path" -- see #48/#51.
+// together they bound the forwarded-identity plane's trust to "the gateway,
+// holding the shared secret, on the allowed network path".
 //
 // Precedence: when the OAuth-RS path validated a bearer JWT, the JWT-derived
 // actor stashed by oauth.go's middleware is AUTHORITATIVE and the HMAC header

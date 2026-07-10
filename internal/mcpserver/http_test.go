@@ -23,7 +23,7 @@ func TestIsLoopbackAddr(t *testing.T) {
 		{"LocalHost:9000", true},
 		{":9000", false},
 		{"0.0.0.0:9000", false},
-		{"192.168.8.10:9000", false},
+		{"192.0.2.10:9000", false},
 		{"example.com:9000", false},
 		{"127.0.0.1", false}, // malformed (no port) → fail closed
 		{"", false},

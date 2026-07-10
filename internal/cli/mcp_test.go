@@ -11,7 +11,7 @@ import (
 // is a usage error (exit 2) and never binds a listener. It uses an isolated
 // --dir so it can never touch the real ~/.scrim.
 func TestMcpHTTPRefusesNonLoopbackWithoutAllowLAN(t *testing.T) {
-	for _, addr := range []string{":9999", "0.0.0.0:9999", "192.168.8.10:9999"} {
+	for _, addr := range []string{":9999", "0.0.0.0:9999", "192.0.2.10:9999"} {
 		t.Run(addr, func(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := Run([]string{"mcp", "--dir", t.TempDir(), "--http", addr}, &out, &errb)
