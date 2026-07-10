@@ -76,8 +76,9 @@ type mintOpts struct {
 	aud   string
 	scope string
 	sub   string
-	exp   time.Time // defaults to now+1h when zero
-	kid   string    // defaults to the AS kid when empty
+	exp   time.Time      // defaults to now+1h when zero
+	kid   string         // defaults to the AS kid when empty
+	extra map[string]any // additional claims (e.g. email, groups) merged verbatim
 }
 
 func (as *fakeAS) mint(t *testing.T, o mintOpts) string {
@@ -104,6 +105,9 @@ func (as *fakeAS) mint(t *testing.T, o mintOpts) string {
 	}
 	if o.scope != "" {
 		claims["scope"] = o.scope
+	}
+	for k, v := range o.extra {
+		claims[k] = v
 	}
 	hb, _ := json.Marshal(header)
 	cb, _ := json.Marshal(claims)

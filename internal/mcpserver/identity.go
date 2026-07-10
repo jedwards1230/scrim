@@ -72,6 +72,30 @@ func actorFromContext(ctx context.Context) (actor, bool) {
 	return a, ok
 }
 
+// oauthActorCtxKey is a private context key DISTINCT from actorCtxKey: the OAuth
+// middleware (oauth.go) stashes the JWT-derived actor under it on the
+// verify-success path, and actorContext promotes that actor to actorCtxKey (the
+// key hubBackend reads). Keeping the two keys separate makes the precedence --
+// a JWT-validated actor wins over the HMAC header plane -- explicit and
+// independently testable, rather than having the middleware overwrite the final
+// actor key directly.
+type oauthActorCtxKey struct{}
+
+// ctxWithOAuthActor returns ctx carrying a as the OAuth-derived actor. The OAuth
+// middleware calls it after the bearer JWT validates.
+func ctxWithOAuthActor(ctx context.Context, a actor) context.Context {
+	return context.WithValue(ctx, oauthActorCtxKey{}, a)
+}
+
+// oauthActorFromContext returns the JWT-derived actor the OAuth middleware
+// stashed, and whether one was present. Its presence means a bearer token was
+// independently validated on this request, so actorContext treats it as
+// authoritative over the HMAC X-Forwarded-User-* header plane.
+func oauthActorFromContext(ctx context.Context) (actor, bool) {
+	a, ok := ctx.Value(oauthActorCtxKey{}).(actor)
+	return a, ok
+}
+
 // identitySecretFromEnv reads the shared HMAC secret from the environment once,
 // at server construction. Kept isolated so the single read point is obvious.
 func identitySecretFromEnv() string {
@@ -172,7 +196,22 @@ func parseGroups(raw string) []string {
 // place. Neither is sufficient alone (a compromised gateway, or a secret leak);
 // together they bound the CF identity plane's trust to "the gateway, holding the
 // shared secret, on the allowed network path" -- see #48/#51.
+//
+// Precedence: when the OAuth-RS path validated a bearer JWT, the JWT-derived
+// actor stashed by oauth.go's middleware is AUTHORITATIVE and the HMAC header
+// plane is not consulted -- the OAuth token was independently verified
+// (signature/issuer/audience/expiry) against the AS's JWKS, so its `sub`/email/
+// groups are a stronger attribution source than a gateway-signed header. Both
+// paths remain fail-closed: an invalid token is 401'd by the middleware before
+// any handler runs, and no OAuth actor plus no valid HMAC leaves ctx anonymous
+// (admin attribution), exactly as before. An OAuth-off deployment behaves
+// identically to before this change: the middleware never runs, so no OAuth
+// actor is ever in ctx and the HMAC plane is the sole attribution source.
 func (s *server) actorContext(ctx context.Context, req *mcp.CallToolRequest) context.Context {
+	if a, ok := oauthActorFromContext(ctx); ok {
+		// Promote the JWT-derived actor to the final actor key hubBackend reads.
+		return ctxWithActor(ctx, a)
+	}
 	if req == nil || req.Extra == nil {
 		return ctx
 	}
