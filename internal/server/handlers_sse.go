@@ -39,7 +39,15 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// window where the client sees "connected" before the server has
 	// actually recorded it -- a real, if narrow, TOCTOU race between the
 	// two goroutines.
-	ch, unregister := s.hub.register(id)
+	ch, unregister, ok := s.hub.register(id)
+	if !ok {
+		// A configured SSE cap (hub-only; the local daemon leaves both caps
+		// at 0/unlimited) is at its ceiling. Reject before writing any 200
+		// headers, so the client never observes a "connected" stream that
+		// was never tracked -- keeping the TOCTOU note above accurate.
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
 	defer unregister()
 
 	w.Header().Set("Content-Type", "text/event-stream")

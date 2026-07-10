@@ -357,6 +357,12 @@ scrim hub --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
   read-capable secret. Browser reads remain separately gated by the CIDR
   allowlist (+ optional read token). A logged-in principal that wants its own
   scoped credential instead should mint a [user token](#ownership-sharing--tokens).
+- Because a hub binds beyond loopback, hub mode adds two resource-exhaustion
+  guards the local daemon doesn't have: request read timeouts
+  (`ReadTimeout`/`IdleTimeout`, so a slow-trickle body can't pin a connection
+  forever — SSE responses stay unbounded) and a concurrent SSE (live-reload)
+  connection cap (256 total, 32 per canvas; `/c/<id>/__events` returns 503 past
+  the ceiling). Both are hub-only, so the local daemon is unchanged.
 - The hub is long-lived by default (`--idle-timeout` defaults to disabled)
   and doesn't advertise over mDNS by default (`--no-mdns` defaults to true).
 

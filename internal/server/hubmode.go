@@ -43,6 +43,16 @@ type HubOptions struct {
 	// not advertise it at all. Writes (the push token) are unaffected either
 	// way.
 	OIDC *oidc.Config
+	// MaxSSEClients caps the total number of concurrent SSE (live-reload)
+	// connections the hub will hold open across all canvases; past the cap
+	// /c/<id>/__events returns 503. Each connection pins a goroutine, channel,
+	// and ticker, so the cap bounds resource exhaustion from an allowed client
+	// opening thousands of streams. 0 ⇒ the sensible default (256).
+	MaxSSEClients int
+	// MaxSSEClientsPerCanvas caps concurrent SSE connections to a single
+	// canvas, so one canvas can't consume the whole global budget. 0 ⇒ the
+	// sensible default (32).
+	MaxSSEClientsPerCanvas int
 	// Authentik, when non-nil, turns on the OPTIONAL read-only Authentik
 	// directory feeder behind GET /api/principals: NewHub builds the client
 	// (validating the URL as a startup error, like a bad CIDR) and composes it
@@ -96,6 +106,23 @@ func (k *keyedMutex) lock(key string) func() {
 	return mu.Unlock
 }
 
+// Default SSE connection caps applied by NewHub when the corresponding
+// HubOptions field is 0. They only ever apply in hub mode; the local daemon
+// leaves both caps unlimited (see newHub).
+const (
+	defaultMaxSSEClients          = 256
+	defaultMaxSSEClientsPerCanvas = 32
+)
+
+// defaultInt returns v when it's positive, else def -- the "0 ⇒ sensible
+// default" convention for the SSE cap options.
+func defaultInt(v, def int) int {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
 // errMissingPushToken is returned by NewHub when opts.PushToken is empty --
 // the hub fails closed rather than ever running a write-accepting server
 // with no push gate.
@@ -121,6 +148,13 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		readToken:   opts.ReadToken,
 		allowedNets: nets,
 	}
+	// Cap concurrent SSE (live-reload) connections in hub mode only: a hub
+	// binds beyond loopback, so an allowed client could otherwise open
+	// thousands of /c/<id>/__events streams (each a goroutine+channel+ticker)
+	// and exhaust the process. The local daemon never calls NewHub, so its hub
+	// keeps maxGlobal/maxPerCanvas at 0 (unlimited) -- byte-identical to before.
+	s.hub.maxGlobal = defaultInt(opts.MaxSSEClients, defaultMaxSSEClients)
+	s.hub.maxPerCanvas = defaultInt(opts.MaxSSEClientsPerCanvas, defaultMaxSSEClientsPerCanvas)
 	// The principal registry is a lazily-populated, display-only feeder (never
 	// read by enforcement). It lives under the hub's meta dir alongside the
 	// canvas sidecars.

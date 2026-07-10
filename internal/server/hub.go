@@ -8,6 +8,18 @@ import "sync"
 type hub struct {
 	mu      sync.Mutex
 	clients map[string]map[chan struct{}]struct{}
+	// total is the running count of connected clients across every canvas
+	// (the sum of the inner map lengths), maintained incrementally so the
+	// global-cap check in register stays O(1) under a connection flood
+	// rather than re-summing the map on every open.
+	total int
+
+	// maxGlobal and maxPerCanvas cap the number of concurrent SSE clients
+	// (0 = unlimited). They are set only for a hub (see NewHub); newHub
+	// leaves them 0, so the local daemon is uncapped and byte-identical to
+	// its prior behavior.
+	maxGlobal    int
+	maxPerCanvas int
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -22,14 +34,27 @@ func newHub() *hub {
 
 // register adds a new client for canvas id and returns its notification
 // channel plus an unregister func the caller must call (typically deferred)
-// when the connection closes.
-func (h *hub) register(id string) (ch chan struct{}, unregister func()) {
-	ch = make(chan struct{}, 1)
+// when the connection closes. ok is false (with nil ch/unregister) when a
+// configured cap is already at its ceiling -- the caller must reject the
+// connection (503) and MUST NOT call unregister in that case. Both caps are
+// checked under the same lock as the insert, so the count can't race past
+// the ceiling between the check and the add.
+func (h *hub) register(id string) (ch chan struct{}, unregister func(), ok bool) {
 	h.mu.Lock()
+	if h.maxGlobal > 0 && h.total >= h.maxGlobal {
+		h.mu.Unlock()
+		return nil, nil, false
+	}
+	if h.maxPerCanvas > 0 && len(h.clients[id]) >= h.maxPerCanvas {
+		h.mu.Unlock()
+		return nil, nil, false
+	}
+	ch = make(chan struct{}, 1)
 	if h.clients[id] == nil {
 		h.clients[id] = make(map[chan struct{}]struct{})
 	}
 	h.clients[id][ch] = struct{}{}
+	h.total++
 	h.mu.Unlock()
 
 	return ch, func() {
@@ -38,8 +63,9 @@ func (h *hub) register(id string) (ch chan struct{}, unregister func()) {
 		if len(h.clients[id]) == 0 {
 			delete(h.clients, id)
 		}
+		h.total--
 		h.mu.Unlock()
-	}
+	}, true
 }
 
 // broadcast notifies every currently-connected client of canvas id. It never
@@ -57,15 +83,14 @@ func (h *hub) broadcast(id string) {
 }
 
 // clientCount returns the total number of connected SSE clients across all
-// canvases.
+// canvases. It reads the incrementally-maintained total (identical to summing
+// the per-canvas maps, which it replaced), so the reaper's "any SSE client
+// connected" liveness check is unchanged: a non-zero count still means at
+// least one live connection.
 func (h *hub) clientCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	n := 0
-	for _, m := range h.clients {
-		n += len(m)
-	}
-	return n
+	return h.total
 }
 
 // canvasClientCount returns the number of connected SSE clients for one

@@ -178,17 +178,7 @@ func (s *Server) Run(ctx context.Context) error {
 	defer cancel()
 	go s.reap(runCtx)
 
-	httpServer := &http.Server{
-		Handler:           s.routes(),
-		ReadHeaderTimeout: 10 * time.Second,
-		// Left nil, net/http falls back to its own package-level logger
-		// (straight to os.Stderr) for things like malformed requests or a
-		// panic recovered inside a handler -- bypassing scrim's logging
-		// policy (never a raw request path/query/token) entirely. Routing
-		// it through logging.StdLogger applies the same scrubbing as every
-		// other log call site in this package.
-		ErrorLog: logging.StdLogger(logging.CategoryHTTP),
-	}
+	httpServer := s.newHTTPServer(s.routes())
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- httpServer.Serve(listener) }()
 
@@ -217,6 +207,51 @@ func (s *Server) Run(ctx context.Context) error {
 	_ = httpServer.Shutdown(shutdownCtx)
 
 	return state.Remove(s.cfg.StateFilePath())
+}
+
+// newHTTPServer builds the http.Server Run serves, with a timeout policy that
+// differs by mode. It is a separate method so that policy is unit-testable
+// without binding a listener (mirrors mcpserver.newHTTPServer).
+//
+// Both modes set ReadHeaderTimeout (10s, bounds slow-header Slowloris) and
+// route net/http's internal errors through scrim's scrubbed logging surface
+// (never a raw request path/query/token).
+//
+// Hub mode ADDS ReadTimeout (60s) and IdleTimeout (120s), matching
+// mcpserver's streamable-HTTP server. A hub binds 0.0.0.0, so without a full
+// ReadTimeout a slow-trickle request body under the 50 MiB push cap would pin
+// a connection+goroutine indefinitely. ReadTimeout is confirmed SAFE for the
+// /c/<id>/__events SSE endpoint on the go.mod Go version: nothing reads the
+// connection while the handler streams the response, so the read deadline
+// never fires mid-stream (empirically, an SSE stream under ReadTimeout=2s kept
+// delivering for 6s+). This is the same rationale mcpserver relies on to run
+// ReadTimeout alongside its server→client SSE listen stream.
+//
+// WriteTimeout is intentionally left at 0 (unlimited) in BOTH modes: an SSE
+// response has no upper bound on duration, so any finite WriteTimeout would
+// eventually truncate a live-reload stream mid-response. Do not set it -- that
+// is not a bug to "fix".
+//
+// The local daemon (server.New) is deliberately left with ReadHeaderTimeout
+// only -- no ReadTimeout, no IdleTimeout -- so hub mode adds zero behavior to
+// it, preserving the hub_test.go hard invariant.
+func (s *Server) newHTTPServer(handler http.Handler) *http.Server {
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// Left nil, net/http falls back to its own package-level logger
+		// (straight to os.Stderr) for things like malformed requests or a
+		// panic recovered inside a handler -- bypassing scrim's logging
+		// policy (never a raw request path/query/token) entirely. Routing
+		// it through logging.StdLogger applies the same scrubbing as every
+		// other log call site in this package.
+		ErrorLog: logging.StdLogger(logging.CategoryHTTP),
+	}
+	if s.isHub() {
+		srv.ReadTimeout = 60 * time.Second
+		srv.IdleTimeout = 120 * time.Second
+	}
+	return srv
 }
 
 // initiateShutdown asks Run to stop, exactly once. Safe to call from
