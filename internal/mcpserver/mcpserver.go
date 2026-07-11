@@ -109,6 +109,30 @@ func NewServer(cfg config.Config, ver string, hub *HubTarget) *mcp.Server {
 	return newServer(newLocalBackend(cfg), cfg, ver, true)
 }
 
+// boolPtr returns a pointer to v. ToolAnnotations.DestructiveHint and
+// OpenWorldHint are *bool that the MCP spec defaults to true when nil, so
+// communicating false requires an explicit pointer rather than a bare false
+// value.
+func boolPtr(v bool) *bool { return &v }
+
+// toolAnnotations builds the ToolAnnotations for tool name: ReadOnlyHint is
+// derived directly from toolScopes (oauth.go) — the SAME map that gates
+// scrim:read/scrim:write auth scopes — so the advertised annotation and the
+// enforced scope can never drift (see TestToolAnnotationsMatchScopes).
+// OpenWorldHint is always an explicit &false: scrim operates on a closed
+// canvas store, never an open external world. destructive/idempotent are
+// meaningful only for write tools (ReadOnlyHint==false) per the MCP spec, but
+// are set uniformly here for a single code path.
+func toolAnnotations(name, title string, destructive, idempotent bool) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    toolScopes[name] == scopeRead,
+		DestructiveHint: boolPtr(destructive),
+		IdempotentHint:  idempotent,
+		OpenWorldHint:   boolPtr(false),
+	}
+}
+
 // newServer registers the tool set against b. local decides whether the
 // local-only `path` tool is registered: in hub mode a server-local path is
 // meaningless to a remote client, so the tool is simply absent and the surface
@@ -120,62 +144,77 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add",
 		Description: "Register a canvas. Returns its view URL. In local mode self-starts the scrim daemon; in hub mode creates it on the remote hub.",
+		Annotations: toolAnnotations("add", "Add canvas", false, true),
 	}, s.handleAdd)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list",
 		Description: "List registered canvases.",
+		Annotations: toolAnnotations("list", "List canvases", false, true),
 	}, s.handleList)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "link",
 		Description: "Return the view URL for a canvas, or the dashboard URL when no id is given. URLs are returned as data — this never launches a browser.",
+		Annotations: toolAnnotations("link", "Get canvas URL", false, true),
 	}, s.handleLink)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "rm",
 		Description: "Remove a canvas.",
+		Annotations: toolAnnotations("rm", "Remove canvas", true, false),
 	}, s.handleRm)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "snap",
 		Description: "Snapshot a canvas's current contents.",
+		Annotations: toolAnnotations("snap", "Snapshot canvas", false, false),
 	}, s.handleSnap)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "snaps",
 		Description: "List a canvas's snapshots, newest first.",
+		Annotations: toolAnnotations("snaps", "List snapshots", false, true),
 	}, s.handleSnaps)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "revert",
 		Description: "Restore a canvas from a snapshot (latest by default), taking a safety snapshot of the current contents first.",
+		Annotations: toolAnnotations("revert", "Revert canvas", true, false),
 	}, s.handleRevert)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "copy_canvas",
 		Description: "Duplicate a canvas into a new one server-side (no file bytes round-trip through the client). Fails if the destination exists unless overwrite is set, which snapshots the destination first.",
+		Annotations: toolAnnotations("copy_canvas", "Copy canvas", false, false),
 	}, s.handleCopyCanvas)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "status",
 		Description: "Report scrim daemon/hub status.",
+		Annotations: toolAnnotations("status", "Scrim status", false, true),
 	}, s.handleStatus)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_files",
 		Description: "List every file in a canvas as canvas-relative paths with size and modification time — the way to discover what a canvas contains before reading or editing it. Returns no file content.",
+		Annotations: toolAnnotations("list_files", "List canvas files", false, true),
 	}, s.handleListFiles)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read one file from a canvas and return its text content inline. The file must be UTF-8 text and at most ~2 MiB. Pass encoding=\"gzip+base64\" to receive larger or binary files gzip-compressed then base64-encoded instead.",
+		Annotations: toolAnnotations("read_file", "Read canvas file", false, true),
 	}, s.handleReadFile)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "write_file",
 		Description: "Write one file into an existing canvas from inline text content (create the canvas first with add). Content is capped at ~2 MiB. Pass encoding=\"gzip+base64\" to send content gzip-compressed then base64-encoded (the cap applies to the decoded bytes) — worthwhile for large HTML/JS.",
+		Annotations: toolAnnotations("write_file", "Write canvas file", false, true),
 	}, s.handleWriteFile)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "edit_file",
 		Description: "Replace an exact string in one canvas file server-side — the token-efficient alternative to write_file for changing an existing file (tokens scale with the diff, not the file). old_string must occur exactly once unless replace_all is set. Pass an edits array to apply many replacements in one transactional call (all-or-nothing: any failing edit leaves the file untouched); edits is mutually exclusive with the single old_string/new_string fields.",
+		Annotations: toolAnnotations("edit_file", "Edit canvas file", false, false),
 	}, s.handleEditFile)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "share_canvas",
 		Description: "Share a canvas with another principal. target_kind is user (share to one email in target), group (share to a group name in target), everyone (any authenticated viewer), or link (mint an unguessable share URL — the secret is returned ONCE, append it as ?k=<secret>). Grants are view-only. In hub mode the hub enforces ownership and any allowance bound to the calling token; it surfaces an actionable rejection when a target is not permitted.",
+		Annotations: toolAnnotations("share_canvas", "Share canvas", false, true),
 	}, s.handleShareCanvas)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_grants",
 		Description: "List a canvas's owner and current sharing grants (who it is shared with). Never returns share-link secrets or their hashes — only each grant's kind, target, and public link id.",
+		Annotations: toolAnnotations("list_grants", "List canvas grants", false, true),
 	}, s.handleListGrants)
 
 	// push is local-only whole-canvas push to an external hub, reading the
@@ -185,6 +224,7 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "push",
 		Description: "Pack a canvas from the MACHINE RUNNING THIS MCP SERVER's own disk (its --dir) and push it once to a hub. It sources from the MCP server's filesystem — NOT the calling agent's machine and NOT the hub — so it's only useful when scrim mcp runs where the canvas files live. For a remotely-hosted MCP server (e.g. in-cluster beside the hub) that disk is the pod's, not yours: author canvas content over the wire with write_file/edit_file instead. Never launches a browser.",
+		Annotations: toolAnnotations("push", "Push canvas", false, false),
 	}, s.handlePush)
 
 	// path is a server-local directory lookup — meaningless to a remote hub
@@ -193,6 +233,7 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "path",
 			Description: "Return the on-disk directory for a canvas. Pure local filesystem lookup — does not talk to or start the daemon. Local mode only.",
+			Annotations: toolAnnotations("path", "Canvas directory path", false, true),
 		}, s.handlePath)
 	}
 
