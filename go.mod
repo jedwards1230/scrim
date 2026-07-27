@@ -3,11 +3,11 @@ module github.com/jedwards1230/scrim
 go 1.25.12
 
 require (
-	github.com/coreos/go-oidc/v3 v3.19.0
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/mdns v1.0.7
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/yuin/goldmark v1.8.2
+	github.com/yuin/goldmark v1.8.4
 	golang.org/x/oauth2 v0.36.0
 )
 
