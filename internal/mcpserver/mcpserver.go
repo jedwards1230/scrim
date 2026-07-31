@@ -46,12 +46,19 @@ import (
 	"github.com/jedwards1230/scrim/internal/state"
 )
 
-// HubTarget selects hub mode for a scrim MCP server: the remote hub's
-// externally-reachable base URL and its push token (the machine-API bearer
-// credential). A nil *HubTarget selects local mode.
+// HubTarget selects hub mode for a scrim MCP server: the remote hub's base URL
+// and its push token (the machine-API bearer credential). A nil *HubTarget
+// selects local mode.
+//
+// BaseURL is the API endpoint every machine-API call is made against.
+// PublicBaseURL is optional and consumed ONLY when building the view URLs
+// returned to callers: set it when the API endpoint isn't browser-reachable
+// (e.g. an in-cluster address behind a public ingress). Empty means links are
+// built from BaseURL.
 type HubTarget struct {
-	BaseURL string
-	Token   string
+	BaseURL       string
+	PublicBaseURL string
+	Token         string
 }
 
 // server holds the backend every tool handler delegates to, the resolved
@@ -104,7 +111,7 @@ func NewServer(cfg config.Config, ver string, hub *HubTarget) *mcp.Server {
 		ver = "dev"
 	}
 	if hub != nil {
-		return newServer(newHubBackend(hub.BaseURL, hub.Token), cfg, ver, false)
+		return newServer(newHubBackend(hub.BaseURL, hub.PublicBaseURL, hub.Token), cfg, ver, false)
 	}
 	return newServer(newLocalBackend(cfg), cfg, ver, true)
 }

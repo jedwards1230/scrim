@@ -127,7 +127,7 @@ func TestHubBackendAttachesActorHeaders(t *testing.T) {
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer ts.Close()
-	b := newHubBackend(ts.URL, "admin-token")
+	b := newHubBackend(ts.URL, "", "admin-token")
 
 	t.Run("actor in ctx is forwarded", func(t *testing.T) {
 		ctx := ctxWithActor(context.Background(), actor{ID: "u-1", Email: "alice@example.com", Groups: []string{"eng", "sre"}})

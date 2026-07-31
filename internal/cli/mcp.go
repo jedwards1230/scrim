@@ -20,6 +20,11 @@ import (
 // itself use.
 const hubTokenEnv = "SCRIM_PUSH_TOKEN" //nolint:gosec // G101: env var name, not a hardcoded credential
 
+// hubPublicURLEnv is the environment fallback for --hub-public-url (the flag
+// wins when both are set). It is link-building only — it never changes which
+// endpoint the machine API is called against.
+const hubPublicURLEnv = "SCRIM_HUB_PUBLIC_URL"
+
 // OAuth resource-mode env vars, each a fallback for the matching --oauth-*
 // flag (the flag wins when both are set). Setting the issuer turns OAuth on;
 // the audience is then required (see mcpserver.OAuthConfig.Validate).
@@ -30,13 +35,15 @@ const (
 )
 
 // cmdMcp implements `scrim mcp [--http ADDR] [--allow-lan] [--hub URL]
-// [--hub-token-file PATH] [--oauth-issuer URL] [--oauth-audience AUD]
-// [--oauth-resource URL]`. It runs an MCP server exposing scrim's verbs as
-// tools. The default transport is stdio (stdout is the MCP protocol channel);
-// --http switches to streamable HTTP. The default mode is local (drive the
-// local daemon + on-disk canvases); --hub drives a remote hub's machine API
-// over HTTP instead. Transport (--http) and mode (--hub) are orthogonal — all
-// four combinations are valid.
+// [--hub-public-url URL] [--hub-token-file PATH] [--oauth-issuer URL]
+// [--oauth-audience AUD] [--oauth-resource URL]`. It runs an MCP server
+// exposing scrim's verbs as tools. The default transport is stdio (stdout is
+// the MCP protocol channel); --http switches to streamable HTTP. The default
+// mode is local (drive the local daemon + on-disk canvases); --hub drives a
+// remote hub's machine API over HTTP instead, with --hub-public-url optionally
+// overriding the base the returned canvas links are built from (links only —
+// the API is always called at --hub). Transport (--http) and mode (--hub) are
+// orthogonal — all four combinations are valid.
 //
 // The HTTP transport is unauthenticated by default (it binds loopback and
 // refuses a non-loopback bind unless --allow-lan opts in), UNLESS OAuth is
@@ -54,6 +61,7 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 	httpAddr := fs.String("http", "", "serve streamable-HTTP MCP on this addr (e.g. 127.0.0.1:7799); default empty = stdio")
 	allowLAN := fs.Bool("allow-lan", false, "allow a non-loopback --http bind despite the endpoint being unauthenticated (not needed when OAuth is configured)")
 	hubURL := fs.String("hub", "", "drive a remote scrim hub's machine API over HTTP instead of the local daemon (e.g. https://scrim-hub.example); default empty = local mode")
+	hubPublicURL := fs.String("hub-public-url", "", "browser-reachable base URL used to build the canvas links returned to callers, when --hub is not itself reachable from a browser (e.g. an in-cluster address); only meaningful with --hub (or set "+hubPublicURLEnv+")")
 	hubTokenFile := fs.String("hub-token-file", "", "read the hub push token from this file (overrides SCRIM_PUSH_TOKEN); only meaningful with --hub")
 	oauthIssuer := fs.String("oauth-issuer", "", "OIDC/OAuth authorization server issuer URL; setting it makes --http an RFC 9728 protected resource (or set "+oauthIssuerEnv+")")
 	oauthAudience := fs.String("oauth-audience", "", "expected token audience (the scrim MCP resource id); required with --oauth-issuer (or set "+oauthAudienceEnv+")")
@@ -62,7 +70,7 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 		return exitForParseErr(err)
 	}
 	if fs.NArg() != 0 {
-		return usageError(stderr, "usage: scrim mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-token-file PATH] [--oauth-issuer URL] [--oauth-audience AUD] [--oauth-resource URL]")
+		return usageError(stderr, "usage: scrim mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-public-url URL] [--hub-token-file PATH] [--oauth-issuer URL] [--oauth-audience AUD] [--oauth-resource URL]")
 	}
 
 	// Resolve OAuth config (flag wins over env) and fail closed on a
@@ -89,12 +97,19 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 		outf(stderr, "scrim mcp: warning: --oauth-issuer has no effect without --http (stdio carries no bearer to validate)\n")
 	}
 
-	hub, warnTokenFileNoHub, err := resolveHubTarget(*hubURL, *hubTokenFile, os.Getenv(hubTokenEnv))
+	hub, warnTokenFileNoHub, err := resolveHubTarget(*hubURL, orEnv(*hubPublicURL, hubPublicURLEnv), *hubTokenFile, os.Getenv(hubTokenEnv))
 	if err != nil {
 		return usageError(stderr, "%s", err.Error())
 	}
 	if warnTokenFileNoHub {
 		outf(stderr, "scrim mcp: warning: --hub-token-file has no effect without --hub (local mode uses no hub token)\n")
+	}
+	// Same no-op-flag treatment --hub-token-file and --allow-lan get: a warning,
+	// not a hard error, and keyed off the FLAG only — an ambient
+	// SCRIM_HUB_PUBLIC_URL is silently unused in local mode, exactly as an
+	// ambient SCRIM_PUSH_TOKEN already is.
+	if hub == nil && *hubPublicURL != "" {
+		outf(stderr, "scrim mcp: warning: --hub-public-url has no effect without --hub (local mode builds links from the local daemon's own address)\n")
 	}
 	if hub != nil && hubBearerInsecure(hub.BaseURL) {
 		outf(stderr, "scrim mcp: warning: --hub uses plain http to a non-loopback host — the push token is sent unencrypted; prefer https\n")
@@ -132,17 +147,22 @@ func orEnv(flagVal, envKey string) string {
 }
 
 // resolveHubTarget derives the hub-mode selection from the --hub URL, the
+// already-resolved --hub-public-url/SCRIM_HUB_PUBLIC_URL value, the
 // --hub-token-file path, and the ambient SCRIM_PUSH_TOKEN value. It returns:
 //   - a nil target for local mode (no --hub), plus warnTokenFileNoHub=true when
 //     --hub-token-file was pointlessly given without --hub (a no-op worth a
 //     warning, not a hard error — mirroring --allow-lan-without-http);
 //   - a populated target for hub mode, with the token resolved from the file
-//     (which overrides the env) or else the env;
+//     (which overrides the env) or else the env, and publicURL carried through
+//     as the link-only public base (empty ⇒ links are built from --hub itself);
 //   - a fail-closed error when --hub is set but no token resolves.
+//
+// publicURL never affects which endpoint is called — only the URLs handed back
+// to callers (see mcpserver.HubTarget).
 //
 // The only I/O is reading --hub-token-file when set, so tests exercise every
 // branch with a temp file (or none).
-func resolveHubTarget(hubURL, tokenFile, envToken string) (*mcpserver.HubTarget, bool, error) {
+func resolveHubTarget(hubURL, publicURL, tokenFile, envToken string) (*mcpserver.HubTarget, bool, error) {
 	if hubURL == "" {
 		return nil, tokenFile != "", nil
 	}
@@ -160,12 +180,16 @@ func resolveHubTarget(hubURL, tokenFile, envToken string) (*mcpserver.HubTarget,
 			"scrim mcp --hub requires a push token, but none was found "+
 				"(set %s or pass --hub-token-file PATH); refusing to start hub mode without one", hubTokenEnv)
 	}
-	return &mcpserver.HubTarget{BaseURL: hubURL, Token: token}, false, nil
+	return &mcpserver.HubTarget{BaseURL: hubURL, PublicBaseURL: publicURL, Token: token}, false, nil
 }
 
 // hubBearerInsecure reports whether the hub base URL would send the bearer
 // token in cleartext to a non-loopback host (plain http off-machine). Loopback
 // http is fine — it never leaves the host.
+//
+// It deliberately inspects only --hub, never --hub-public-url: the public base
+// is used solely to print view URLs and no request (and therefore no bearer
+// token) is ever sent to it, so a plain-http public base leaks nothing.
 func hubBearerInsecure(baseURL string) bool {
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Scheme != "http" {
