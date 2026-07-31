@@ -54,7 +54,7 @@ verified it renders.
 If a `scrim` MCP server is wired into your session, scrim's verbs show up as
 MCP tools (`add`, `list`, `link`, `copy_canvas`, `rm`, `snap`, `snaps`,
 `revert`, `status`, `list_files`, `read_file`, `write_file`, `edit_file`,
-`push`, plus `path` in local mode only).
+`share_canvas`, `list_grants`, `push`, plus `path` in local mode only).
 **Prefer those tools over shelling out to the `scrim` CLI** — they're the same
 code path, return structured results, and don't depend on `scrim` being on
 `PATH`. Fall back to the shell verbs (the rest of this skill) only when the
@@ -73,6 +73,19 @@ enumerates a canvas's files (paths + sizes, no content) so you can discover
 what to read or edit; `copy_canvas` duplicates a canvas server-side. For large
 or binary files, `read_file`/`write_file` accept `encoding: "gzip+base64"` to
 move content compressed.
+
+`share_canvas` adds a **view-only** sharing grant to a canvas. Its
+`target_kind` is `user` (an email address in `target`), `group` (a group name
+in `target`), `everyone` (any authenticated viewer), or `link` (mints an
+unguessable share URL — no `target`). **A link grant's secret is returned
+exactly once**, in that call's result; append it to the canvas URL as
+`?k=<secret>`. Nothing can retrieve it again — only its hash is stored — so
+surface it to the user in the same reply or mint a new link grant.
+`list_grants` reports a canvas's owner plus its current grants (each grant's
+kind, target, and public link id) and deliberately never returns link secrets
+or their hashes. Local mode is single-user and applies a grant directly; in
+hub mode the hub enforces ownership and whatever allowance is bound to the
+calling token, rejecting a target that isn't permitted.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which
