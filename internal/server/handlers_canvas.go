@@ -26,6 +26,27 @@ func (s *Server) handleCanvasRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/c/"+id+"/", http.StatusMovedPermanently)
 }
 
+// handleCanvasIndexRedirect sends the bare canvas prefix -- /c and /c/, a
+// canvas URL with no id, which nothing under /c/{id} can serve -- to the
+// gallery index at / instead of dead-ending in a 404.
+//
+// 302, not the 301 handleCanvasRedirect uses: /c/<id> -> /c/<id>/ is a
+// permanent normalization of a real resource, whereas /c is not a resource at
+// all. A permanent redirect is cached by browsers indefinitely and is
+// effectively impossible to revoke once served, which would foreclose ever
+// giving /c its own meaning (a canvas listing, say) for anyone who visited it
+// first.
+//
+// The target is a bare "/" with no query carried over. The only query
+// parameters these paths meaningfully take are credentials (?t=, ?k=), and the
+// gate has already consumed a valid ?t= before the mux is reached (see
+// checkToken's token-stripping redirect) -- copying a query string into this
+// Location could only put a credential back into the URL bar that redirect
+// exists to keep it out of.
+func (s *Server) handleCanvasIndexRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
 // handleCanvas serves static files from a canvas's directory, injecting the
 // SSE live-reload script into any HTML response.
 func (s *Server) handleCanvas(w http.ResponseWriter, r *http.Request) {
