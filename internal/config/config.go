@@ -5,18 +5,12 @@
 package config
 
 import (
-	"errors"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/jedwards1230/scrim/internal/logging"
 )
 
 const (
@@ -167,107 +161,22 @@ func (c Config) BaseURL() string {
 	return "http://" + net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
 
-const (
-	// dirPerm is the permission enforced on c.Dir: owner-only
-	// read/write/traverse. Nothing under it (the state file, the log file,
-	// canvas contents) is reachable by another user on the same host once
-	// this holds, regardless of those entries' own individual permissions.
-	dirPerm = 0o700
-	// filePerm is the permission enforced on the state file and log file:
-	// owner-only read/write.
-	filePerm = 0o600
-)
-
-// HardenPermissions ensures c.Dir exists and is owner-only (dirPerm), and
-// tightens the state file and log file to owner-only (filePerm) if they
-// already exist. It's idempotent and meant to be called on every daemon
-// startup/self-start, whether c.Dir is brand new or was created by an
-// older scrim version (or by hand, e.g. `mkdir ~/.scrim`) with looser
-// permissions -- those don't get silently grandfathered in.
+// HardenPermissions ensures c.Dir exists and is owner-only, and tightens the
+// state file and log file to owner-only if they already exist. It's
+// idempotent and meant to be called on every daemon startup/self-start,
+// whether c.Dir is brand new or was created by an older scrim version (or by
+// hand, e.g. `mkdir ~/.scrim`) with looser permissions -- those don't get
+// silently grandfathered in.
 //
-// This is a Unix-only guarantee -- see permissionHardeningSupported. On a
-// platform where it doesn't hold, HardenPermissions still returns nil (there
-// really is nothing more it can do), but logs a one-time warning rather than
-// silently claiming success.
+// "Owner-only" is enforced with each platform's native primitive: Unix mode
+// bits (0700/0600) in harden_unix.go, an inheritance-protected owner-only
+// DACL in harden_windows.go.
 func (c Config) HardenPermissions() error {
-	return c.hardenPermissionsForGOOS(runtime.GOOS)
-}
-
-// hardenPermissionsForGOOS is HardenPermissions's actual implementation,
-// parameterized on goos so tests can exercise the Windows no-op path
-// without needing to run on a real Windows host.
-func (c Config) hardenPermissionsForGOOS(goos string) error {
-	if !permissionHardeningSupported(goos) {
-		warnPermissionHardeningUnsupported()
-		return nil
-	}
-	if err := enforceDirPerm(c.Dir); err != nil {
+	if err := hardenDir(c.Dir); err != nil {
 		return err
 	}
-	if err := enforceFilePerm(c.StateFilePath()); err != nil {
+	if err := hardenFile(c.StateFilePath()); err != nil {
 		return err
 	}
-	return enforceFilePerm(c.LogFilePath())
-}
-
-// permissionHardeningSupported reports whether goos supports owner-only
-// enforcement via os.Chmod the way enforceDirPerm/enforceFilePerm use it.
-// It does not on Windows: os.Chmod there only toggles the
-// FILE_ATTRIBUTE_READONLY flag (whether the file is writable at all) --
-// there's no Unix-style "owner-only, unreadable by other accounts on the
-// same host" primitive behind it, so the dirPerm/filePerm calls below would
-// silently no-op rather than actually tightening anything.
-func permissionHardeningSupported(goos string) bool {
-	return goos != "windows"
-}
-
-var windowsPermissionWarnOnce sync.Once
-
-// warnPermissionHardeningUnsupported logs, once per process, that owner-only
-// permission hardening isn't available on this platform. HardenPermissions
-// is called on every self-start check and daemon startup -- without the
-// sync.Once guard, a single long-lived process could log this several
-// times over instead of once.
-func warnPermissionHardeningUnsupported() {
-	windowsPermissionWarnOnce.Do(func() {
-		logging.Error(logging.CategoryConfig, errPermissionHardeningUnsupported)
-	})
-}
-
-// errPermissionHardeningUnsupported is a static, pre-scrubbed message (it
-// carries no path or other request-derived text) describing the Windows
-// gap in permission hardening -- see permissionHardeningSupported. Tracked
-// as https://github.com/jedwards1230/scrim/issues/19.
-var errPermissionHardeningUnsupported = errors.New(
-	"owner-only permission hardening is unavailable on this platform: " +
-		"--dir, the state file, and the log file are not being tightened " +
-		"(tracked as scrim#19)",
-)
-
-// enforceDirPerm creates dir if missing and (re)sets its permission to
-// dirPerm either way -- MkdirAll alone only applies a permission to a
-// directory it actually creates, leaving a preexisting looser-permissioned
-// directory untouched.
-func enforceDirPerm(dir string) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
-		return fmt.Errorf("creating dir %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, dirPerm); err != nil {
-		return fmt.Errorf("tightening permissions on %s: %w", dir, err)
-	}
-	return nil
-}
-
-// enforceFilePerm tightens the permission of an existing file at path to
-// filePerm. A missing file is not an error -- there's nothing to tighten
-// yet, and whatever creates it is responsible for using filePerm from the
-// start.
-func enforceFilePerm(path string) error {
-	if err := os.Chmod(path, filePerm); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("tightening permissions on %s: %w", path, err)
-	}
-	return nil
+	return hardenFile(c.LogFilePath())
 }

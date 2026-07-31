@@ -28,7 +28,7 @@ Key packages under `internal/`:
 | Package | Responsibility |
 |---------|---------------|
 | `version` | Build-time version stamping via ldflags |
-| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file on Unix (Windows lacks an equivalent primitive, logged as a one-time warning instead of claiming success -- tracked in #19) |
+| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file with each platform's native primitive (`harden_unix.go`: 0700/0600 mode bits; `harden_windows.go`: an inheritance-protected DACL granting only the owner, the process token user, SYSTEM, and Administrators, via `golang.org/x/sys/windows`) |
 | `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title, description, icon) stored externally under `config.Config.MetaDir()`, and deterministic default icon/color derivation from a canvas's ID |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
@@ -61,8 +61,10 @@ serves canvases and pushes SSE reloads on file changes (`server`, via
 - **No CGO**: the binary must be cross-compilable without a C toolchain.
 - **Dependencies stay minimal**: Go stdlib + `fsnotify` + one mDNS library +
   `goldmark` (serve-time markdown rendering) + the MCP SDK
-  (`github.com/modelcontextprotocol/go-sdk`, for `scrim mcp` only) only. Don't
-  add a dependency without a real need.
+  (`github.com/modelcontextprotocol/go-sdk`, for `scrim mcp` only) +
+  `golang.org/x/sys` (Windows-only, for the `config` package's ACL hardening —
+  there is no stdlib equivalent and CGO is off the table) only. Don't add a
+  dependency without a real need.
 - **Single binary, self-starting daemon**: no separate install/systemd step —
   the first verb that needs the daemon starts it if it isn't running.
 
