@@ -57,9 +57,9 @@ type Server struct {
 	oidcAuth *oidc.Authenticator
 
 	// principals is the hub's lazily-populated principal registry, fed on
-	// login (and, later, from CF headers and grant targets). Display/
-	// autocomplete only -- enforcement NEVER reads it. Non-nil only for a hub
-	// (set in NewHub); the default daemon leaves it nil.
+	// login, from verified forwarded-identity actors, and from grant targets.
+	// Display/autocomplete only -- enforcement NEVER reads it. Non-nil only for
+	// a hub (set in NewHub); the default daemon leaves it nil.
 	principals *principal.Registry
 
 	// directory is the source GET /api/principals autocompletes from. It

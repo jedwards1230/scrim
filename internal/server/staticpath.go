@@ -17,8 +17,8 @@ var errOutsideRoot = errors.New("server: resolved path escapes canvas root")
 // after /c/<id>/) against canvasRoot, guaranteeing the result cannot escape
 // canvasRoot. It:
 //
-//   - rejects any path component starting with "." (blocks dotfiles like
-//     the canvas metadata sidecar, and neutralizes ".."/"." components),
+//   - rejects any path component starting with "." (blocks dotfiles, and
+//     neutralizes ".."/"." components),
 //   - clamps ".."-style traversal by treating subpath as rooted,
 //   - rejects the result if, after resolving symlinks, it still falls
 //     outside canvasRoot.

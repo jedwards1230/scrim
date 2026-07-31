@@ -106,10 +106,10 @@ func containsGroup(groups []string, target string) bool {
 
 // handleCreateGrant serves POST /api/canvases/{id}/grants (hub only): it adds a
 // view-only grant to the canvas. The gate already proved the caller may write
-// the canvas (owner/admin/CF-actor); this handler additionally enforces a user
-// token's allowance (admin, a session-less CF actor, and the admin bearer are
-// unrestricted). For a link grant it mints a fresh link id + secret, stores only
-// the secret's hash, and returns the raw secret ONCE.
+// the canvas (owner/admin/forwarded actor); this handler additionally enforces
+// a user token's allowance (admin, a session-less forwarded actor, and the
+// admin bearer are unrestricted). For a link grant it mints a fresh link id +
+// secret, stores only the secret's hash, and returns the raw secret ONCE.
 func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := canvas.ValidateID(id); err != nil {
@@ -146,7 +146,7 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request) {
 
 	c := claimsFrom(r.Context())
 	// Enforce the resolving user token's allowance. Admin and the machine-plane
-	// CF actor (no token) are unrestricted; a user token may only share to
+	// forwarded actor (no token) are unrestricted; a user token may only share to
 	// targets its allowance permits.
 	if tok := tokenFrom(r.Context()); tok != nil && !c.Admin {
 		if !tok.AllowedGrantTargets.Allows(body.Kind, body.Target) {

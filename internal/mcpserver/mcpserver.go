@@ -909,7 +909,7 @@ func (s *server) handlePush(ctx context.Context, _ *mcp.CallToolRequest, in push
 	return textResult(hubURL), pushOutput{URL: hubURL}, nil
 }
 
-// ── result helpers (mirror labctl's textResult/errorResult) ─────────────────
+// ── result helpers ──────────────────────────────────────────────────────────
 
 // textResult wraps a human-readable summary in a successful CallToolResult.
 // The typed Out value the handler returns alongside it is marshalled into

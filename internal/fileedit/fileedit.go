@@ -35,6 +35,9 @@ var ErrNotFound = errors.New("old_string not found in file")
 // into replace_all or pick a more unique string.
 type MultipleMatchesError struct{ Count int }
 
+// Error names the occurrence count and the two ways out (replace_all, or a
+// more unique old_string), so the caller can fix the call without another
+// round-trip.
 func (e *MultipleMatchesError) Error() string {
 	return fmt.Sprintf("old_string occurs %d times; set replace_all or use a more unique string", e.Count)
 }
@@ -43,6 +46,8 @@ func (e *MultipleMatchesError) Error() string {
 // per-file cap. Size is the would-be size in bytes; Max is the cap.
 type TooLargeError struct{ Size, Max int }
 
+// Error states both the would-be size and the cap in bytes, so a caller can
+// size a smaller edit rather than guessing at the limit.
 func (e *TooLargeError) Error() string {
 	return fmt.Sprintf("edited file would be %d bytes, over the %d-byte per-file limit", e.Size, e.Max)
 }
@@ -70,10 +75,14 @@ type BatchError struct {
 	Err   error
 }
 
+// Error prefixes the cause with the failing edit's zero-based index -- the only
+// thing a batch adds over the single-edit message.
 func (e *BatchError) Error() string {
 	return fmt.Sprintf("edit %d: %s", e.Index, e.Err.Error())
 }
 
+// Unwrap returns the underlying cause so errors.Is/As (and the HTTP-status
+// mapping built on them) see through the batch wrapper.
 func (e *BatchError) Unwrap() error { return e.Err }
 
 // ApplyBatch applies edits sequentially to content -- each against the result

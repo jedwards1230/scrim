@@ -532,7 +532,7 @@ paths:
         Returns the canvas's owner and its current view-only grants, secret-free — a share-link
         grant appears only by its public `link_id`, never its secret or hash. The ACL is more
         privileged than the canvas view: only the owner, the admin push token, a verified
-        CF-forwarded actor that owns the canvas, or a principal that is itself an explicit
+        gateway-forwarded actor that owns the canvas, or a principal that is itself an explicit
         `user`/`group` grantee may read it. A caller who can see the canvas only via a share link or
         an `everyone` grant is refused (`403`), so a link holder cannot enumerate the owner's email
         or the other grantees.
@@ -559,7 +559,7 @@ paths:
       summary: Add a sharing grant to a canvas.
       description: >-
         Adds a view-only grant. Only the canvas owner, the admin push token, or a verified
-        CF-forwarded actor that owns the canvas may add a grant; a user token is additionally bounded
+        gateway-forwarded actor that owns the canvas may add a grant; a user token is additionally bounded
         by its `allowed_grant_targets` allowance (`403` when a target is not permitted). For a `link`
         grant the hub mints a fresh link id + secret and returns the raw secret ONCE — append it to
         the canvas URL as `?k=<secret>`. Adding an already-present user/group/everyone grant is a
@@ -756,7 +756,7 @@ paths:
       operationId: listPrincipals
       summary: Autocomplete observed principals for the share dialog.
       description: >-
-        Returns the principals the hub has observed (from logins, verified CF identity headers, and
+        Returns the principals the hub has observed (from logins, verified forwarded-identity headers, and
         grant targets) whose email or display name case-insensitively starts with `q`, capped at 20
         and sorted by email. With `q` omitted or empty it returns the first 20 principals. This is a
         display-only, best-effort convenience feeding the browser share dialog's grantee field — it

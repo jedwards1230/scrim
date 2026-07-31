@@ -103,6 +103,8 @@ type ErrStatus struct {
 	Body string
 }
 
+// Error reports the daemon's status code and the (trimmed) response body, so a
+// CLI error line names both what failed and what the daemon said about it.
 func (e *ErrStatus) Error() string {
 	return fmt.Sprintf("daemon responded %d: %s", e.Code, e.Body)
 }
