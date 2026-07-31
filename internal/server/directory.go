@@ -11,11 +11,11 @@ import (
 // feeder slots behind that seam, all display-only and NONE consulted by
 // enforcement:
 //
-//  1. Lazy registry (*principal.Registry, PR #53) -- learns principals from
-//     logins, verified CF headers, and grant targets, persisted to
-//     principals.json. Always present on a hub; the sole source when Authentik
-//     is unconfigured.
-//  2. Authentik pull (*authentik.Client, this issue #54) -- OPTIONAL, read-only
+//  1. Lazy registry (*principal.Registry, #53) -- learns principals from
+//     logins, verified forwarded-identity headers, and grant targets, persisted
+//     to principals.json. Always present on a hub; the sole source when
+//     Authentik is unconfigured.
+//  2. Authentik pull (*authentik.Client, #54) -- OPTIONAL, read-only
 //     REST pull of users/groups behind an in-memory TTL cache, NEVER persisted.
 //     Composed with the lazy registry via compositeLister when configured.
 //  3. SCIM (documented slot, NOT built) -- a future SCIM feeder

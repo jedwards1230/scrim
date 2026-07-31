@@ -32,7 +32,7 @@ const maxCompressedReadBytes = maxFileBytes + maxFileBytes/1000 + 64
 
 // hubTimeout bounds a single hub machine-API call. These are control-plane and
 // per-file operations against a hub the operator controls (commonly in-cluster
-// behind ContextForge), not long-running streams.
+// alongside this MCP server), not long-running streams.
 const hubTimeout = 30 * time.Second
 
 // hubBackend drives a remote scrim hub's bearer-authenticated machine API over
@@ -82,8 +82,9 @@ func (c canvasWire) toInfo(baseURL string) CanvasInfo {
 	return CanvasInfo{
 		ID:    c.ID,
 		Title: c.Title,
-		// Always present the client-reachable view URL, never the hub's
-		// own internal host:port (which may be a container address).
+		// Always rebuild the URL from the configured hub base, never the
+		// hub's self-reported host:port (which is its bind address --
+		// 0.0.0.0 or a container address -- and reaches nobody).
 		URL:        linkURL(baseURL, c.ID),
 		Dir:        c.Dir,
 		Icon:       c.Icon,
@@ -113,8 +114,15 @@ type snapWire struct {
 	Label     string    `json:"label"`
 }
 
-// linkURL builds the client-reachable view URL for a canvas from the hub base,
-// without any token in the URL. id=="" yields the hub root.
+// linkURL builds the view URL for a canvas from the hub base, without any token
+// in the URL. id=="" yields the hub root.
+//
+// The base is whatever --hub was given: there is no separate "external URL"
+// setting, so a server configured with an in-cluster address
+// (http://scrim-hub:7788) returns links on that address -- correct for the API
+// hop, but not resolvable for a human outside the cluster. Point --hub at the
+// externally-reachable URL when the returned links are meant to be opened by a
+// person (see docs/mcp.md).
 func linkURL(baseURL, id string) string {
 	base := strings.TrimRight(baseURL, "/")
 	if id == "" {
@@ -244,7 +252,7 @@ func (b *hubBackend) CopyCanvas(ctx context.Context, from, to string, overwrite 
 	if err := b.doJSON(ctx, http.MethodPost, "/api/canvases/"+url.PathEscape(from)+"/copy", body, &resp); err != nil {
 		return CopyInfo{}, err
 	}
-	// Present the client-reachable view URL, never the hub's internal path.
+	// Present the view URL built from the configured hub base (see linkURL).
 	return CopyInfo{From: resp.From, To: resp.To, URL: linkURL(b.baseURL, resp.To)}, nil
 }
 
@@ -444,8 +452,9 @@ func (b *hubBackend) newRequest(ctx context.Context, method, rawURL string, body
 		return nil, fmt.Errorf("building hub request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+b.token)
-	// When the call carries a verified CF-forwarded actor, attribute it to the
-	// hub via X-Scrim-Actor-* on top of the admin bearer (#51). The hub trusts
+	// When the call carries a verified actor (gateway-forwarded, or derived
+	// from a validated OAuth token), attribute it to the hub via
+	// X-Scrim-Actor-* on top of the admin bearer. The hub trusts
 	// these headers ONLY because they ride the valid admin push token above; a
 	// call with no verified actor sends the admin bearer alone and is attributed
 	// to admin. localBackend, having no remote hub, ignores the actor entirely.

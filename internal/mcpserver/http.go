@@ -58,8 +58,9 @@ func IsLoopbackAddr(addr string) bool {
 // resource: /mcp is wrapped with bearer validation + per-tool scope enforcement
 // and the protected-resource metadata is served UNAUTHENTICATED at its
 // well-known path. A nil oauth leaves the transport exactly as before (no
-// bearer requirement, no metadata endpoint). Either way the CF header-trust
-// plane (identity.go) is unchanged -- the two identity layers are orthogonal.
+// bearer requirement, no metadata endpoint). Either way the forwarded-identity
+// header-trust plane (identity.go) is unchanged -- the two identity layers are
+// orthogonal.
 func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthValidator) http.Handler {
 	srv := NewServer(cfg, ver, hub)
 	mux := http.NewServeMux()
@@ -85,8 +86,7 @@ func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthV
 // with timeouts tuned for the MCP streaming contract. It is a separate
 // function so the timeout policy is unit-testable without binding a listener.
 //
-// Timeout rationale (copied from labctl's mcpserver, satisfies gosec
-// G112/G114 and blunts Slowloris):
+// Timeout rationale (satisfies gosec G112/G114 and blunts Slowloris):
 //   - ReadHeaderTimeout (10s): bounds slow-header (Slowloris) attacks.
 //   - ReadTimeout (60s): bounds the full request read. Streamable-HTTP MCP
 //     requests are small JSON-RPC POST bodies (and bodyless GETs for the

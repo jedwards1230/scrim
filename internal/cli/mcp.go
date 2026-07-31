@@ -44,9 +44,10 @@ const (
 // an RFC 9728 protected resource that validates a bearer JWT per request, so a
 // non-loopback bind no longer needs --allow-lan (the endpoint is authenticated).
 // Hub mode requires a push token (from SCRIM_PUSH_TOKEN or --hub-token-file)
-// and fails closed without one. OAuth (client connection) and the CF
-// header-trust plane (SCRIM_MCP_IDENTITY_HMAC_SECRET, end-user attribution) are
-// orthogonal layers that may be configured together or independently.
+// and fails closed without one. OAuth (client connection) and the
+// forwarded-identity header-trust plane (SCRIM_MCP_IDENTITY_HMAC_SECRET,
+// end-user attribution) are orthogonal layers that may be configured together
+// or independently.
 func cmdMcp(args []string, _, stderr io.Writer) int {
 	fs := newFlagSet("mcp", stderr)
 	cf := registerCommonFlags(fs)
@@ -98,8 +99,9 @@ func cmdMcp(args []string, _, stderr io.Writer) int {
 	if hub != nil && hubBearerInsecure(hub.BaseURL) {
 		outf(stderr, "scrim mcp: warning: --hub uses plain http to a non-loopback host — the push token is sent unencrypted; prefer https\n")
 	}
-	// The CF identity plane only reaches this server over the streamable-HTTP
-	// transport (stdio carries no inbound headers). When that transport is used
+	// The forwarded-identity plane only reaches this server over the
+	// streamable-HTTP transport (stdio carries no inbound headers). When that
+	// transport is used
 	// in hub mode WITHOUT the shared HMAC secret set, X-Forwarded-User-* identity
 	// is not verified and every call is attributed to the hub's admin push token
 	// alone -- a deliberately fail-closed default worth a one-line diagnostic.

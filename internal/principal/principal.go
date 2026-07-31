@@ -1,6 +1,6 @@
 // Package principal maintains the hub's lazily-populated registry of the
-// principals it has seen -- from logins, verified CF identity headers, and
-// grant targets. It exists purely for display and autocomplete (a future
+// principals it has seen -- from logins, verified forwarded-identity headers,
+// and grant targets. It exists purely for display and autocomplete (a future
 // share UI listing who a canvas can be shared with); enforcement NEVER reads
 // it. The registry is a single whole-file JSON document under the meta
 // directory, read and written atomically under a mutex, and a missing or

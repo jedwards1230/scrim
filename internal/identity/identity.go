@@ -1,6 +1,6 @@
 // Package identity holds the hub's request-time authorization primitives: the
 // Claims a request carries (resolved once by the hub gate from an OIDC session,
-// an admin push token, a user token, or a CF-forwarded actor) and the pure
+// an admin push token, a user token, or a gateway-forwarded actor) and the pure
 // CanView/CanWrite functions that decide, from those claims plus a canvas's
 // stored owner+grants, whether the request may see or mutate the canvas.
 //
@@ -22,8 +22,8 @@ import (
 // is the anonymous principal (no subject, no email, not admin) -- a caller who
 // presented no valid credential.
 type Claims struct {
-	// Subject is the IdP `sub` (browser session) or the CF-forwarded user id;
-	// may be empty.
+	// Subject is the IdP `sub` for a browser session, or the actor id a
+	// forwarded-identity request re-emits as X-Scrim-Actor-Id. May be empty.
 	Subject string
 	// Email is the principal id used for ownership and user/everyone grants.
 	Email string
@@ -88,7 +88,7 @@ func CanView(owner string, grants []canvas.Grant, c Claims, presentedLinkSecret 
 }
 
 // CanWrite reports whether claims may mutate a canvas with the given owner.
-// Grants are view-only in PR1: only admin and the owner may write.
+// Grants are view-only, so only admin and the owner may write.
 func CanWrite(owner string, c Claims) bool {
 	return c.Admin || (owner != "" && owner == c.Email)
 }

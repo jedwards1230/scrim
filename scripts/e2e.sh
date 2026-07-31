@@ -1184,9 +1184,9 @@ else
   bad "token scenario: a revoked token no longer authorizes writes (got $STATUS)"
 fi
 
-# --- CF-forwarded actor attribution (#51) ---
+# --- Forwarded-actor attribution (#51) ---
 # The admin push token carries X-Scrim-Actor-* headers (as scrim-mcp attaches
-# after verifying ContextForge's signed identity). A canvas created that way is
+# after verifying a trusted gateway's signed identity). A canvas created that way is
 # owned by the ACTOR, not admin; the same headers WITHOUT the admin bearer are
 # ignored (a spoof buys nothing). Both against the running non-OIDC hub1.
 ACTOR_CREATE=$(curl -fsS -X POST -H "Authorization: Bearer $HUB_PUSH_TOKEN" \
@@ -1303,7 +1303,7 @@ fi
 # in shell is impractical, so those live as Go httptest+oidctest integration
 # tests in internal/server/hubgate_identity_test.go, hubgate_cf_test.go, and
 # handlers_tokens_test.go instead (per the PR contract). Doable here without
-# OIDC and covered above: healthz, token-as-owner writes, CF-actor attribution
+# OIDC and covered above: healthz, token-as-owner writes, forwarded-actor attribution
 # + spoof rejection (#51), grant allowance enforcement + list_grants (#52), and
 # legacy migration + claim ownership transfer (#55).
 

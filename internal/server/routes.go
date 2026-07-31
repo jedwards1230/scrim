@@ -54,8 +54,8 @@ func (s *Server) routes() http.Handler {
 
 		// Per-canvas sharing grants (#52). GET is a read (visibility-gated like
 		// any other per-canvas read); POST/DELETE are writes authorized in
-		// withHubGate (owner/admin/CF-actor), with POST additionally bounded by a
-		// user token's allowance in the handler.
+		// withHubGate (owner/admin/forwarded actor), with POST additionally
+		// bounded by a user token's allowance in the handler.
 		mux.HandleFunc("GET /api/canvases/{id}/grants", s.handleListGrants)
 		mux.HandleFunc("POST /api/canvases/{id}/grants", s.handleCreateGrant)
 		mux.HandleFunc("DELETE /api/canvases/{id}/grants/{grantRef}", s.handleDeleteGrant)

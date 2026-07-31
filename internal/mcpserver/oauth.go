@@ -15,19 +15,19 @@ import (
 )
 
 // OAuth 2.0 protected-resource support for the streamable-HTTP transport
-// (scrim#33). This is a SECOND, orthogonal identity layer to identity.go's CF
-// header-trust plane:
+// (scrim#33). This is a SECOND, orthogonal identity layer to identity.go's
+// forwarded-identity header-trust plane:
 //
 //   - OAuth (here) authenticates the CLIENT CONNECTION: a remote MCP host
 //     (claude.ai, another agent runtime) presents an OAuth bearer JWT minted by
 //     an OIDC/OAuth authorization server (Authentik is the reference AS); scrim
 //     validates its signature/issuer/audience/expiry against the AS's JWKS and
 //     enforces per-tool read/write scopes.
-//   - CF header-trust (identity.go) attributes the END USER behind a trusted
-//     gateway via HMAC-signed X-Forwarded-User-* headers.
+//   - Forwarded-identity header-trust (identity.go) attributes the END USER
+//     behind a trusted gateway via HMAC-signed X-Forwarded-User-* headers.
 //
-// The two compose: a deployment may run behind ContextForge (CF plane) AND
-// require an OAuth bearer (this plane), or either alone. When OAuth is
+// The two compose: a deployment may sit behind a trusted gateway (that plane)
+// AND require an OAuth bearer (this plane), or either alone. When OAuth is
 // unconfigured the transport behaves exactly as before -- no metadata endpoint,
 // no bearer requirement. The stdio transport carries no HTTP request and is
 // never touched by this layer (local trust).

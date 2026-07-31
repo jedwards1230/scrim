@@ -1,13 +1,14 @@
 // Package cli implements scrim's verb parsing and dispatch: add, path, list,
-// link, open, rm, snap, snaps, revert, status, stop, serve, hub, and push.
-// Each verb is a thin wrapper that either talks to a running daemon over its
-// local HTTP API (self-starting it first if needed) or, for path/rm's
+// link, open, rm, snap, snaps, revert, status, stop, serve, hub, push, and
+// mcp. Each verb is a thin wrapper that either talks to a running daemon over
+// its local HTTP API (self-starting it first if needed) or, for path/rm's
 // fallback/snap/snaps/revert/status/stop, works directly against the
 // filesystem/daemon state. hub and push are the two exceptions: hub runs
 // the same serving engine in a separate, network-reachable central-store
 // mode (see internal/server's hub mode), and push is a standalone client
 // that tars a local canvas and POSTs it to a hub -- neither self-starts or
-// talks to a local daemon at all.
+// talks to a local daemon at all. mcp runs the MCP server (see
+// internal/mcpserver), which drives either the local daemon or a remote hub.
 package cli
 
 import (

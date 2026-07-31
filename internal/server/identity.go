@@ -47,9 +47,9 @@ func claimsFrom(ctx context.Context) identity.Claims {
 }
 
 // ownerFromClaims derives the owner id to stamp on a canvas created/pushed by
-// the given claims: the principal's email when it has one (an OIDC session or,
-// #51, a CF-forwarded actor), otherwise "admin" -- the id legacy/bootstrap
-// canvases and the global push token own.
+// the given claims: the principal's email when it has one (an OIDC session, a
+// user token, or a gateway-forwarded actor), otherwise "admin" -- the id
+// legacy/bootstrap canvases and the global push token own.
 func ownerFromClaims(c identity.Claims) string {
 	if c.Email != "" {
 		return c.Email

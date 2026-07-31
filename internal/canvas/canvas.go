@@ -1,9 +1,9 @@
 // Package canvas manages canvas directories on disk: validating IDs,
 // creating/listing/deleting canvases, and reading/writing per-canvas
 // metadata (title, description, and icon). Metadata is deliberately stored
-// external to the canvas directory itself -- see MetaFileName's doc comment
-// on canvas.Create -- keyed by canvas ID under a separate metadata
-// directory the caller provides (config.Config.MetaDir).
+// external to the canvas directory itself -- see Create's doc comment for why
+// -- keyed by canvas ID under a separate metadata directory the caller
+// provides (config.Config.MetaDir).
 package canvas
 
 import (
@@ -228,7 +228,7 @@ func Create(canvasesDir, metaDir, id, title, description, icon, owner string) (s
 
 // GetOwnerGrants returns canvas id's owner and grants straight from its
 // metadata, tolerating a missing/empty metadata file as owner-only ("" owner,
-// no grants). Callers must validate id first is unnecessary -- it validates.
+// no grants). It validates id itself, so callers need not.
 func GetOwnerGrants(metaDir, id string) (owner string, grants []Grant, err error) {
 	if err := ValidateID(id); err != nil {
 		return "", nil, err
