@@ -14,6 +14,15 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 
+	// The bare canvas prefix, with no id to serve, goes to the gallery (#30).
+	// Both forms are exact-literal patterns ("/c" and, via {$}, "/c/"), so
+	// ServeMux's most-specific-wins matching leaves every /c/{id} route below
+	// -- the view, __events, and favicon alike -- untouched. Registering /c
+	// itself also pre-empts the implicit 301 ServeMux would otherwise issue
+	// from /c to /c/ once /c/ exists, keeping it a single hop.
+	mux.HandleFunc("GET /c", s.handleCanvasIndexRedirect)
+	mux.HandleFunc("GET /c/{$}", s.handleCanvasIndexRedirect)
+
 	mux.HandleFunc("GET /c/{id}", s.handleCanvasRedirect)
 	mux.HandleFunc("GET /c/{id}/__events", s.handleSSE)
 	mux.HandleFunc("GET /c/{id}/favicon.ico", s.handleCanvasFavicon)
