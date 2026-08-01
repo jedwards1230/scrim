@@ -2,7 +2,8 @@
 # End-to-end test of the scrim core engine: builds the real binary and
 # drives it as a subprocess, asserting real observable behavior rather than
 # just "it ran". Each scenario uses its own --dir so repeated runs never
-# collide with a stale state file from a previous run.
+# collide with a stale state file from a previous run, and its own port (see
+# use_port/alloc_port below) so no scenario ever binds the default 7777.
 #
 # Auth is on by default (Phase 3), so every scenario that curls the daemon
 # directly must either present the token scrim itself printed (the URLs
@@ -11,15 +12,77 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/.e2e-scrim"
-BIN2="$REPO_ROOT/.e2e-scrim-v2"
 WORKDIR="$(mktemp -d)"
+# Both binaries live inside this run's $WORKDIR, not the repo tree: two
+# concurrent runs would otherwise build over -- and then delete -- each
+# other's binary, which no amount of port isolation would fix. It also means
+# an interrupted run leaves nothing behind in the checkout.
+BIN="$WORKDIR/.e2e-scrim"
+BIN2="$WORKDIR/.e2e-scrim-v2"
 
 PASS=0
 FAIL=0
 FAILED_SCENARIOS=()
+SKIPPED=0
+SKIPPED_SCENARIOS=()
 
 log() { printf '\n=== %s ===\n' "$1"; }
+
+# --- Port isolation ---------------------------------------------------------
+# Every scenario that starts a daemon, hub, or MCP server takes its port from
+# this allocator rather than falling through to scrim's default 7777. Two
+# reasons, both real: 7777 is where a developer's actual daemon lives (see the
+# Test Isolation rule in CLAUDE.md), and scenarios that share one port cannot
+# run concurrently -- with a second copy of this suite, or with anything else
+# on a shared CI runner.
+#
+# The block base is derived from this run's PID so two concurrent runs land in
+# different 100-port blocks; SCRIM_E2E_PORT_BASE overrides it. alloc_port
+# additionally skips any port something is already listening on, which closes
+# the residual overlap when two runs do land in the same block. That check is
+# a connect, so it is inherently racy against a listener that appears in the
+# gap before the daemon binds -- it narrows the window rather than closing it,
+# which is why the per-run block offset carries the real isolation.
+#
+# The 20000-31900 span is deliberate: it is above anything scrim or a dev tool
+# claims by default, and the whole block (base + 100) still lands below 32768,
+# where Linux's default ephemeral range starts. A port already held as some
+# other process's ephemeral *client* socket would fail to bind while looking
+# free to port_in_use, which only detects listeners.
+E2E_PORT_BLOCK=100
+E2E_PORT_BASE=${SCRIM_E2E_PORT_BASE:-$((20000 + ($$ % 119) * E2E_PORT_BLOCK))}
+E2E_PORT_NEXT=$E2E_PORT_BASE
+
+# port_in_use succeeds when something accepts a connection on 127.0.0.1:$1.
+port_in_use() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# alloc_port sets $PORT to the next free port in this run's block. It sets a
+# global rather than echoing, because a `$(...)` call would advance the
+# counter only inside the subshell and hand every caller the same port.
+alloc_port() {
+  while [ "$E2E_PORT_NEXT" -lt "$((E2E_PORT_BASE + E2E_PORT_BLOCK))" ]; do
+    PORT=$E2E_PORT_NEXT
+    E2E_PORT_NEXT=$((E2E_PORT_NEXT + 1))
+    port_in_use "$PORT" || return 0
+  done
+  echo "e2e: exhausted the port block at $E2E_PORT_BASE" >&2
+  exit 1
+}
+
+# use_port gives the current scenario its own port and exports it as
+# SCRIM_PORT. Exporting rather than passing --port to a single command is
+# deliberate: every verb that takes commonFlags defaults --port from
+# SCRIM_PORT, so add/list/open/status in the same scenario all address the
+# same daemon without each call having to repeat the flag. (`hub`/`push`
+# deliberately don't take commonFlags -- those callers use alloc_port and pass
+# the port explicitly.)
+use_port() {
+  alloc_port
+  SCRIM_PORT=$PORT
+  export SCRIM_PORT
+}
 
 ok() {
   PASS=$((PASS + 1))
@@ -32,6 +95,18 @@ bad() {
   printf '  [FAIL] %s\n' "$1"
 }
 
+# skip records a scenario this environment can't run (a missing stub command,
+# no python3). Recording it rather than just printing is what makes the
+# summary able to fail the run under CI: a skip on a developer's laptop is a
+# fact about that laptop, but a skip in CI means the suite quietly stopped
+# verifying something while still reporting success -- the exact failure mode
+# an unrun test suite has.
+skip() {
+  SKIPPED=$((SKIPPED + 1))
+  SKIPPED_SCENARIOS+=("$1")
+  printf '  [SKIP] %s\n' "$1"
+}
+
 cleanup() {
   # Best-effort: stop any daemons left running by a failed scenario.
   for d in "$WORKDIR"/*/; do
@@ -42,7 +117,6 @@ cleanup() {
     fi
   done
   rm -rf "$WORKDIR"
-  rm -f "$BIN" "$BIN2"
 }
 trap cleanup EXIT
 
@@ -79,6 +153,35 @@ wait_for_file_gone() {
 
 pid_of_state() {
   grep -o '"pid": *[0-9]*' "$1" 2>/dev/null | grep -o '[0-9]*'
+}
+
+# stop_and_verify stops the daemon at --dir $1 and asserts it actually went
+# away, instead of the `stop ... >/dev/null 2>&1 || true` form used for purely
+# incidental teardown. Used where the stop follows a scenario that deliberately
+# left the daemon in an unusual state (a recovered stale pid, a converged
+# double-start race) -- exactly the cases where a stop that quietly failed
+# would leave a live daemon behind and tell nobody.
+stop_and_verify() {
+  local dir="$1" label="$2" rc out
+  out=$("$BIN" stop --dir "$dir" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok "$label: stop exited 0"
+  else
+    bad "$label: stop exited 0 (rc=$rc: $out)"
+  fi
+  if wait_for_file_gone "$dir/daemon.json" 5; then
+    ok "$label: state file removed after stop"
+  else
+    bad "$label: state file removed after stop"
+  fi
+}
+
+# redact_secrets masks every URL-borne secret scrim mints -- "?t=" capability
+# tokens and "?k=" hub link-grant secrets -- in text read from stdin, for
+# diagnostics that get printed into a public repo's CI logs.
+redact_secrets() {
+  sed -E -e 's/([?&]t=)[A-Za-z0-9_-]+/\1<redacted>/g' -e 's/([?&]k=)[A-Za-z0-9_-]+/\1<redacted>/g'
 }
 
 # strip_query removes a "?..." suffix from a URL, if present.
@@ -137,6 +240,7 @@ sse_client_count() {
 # --- Scenario 1 + 2: self-start on `add`, HTML served with injected script ---
 log "Scenario 1+2: add self-starts daemon; canvas HTML is served with injected SSE script"
 DIR1="$WORKDIR/s1"
+use_port
 OUT=$("$BIN" add e2e-test --title "E2E" --dir "$DIR1" --idle-timeout 5m 2>&1)
 CANVAS_DIR=$(echo "$OUT" | sed -n '1p')
 CANVAS_URL=$(echo "$OUT" | sed -n '2p')
@@ -152,6 +256,18 @@ if [ -n "${PID1:-}" ] && kill -0 "$PID1" 2>/dev/null; then
   ok "daemon pid ($PID1) is alive"
 else
   bad "daemon pid is alive"
+fi
+
+# Port isolation is a property of this suite, not just a convention, so assert
+# it rather than trusting use_port: the daemon must have bound the port the
+# allocator handed out, and it must not be 7777. If SCRIM_PORT ever stopped
+# reaching the spawned daemon, every scenario would silently fall back onto a
+# developer's real port and this is the assertion that catches it.
+BOUND_PORT=$(grep -o '"port": *[0-9]*' "$DIR1/daemon.json" 2>/dev/null | grep -o '[0-9]*$')
+if [ "${BOUND_PORT:-}" = "$SCRIM_PORT" ] && [ "${BOUND_PORT:-}" != "7777" ]; then
+  ok "daemon bound the allocated isolated port ($BOUND_PORT), not the default 7777"
+else
+  bad "daemon bound the allocated isolated port (state says ${BOUND_PORT:-none}, allocator said $SCRIM_PORT)"
 fi
 
 echo '<html><body><h1>Hello E2E</h1></body></html>' >"$CANVAS_DIR/index.html"
@@ -245,11 +361,12 @@ fi
 
 # --- Scenario 6: --no-auth bypasses gating entirely ---
 log "Scenario 6: --no-auth disables gating entirely"
-# DIR1's daemon (default port 7777) is still running at this point (it's
-# stopped in Scenario 7, below) -- use a distinct port so this daemon can
-# actually bind.
+# DIR1's daemon is still running at this point (it's stopped in Scenario 7,
+# below), so the use_port call here is load-bearing beyond the suite-wide
+# isolation rule: without a distinct port this daemon could not bind at all.
 DIR_NOAUTH="$WORKDIR/s-noauth"
-OUT_NOAUTH=$("$BIN" add noauth-test --dir "$DIR_NOAUTH" --port 7778 --no-auth --idle-timeout 5m 2>&1)
+use_port
+OUT_NOAUTH=$("$BIN" add noauth-test --dir "$DIR_NOAUTH" --no-auth --idle-timeout 5m 2>&1)
 NOAUTH_CANVAS_DIR=$(echo "$OUT_NOAUTH" | sed -n '1p')
 NOAUTH_CANVAS_URL=$(echo "$OUT_NOAUTH" | sed -n '2p')
 if [ -f "$DIR_NOAUTH/daemon.json" ]; then
@@ -296,6 +413,7 @@ echo "(stop said: $STOP_OUT)"
 # --- Scenario 8: idle-exit ---
 log "Scenario 8: daemon exits on its own after --idle-timeout with no SSE clients"
 DIR5="$WORKDIR/s5"
+use_port
 "$BIN" add idle-test --dir "$DIR5" --idle-timeout 3s >/dev/null
 if [ -f "$DIR5/daemon.json" ]; then
   ok "idle-exit scenario: daemon started"
@@ -311,6 +429,7 @@ fi
 # --- Scenario 9: stale-pid recovery ---
 log "Scenario 9: stale-pid recovery after a simulated crash"
 DIR6="$WORKDIR/s6"
+use_port
 "$BIN" add stale-test --dir "$DIR6" >/dev/null
 PID6=$(pid_of_state "$DIR6/daemon.json")
 if [ -z "${PID6:-}" ]; then
@@ -322,8 +441,15 @@ else
   while kill -0 "$PID6" 2>/dev/null && [ $SECONDS -lt $DEADLINE ]; do sleep 0.2; done
 
   RECOVER_OUT=$("$BIN" add stale-test-2 --dir "$DIR6" 2>&1)
-  if [ $? -eq 0 ] || echo "$RECOVER_OUT" | grep -q "canvases"; then
-    :
+  RECOVER_RC=$?
+  # The recovering `add` must itself succeed. This replaces a block that
+  # computed the same exit status and then discarded it in an empty `if`,
+  # which also read `$?` after an assignment (the assignment's status, not the
+  # command's) and so could never have been meaningful.
+  if [ "$RECOVER_RC" -eq 0 ]; then
+    ok "stale-pid scenario: the recovering add exited 0"
+  else
+    bad "stale-pid scenario: the recovering add exited 0 (rc=$RECOVER_RC: $RECOVER_OUT)"
   fi
   if [ -f "$DIR6/daemon.json" ]; then
     NEWPID=$(pid_of_state "$DIR6/daemon.json")
@@ -336,11 +462,12 @@ else
     bad "stale state detected and a fresh daemon was spawned (no state file after recovery)"
   fi
 fi
-"$BIN" stop --dir "$DIR6" >/dev/null 2>&1 || true
+stop_and_verify "$DIR6" "stale-pid scenario"
 
 # --- Scenario 10: double-start race converges on one daemon ---
 log "Scenario 10: concurrent adds converge on exactly one daemon"
 DIR7="$WORKDIR/s7"
+use_port
 # Keep the racers' output inside $WORKDIR so the EXIT trap cleans it up, and
 # so the diagnostics dump below can still read it (the previous /tmp files
 # were captured but never examined, then deleted -- which is why the one
@@ -374,9 +501,10 @@ else
   bad "double-start race: a daemon came up"
 fi
 
-# Count actually-listening scrim serve processes for this dir's port (default
-# 7777 unless overridden) to prove convergence on one process, not just "no
-# crash".
+# Count actually-listening scrim serve processes for this dir to prove
+# convergence on one process, not just "no crash". Matching on --dir (which
+# `daemon.spawn` always passes immediately after `serve`) keeps this scoped to
+# this scenario even when another scrim is running elsewhere on the machine.
 sleep 0.3
 MATCHING_PIDS=$(pgrep -f "scrim serve --dir $DIR7" 2>/dev/null | wc -l | tr -d ' ')
 if [ "$MATCHING_PIDS" = "1" ]; then
@@ -398,14 +526,18 @@ fi
 # emitted at failure time -- there is no second chance to collect it.
 if [ "$FAIL" -ne "$S10_FAIL_START" ]; then
   printf '  --- scenario 10 diagnostics ---\n'
-  # Indent for readability, and redact the capability token -- these
-  # diagnostics land in CI logs and this repo is public.
+  # Indent for readability, and redact both URL-borne secrets -- these
+  # diagnostics land in CI logs and this repo is public. "?t=" is the
+  # capability token; "?k=" is a hub link-grant secret. This scenario does no
+  # sharing so no "?k=" can appear in its output today, but redacting only the
+  # secret that happens to be reachable is how the next reuse of this block
+  # leaks the other one.
   printf '  race-a exit=%s output:\n' "$RACE_RC_A"
-  if [ -s "$RACE_OUT_A" ]; then sed -e 's/?t=[A-Za-z0-9]*/?t=<redacted>/g' -e 's/^/    /' "$RACE_OUT_A"; else printf '    (empty)\n'; fi
+  if [ -s "$RACE_OUT_A" ]; then redact_secrets <"$RACE_OUT_A" | sed 's/^/    /'; else printf '    (empty)\n'; fi
   printf '  race-b exit=%s output:\n' "$RACE_RC_B"
-  if [ -s "$RACE_OUT_B" ]; then sed -e 's/?t=[A-Za-z0-9]*/?t=<redacted>/g' -e 's/^/    /' "$RACE_OUT_B"; else printf '    (empty)\n'; fi
+  if [ -s "$RACE_OUT_B" ]; then redact_secrets <"$RACE_OUT_B" | sed 's/^/    /'; else printf '    (empty)\n'; fi
   printf '  daemon log (%s):\n' "$DIR7/daemon.log"
-  if [ -s "$DIR7/daemon.log" ]; then sed 's/^/    /' "$DIR7/daemon.log"; else printf '    (absent or empty)\n'; fi
+  if [ -s "$DIR7/daemon.log" ]; then redact_secrets <"$DIR7/daemon.log" | sed 's/^/    /'; else printf '    (absent or empty)\n'; fi
   printf '  canvases on disk:\n'
   # shellcheck disable=SC2012 # canvas ids are validated [A-Za-z0-9._-]; ls is fine here
   S10_CANVASES=$(ls -1 "$DIR7/canvases" 2>/dev/null | sed 's/^/    /')
@@ -417,7 +549,7 @@ if [ "$FAIL" -ne "$S10_FAIL_START" ]; then
   printf '  --- end diagnostics ---\n'
 fi
 
-"$BIN" stop --dir "$DIR7" >/dev/null 2>&1 || true
+stop_and_verify "$DIR7" "double-start race"
 
 # --- Scenario 11: open prints the URL by default and never launches a
 # browser unless explicitly opted in (--browser or SCRIM_OPEN_BROWSER=1) ---
@@ -426,6 +558,7 @@ fi
 # popping a real browser tab on the machine running this script.
 log "Scenario 11: open prints the URL by default (no browser launch); --browser/SCRIM_OPEN_BROWSER opts in"
 DIR_OPEN="$WORKDIR/s-open"
+use_port
 "$BIN" add open-test --dir "$DIR_OPEN" --idle-timeout 5m >/dev/null
 
 STUB_BIN_DIR="$WORKDIR/stub-bin"
@@ -493,7 +626,7 @@ if [ -n "$STUB_CMD_NAME" ]; then
     bad "open --browser attempts a browser launch (stub invoked)"
   fi
 else
-  printf "  [SKIP] Scenario 11(b): no stub command for uname -s=%s\n" "$(uname -s)"
+  skip "Scenario 11(b): no stub command for uname -s=$(uname -s)"
 fi
 
 # (c) SCRIM_OPEN_BROWSER=1 opts in persistently, without the flag.
@@ -512,7 +645,7 @@ if [ -n "$STUB_CMD_NAME" ]; then
     bad "SCRIM_OPEN_BROWSER=1 attempts a browser launch without --browser (stub invoked)"
   fi
 else
-  printf "  [SKIP] Scenario 11(c): no stub command for uname -s=%s\n" "$(uname -s)"
+  skip "Scenario 11(c): no stub command for uname -s=$(uname -s)"
 fi
 
 rm -f /tmp/e2e-open-stderr.$$ "$BROWSER_MARKER"
@@ -549,7 +682,7 @@ if [ -n "$STUB_CMD_NAME" ]; then
   fi
   rm -f /tmp/e2e-link-stderr.$$ "$BROWSER_MARKER"
 else
-  printf "  [SKIP] Scenario 11b: no stub command for uname -s=%s\n" "$(uname -s)"
+  skip "Scenario 11b: no stub command for uname -s=$(uname -s)"
 fi
 
 "$BIN" stop --dir "$DIR_OPEN" >/dev/null 2>&1 || true
@@ -561,6 +694,7 @@ fi
 # internal/openurl/openurl_test.go.
 log "Scenario 12: a CLI built at a different version transparently restarts a mismatched daemon"
 DIR8="$WORKDIR/s8"
+use_port
 "$BIN" add version-test --dir "$DIR8" --idle-timeout 5m >/dev/null
 PID8=$(pid_of_state "$DIR8/daemon.json")
 if [ -n "${PID8:-}" ] && kill -0 "$PID8" 2>/dev/null; then
@@ -621,6 +755,7 @@ rm -f "$BIN2"
 # timeout even though the daemon went on to exit anyway.
 log "Scenario 13: stop succeeds within a few seconds despite an open SSE connection (issue #11)"
 DIR9="$WORKDIR/s9"
+use_port
 OUT9=$("$BIN" add sse-stop-test --dir "$DIR9" --idle-timeout 5m 2>&1)
 CANVAS_DIR9=$(echo "$OUT9" | sed -n '1p')
 CANVAS_URL9=$(echo "$OUT9" | sed -n '2p')
@@ -704,6 +839,7 @@ wait "$SSE_CURL_PID" 2>/dev/null || true
 # process (not via `scrim stop`) to exercise that path specifically.
 log "Scenario 14: SIGTERM to the daemon process exits promptly despite an open SSE connection (issue #11, ctx.Done path)"
 DIR10="$WORKDIR/s10"
+use_port
 OUT10=$("$BIN" add sigterm-test --dir "$DIR10" --idle-timeout 5m 2>&1)
 CANVAS_DIR10=$(echo "$OUT10" | sed -n '1p')
 CANVAS_URL10=$(echo "$OUT10" | sed -n '2p')
@@ -774,6 +910,7 @@ wait "$SSE_CURL_PID10" 2>/dev/null || true
 # still fires when the markdown file itself is touched ---
 log "Scenario 15: a canvas with only index.md renders via goldmark + the skeleton, and SSE live-reload works when the .md file is touched"
 DIR11="$WORKDIR/s11"
+use_port
 OUT11=$("$BIN" add md-test --dir "$DIR11" --idle-timeout 5m 2>&1)
 CANVAS_DIR11=$(echo "$OUT11" | sed -n '1p')
 CANVAS_URL11=$(echo "$OUT11" | sed -n '2p')
@@ -836,6 +973,7 @@ fi
 # the skeleton ---
 log "Scenario 16: an HTML fragment with no doctype/html wrapper renders wrapped in the skeleton"
 DIR12="$WORKDIR/s12"
+use_port
 OUT12=$("$BIN" add fragment-test --dir "$DIR12" --idle-timeout 5m 2>&1)
 CANVAS_DIR12=$(echo "$OUT12" | sed -n '1p')
 CANVAS_URL12=$(echo "$OUT12" | sed -n '2p')
@@ -858,6 +996,7 @@ fi
 # --- Scenario 17: a complete HTML document passes through unwrapped ---
 log "Scenario 17: a complete HTML document (with <!doctype html>) is served byte-equivalent to the original modulo reload-script injection only"
 DIR13="$WORKDIR/s13"
+use_port
 OUT13=$("$BIN" add complete-test --dir "$DIR13" --idle-timeout 5m 2>&1)
 CANVAS_DIR13=$(echo "$OUT13" | sed -n '1p')
 CANVAS_URL13=$(echo "$OUT13" | sed -n '2p')
@@ -897,6 +1036,7 @@ fi
 # --- Scenario 18: add --title/--desc/--icon renders in the dashboard gallery ---
 log "Scenario 18: add --title/--desc/--icon renders in the dashboard gallery"
 DIR14="$WORKDIR/s14"
+use_port
 "$BIN" add gallery-test --title "Gallery Title" --desc "Gallery Desc" --icon "🎨" --dir "$DIR14" --idle-timeout 5m >/dev/null
 if [ -f "$DIR14/daemon.json" ]; then
   ok "gallery scenario: daemon started"
@@ -937,6 +1077,7 @@ fi
 # --- Scenario 19: snap + snaps are pure filesystem operations (no daemon) ---
 log "Scenario 19: snap + snaps are pure filesystem operations, no daemon required"
 DIR15="$WORKDIR/s15"
+use_port
 CANVAS_DIR15=$("$BIN" path snaptest --dir "$DIR15")
 mkdir -p "$CANVAS_DIR15"
 echo '<html><body>v1</body></html>' >"$CANVAS_DIR15/index.html"
@@ -963,6 +1104,7 @@ fi
 # --- Scenario 20: modify after a snapshot, then revert restores it ---
 log "Scenario 20: modify after a snapshot, then revert (default: latest) restores the pre-modification contents"
 DIR16="$WORKDIR/s16"
+use_port
 CANVAS_DIR16=$("$BIN" path reverttest --dir "$DIR16")
 mkdir -p "$CANVAS_DIR16"
 echo '<html><body>pre-modification</body></html>' >"$CANVAS_DIR16/index.html"
@@ -1018,6 +1160,11 @@ run_privacy_scenario() {
   local id="privacy-test-$n"
   local jar="$WORKDIR/privacy-cookies-$n.txt"
   local out canvas_dir canvas_url token base body status
+
+  # Each run is a full scenario in its own right (own dir, own daemon), so it
+  # takes its own port too. Safe to call here: this is a plain function, not a
+  # subshell, so the allocator's counter advances for the caller as well.
+  use_port
 
   out=$("$BIN" add "$id" --dir "$dir" --idle-timeout 5m 2>&1)
   canvas_dir=$(echo "$out" | sed -n '1p')
@@ -1098,18 +1245,22 @@ run_privacy_scenario 2
 # reads ---
 # Every hub instance here uses its own isolated --data dir under $WORKDIR
 # (so the existing cleanup() trap's daemon.json glob finds and kills it if
-# anything below fails) and a dedicated high port -- never the default
-# daemon's ~/.scrim or port 7777.
+# anything below fails) and its own allocated port -- never the default
+# daemon's ~/.scrim or port 7777. `hub` and `push` don't take commonFlags, so
+# these ports come straight from alloc_port and are passed explicitly rather
+# than inherited from SCRIM_PORT.
 log "Scenario 22: hub central store (push, curl-served canvas, push-token gate, CIDR gate)"
 HUB1_DATA="$WORKDIR/hub1-data"
-HUB1_PORT=19291
+alloc_port
+HUB1_PORT=$PORT
 HUB_PUSH_TOKEN="e2e-hub-push-token"
 DIR_PUSH_SRC="$WORKDIR/push-src"
+use_port
 
 # A local canvas that will be pushed to the hub. It's never served from
 # here in this scenario -- `scrim push` reads it straight off disk -- so the
 # local daemon that `add` self-started is stopped again immediately.
-OUT_PUSH=$("$BIN" add hub-push-test --dir "$DIR_PUSH_SRC" --port 19292 --idle-timeout 5m --title "Hub Push Test" 2>&1)
+OUT_PUSH=$("$BIN" add hub-push-test --dir "$DIR_PUSH_SRC" --idle-timeout 5m --title "Hub Push Test" 2>&1)
 PUSH_SRC_CANVAS_DIR=$(echo "$OUT_PUSH" | sed -n '1p')
 echo '<html><body><h1>hub e2e content</h1></body></html>' >"$PUSH_SRC_CANVAS_DIR/index.html"
 "$BIN" stop --dir "$DIR_PUSH_SRC" >/dev/null 2>&1 || true
@@ -1362,8 +1513,14 @@ fi
 # for these paths). A tiny static file server provides that doc, so the scenario
 # is skipped cleanly where python3 is unavailable.
 if command -v python3 >/dev/null 2>&1; then
-  OAUTH_ISS_PORT=19501
-  OAUTH_MCP_PORT=19502
+  # `scrim mcp` takes commonFlags, so use_port also keeps any local daemon it
+  # ensures off the default port; the fake AS and the MCP HTTP listener take
+  # their ports explicitly.
+  use_port
+  alloc_port
+  OAUTH_ISS_PORT=$PORT
+  alloc_port
+  OAUTH_MCP_PORT=$PORT
   OAUTH_DIR="$WORKDIR/oauth-issuer"
   ISS="http://127.0.0.1:$OAUTH_ISS_PORT"
   mkdir -p "$OAUTH_DIR/.well-known"
@@ -1431,14 +1588,15 @@ EOF
   kill -TERM "$OAUTH_MCP_PID" 2>/dev/null || true
   kill -TERM "$OAUTH_ISS_PID" 2>/dev/null || true
 else
-  printf '  [SKIP] oauth scenario: python3 unavailable to serve a fake AS discovery doc\n'
+  skip "oauth scenario: python3 unavailable to serve a fake AS discovery doc"
 fi
 
 # A second hub, with a CIDR allowlist that deliberately excludes loopback --
 # a 127.0.0.1 read against it must be refused (403), not merely
 # unauthenticated (401).
 HUB2_DATA="$WORKDIR/hub2-data"
-HUB2_PORT=19391
+alloc_port
+HUB2_PORT=$PORT
 "$BIN" hub --data "$HUB2_DATA" --port "$HUB2_PORT" --push-token "e2e-hub2-push-token" --allow 10.0.0.0/8 >"$WORKDIR/hub2.log" 2>&1 &
 HUB2_PID=$!
 if wait_for_file "$HUB2_DATA/daemon.json" 10; then
@@ -1475,11 +1633,27 @@ fi
 log "Summary"
 echo "passed: $PASS"
 echo "failed: $FAIL"
+echo "skipped: $SKIPPED"
+if [ "$SKIPPED" -gt 0 ]; then
+  echo "skipped scenarios:"
+  for s in "${SKIPPED_SCENARIOS[@]}"; do
+    echo "  - $s"
+  done
+fi
 if [ "$FAIL" -gt 0 ]; then
   echo "failed scenarios:"
   for s in "${FAILED_SCENARIOS[@]}"; do
     echo "  - $s"
   done
+  exit 1
+fi
+# A skip is a legitimate outcome on a developer's machine (no python3, an
+# unrecognized uname) but not in CI, where the runner image is a controlled
+# input: a skip there means this suite silently stopped verifying something
+# and still reported green. Fail instead, so the missing dependency gets
+# installed or the scenario gets removed on purpose.
+if [ "$SKIPPED" -gt 0 ] && [ -n "${CI:-}" ]; then
+  echo "e2e: $SKIPPED scenario(s) skipped under CI -- CI must run the whole suite" >&2
   exit 1
 fi
 echo "all scenarios passed"

@@ -116,9 +116,18 @@ default port `7777`) on a dev machine -- that's a developer's actual running
 daemon and live canvases. A `scrim stop` (or `--dir ~/.scrim`) run against it
 kills real work, not a fixture. Always use an isolated `--dir`/`SCRIM_DIR`
 (e.g. a fresh `t.TempDir()` in Go tests, or a `mktemp -d` in shell) and a
-non-default `SCRIM_PORT` (a high, unlikely-to-collide port) for anything that
-starts a daemon -- `scripts/e2e.sh` and every test in this repo already follow
-this; match it in anything new.
+non-default port for anything that starts a daemon; match it in anything new.
+
+How each suite does it: Go tests bind `Port: 0` (the kernel picks a free one)
+or never listen at all. `scripts/e2e.sh` gives **every** scenario its own port
+via `use_port`, which allocates from a per-run block (base derived from the
+run's PID, `SCRIM_E2E_PORT_BASE` to override) and exports it as `SCRIM_PORT`
+for that scenario's verbs; `hub`/`push`, which don't take `commonFlags`, call
+`alloc_port` and pass `--port` explicitly. Two copies of the suite therefore
+run concurrently, and none of it touches 7777 -- scenario 1 asserts that
+directly against the daemon's own state file, so the property is tested rather
+than merely intended. New scenarios must call `use_port`, not inherit a port
+from an earlier one.
 
 ## Build Variables
 

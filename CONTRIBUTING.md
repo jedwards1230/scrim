@@ -24,6 +24,11 @@ make install
 # Test
 go test ./... -count=1
 
+# End-to-end suite (builds the real binary and drives it as a subprocess).
+# Runs as its own CI job; safe to run while your own daemon is up, since every
+# scenario allocates its own port.
+./scripts/e2e.sh
+
 # Vet
 go vet ./...
 
