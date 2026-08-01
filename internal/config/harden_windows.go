@@ -24,7 +24,8 @@ import (
 // wrote as GENERIC_ALL reads back carrying these specific bits, which is what lets
 // daclMatches recognize its own work. Stated precisely because that read-back is
 // the single assumption daclMatches rests on, and it has never been confirmed by
-// running on Windows -- see the CI coverage gap noted in harden_windows_test.go.
+// running on Windows: CI is ubuntu-only, so this package is type-checked under
+// GOOS=windows but never executed there.
 const fileFullControl = windows.ACCESS_MASK(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1FF)
 
 // hardenDir creates dir if missing and makes sure it carries the owner-only
