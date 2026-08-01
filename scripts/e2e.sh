@@ -341,12 +341,32 @@ fi
 # --- Scenario 10: double-start race converges on one daemon ---
 log "Scenario 10: concurrent adds converge on exactly one daemon"
 DIR7="$WORKDIR/s7"
-"$BIN" add race-a --dir "$DIR7" >/tmp/e2e-race-a.$$ 2>&1 &
+# Keep the racers' output inside $WORKDIR so the EXIT trap cleans it up, and
+# so the diagnostics dump below can still read it (the previous /tmp files
+# were captured but never examined, then deleted -- which is why the one
+# historical flake here was never characterized).
+RACE_OUT_A="$WORKDIR/race-a.out"
+RACE_OUT_B="$WORKDIR/race-b.out"
+S10_FAIL_START=$FAIL
+"$BIN" add race-a --dir "$DIR7" >"$RACE_OUT_A" 2>&1 &
 RACE_PID_A=$!
-"$BIN" add race-b --dir "$DIR7" >/tmp/e2e-race-b.$$ 2>&1 &
+"$BIN" add race-b --dir "$DIR7" >"$RACE_OUT_B" 2>&1 &
 RACE_PID_B=$!
 wait "$RACE_PID_A"
+RACE_RC_A=$?
 wait "$RACE_PID_B"
+RACE_RC_B=$?
+
+# Assert both racers actually succeeded. `add` calls daemon.Ensure BEFORE it
+# creates the canvas, so a racer that loses the spawn lock (or whose health
+# re-check misses) exits non-zero without ever creating its canvas. Without
+# this check that surfaces further down as the much vaguer "both racing
+# canvases exist" failure, hiding which racer failed and why.
+if [ "$RACE_RC_A" -eq 0 ] && [ "$RACE_RC_B" -eq 0 ]; then
+  ok "double-start race: both racers exited 0"
+else
+  bad "double-start race: both racers exited 0 (race-a=$RACE_RC_A, race-b=$RACE_RC_B)"
+fi
 
 if wait_for_file "$DIR7/daemon.json" 15; then
   ok "double-start race: a daemon came up"
@@ -372,8 +392,32 @@ else
   bad "both racing canvases exist against the single converged daemon"
 fi
 
+# On any scenario-10 failure, dump everything needed to diagnose it. This
+# scenario is timing-sensitive and has historically failed only under
+# conditions nobody could reproduce afterwards, so the evidence has to be
+# emitted at failure time -- there is no second chance to collect it.
+if [ "$FAIL" -ne "$S10_FAIL_START" ]; then
+  printf '  --- scenario 10 diagnostics ---\n'
+  # Indent for readability, and redact the capability token -- these
+  # diagnostics land in CI logs and this repo is public.
+  printf '  race-a exit=%s output:\n' "$RACE_RC_A"
+  if [ -s "$RACE_OUT_A" ]; then sed -e 's/?t=[A-Za-z0-9]*/?t=<redacted>/g' -e 's/^/    /' "$RACE_OUT_A"; else printf '    (empty)\n'; fi
+  printf '  race-b exit=%s output:\n' "$RACE_RC_B"
+  if [ -s "$RACE_OUT_B" ]; then sed -e 's/?t=[A-Za-z0-9]*/?t=<redacted>/g' -e 's/^/    /' "$RACE_OUT_B"; else printf '    (empty)\n'; fi
+  printf '  daemon log (%s):\n' "$DIR7/daemon.log"
+  if [ -s "$DIR7/daemon.log" ]; then sed 's/^/    /' "$DIR7/daemon.log"; else printf '    (absent or empty)\n'; fi
+  printf '  canvases on disk:\n'
+  # shellcheck disable=SC2012 # canvas ids are validated [A-Za-z0-9._-]; ls is fine here
+  S10_CANVASES=$(ls -1 "$DIR7/canvases" 2>/dev/null | sed 's/^/    /')
+  printf '%s\n' "${S10_CANVASES:-    (none)}"
+  printf '  matching processes:\n'
+  # shellcheck disable=SC2009 # we want the full argv, and `pgrep -a` is not portable to macOS
+  S10_PS=$(ps -Ao pid,ppid,command | grep "serve --dir $DIR7" | grep -v grep | sed 's/^/    /' || true)
+  printf '%s\n' "${S10_PS:-    (none)}"
+  printf '  --- end diagnostics ---\n'
+fi
+
 "$BIN" stop --dir "$DIR7" >/dev/null 2>&1 || true
-rm -f /tmp/e2e-race-a.$$ /tmp/e2e-race-b.$$
 
 # --- Scenario 11: open prints the URL by default and never launches a
 # browser unless explicitly opted in (--browser or SCRIM_OPEN_BROWSER=1) ---
