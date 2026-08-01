@@ -64,6 +64,47 @@ jobs:
           echo "Coverage: ${coverage}%"
           echo "## Test Coverage: ${coverage}%" >> $GITHUB_STEP_SUMMARY
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    # Its own job rather than a step on `test`: it needs nothing that job
+    # produces, and CI's wall clock is set by the slowest job (spec-lint, which
+    # pulls a toolchain), so running in parallel costs close to nothing.
+    #
+    # The suite takes well under a minute; the timeout bounds a hung daemon,
+    # not the normal run. Without it a scenario that waits on a process that
+    # never exits would burn the full 6h job default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # scripts/e2e.sh builds the binary itself and otherwise needs only bash,
+      # curl, python3 (a fake OAuth AS discovery doc) and pgrep -- all present
+      # on ubuntu-latest. It asserts that here rather than discovering it
+      # mid-run, because the script's own response to a missing tool is to skip
+      # the scenario that needs it, and a skipped scenario in CI is the thing
+      # this job exists to prevent. (The script itself also fails when CI is
+      # set and any scenario skipped -- this step just names the cause.)
+      - name: Verify the suite's runtime dependencies
+        run: |
+          for cmd in bash curl python3 pgrep; do
+            command -v "$cmd" >/dev/null || { echo "missing required tool: $cmd" >&2; exit 1; }
+          done
+
+      # CI is set by GitHub Actions; the script keys its no-skips-allowed rule
+      # off it, and so do the permission-based Go tests in the `test` job.
+      # Named here so it is visible rather than ambient.
+      - name: Run end-to-end suite
+        env:
+          CI: "true"
+        run: ./scripts/e2e.sh
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -163,12 +204,12 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [test, lint, spec-lint, govulncheck, build]
+    needs: [test, e2e, lint, spec-lint, govulncheck, build]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.spec-lint.result }}" "${{ needs.govulncheck.result }}" "${{ needs.build.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.e2e.result }}" "${{ needs.lint.result }}" "${{ needs.spec-lint.result }}" "${{ needs.govulncheck.result }}" "${{ needs.build.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               echo "CI failed"
