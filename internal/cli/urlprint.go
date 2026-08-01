@@ -53,9 +53,12 @@ func printURLLines(w io.Writer, lines []string) {
 }
 
 // urlLines returns the line(s) to print for rawURL given the daemon's bind
-// host: a single line unchanged when host is loopback-only (mDNS inactive),
-// or the scrim.local variant followed by the original as a fallback when
-// it's not.
+// host: a single line unchanged when host is loopback-only, or the
+// scrim.local variant followed by the original as a fallback when the daemon
+// is bound beyond loopback. The bind host is the whole condition -- nothing
+// here can observe whether the mDNS advertisement actually went out, so a
+// LAN-bound daemon started with --no-mdns still gets the scrim.local line
+// offered first.
 func urlLines(host, rawURL string) []string {
 	if mdns.IsLoopbackHost(host) {
 		return []string{rawURL}

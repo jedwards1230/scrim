@@ -21,6 +21,12 @@ import (
 // Hub-specific defaults, deliberately distinct from the default daemon's
 // (config.Default*) so both can run on the same box: a separate data
 // directory (never the default daemon's ~/.scrim) and a separate port.
+//
+// Only the data directory is separated at the ENV layer too, via
+// SCRIM_HUB_DATA. --host/--port fall back to the same SCRIM_HOST/SCRIM_PORT
+// the local daemon reads, so an ambient SCRIM_PORT in the environment drags
+// the hub onto the daemon's port -- pass --port explicitly (or unset it) when
+// both run on one box.
 const (
 	defaultHubDirName = ".scrim-hub"
 	defaultHubHost    = "0.0.0.0"

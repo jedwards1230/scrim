@@ -14,7 +14,9 @@
 //     memory (the cache fields on Client) for at most one TTL. It is never
 //     written to disk -- not to principals.json, not anywhere. The lazy
 //     principal registry's own on-disk persistence is a separate concern and is
-//     unaffected. (TestClientNeverPersists asserts this.)
+//     unaffected. (TestClientNeverPersists covers the observable case: a full
+//     List writes nothing into the process CWD. It cannot detect a write to an
+//     absolute path elsewhere.)
 //  3. NEVER ENFORCED. This data feeds ONLY display/autocomplete. Access
 //     enforcement (identity.CanView/CanWrite, the hub gate) reads verified
 //     claims, never this cache, so sharing stays correct with Authentik
@@ -342,8 +344,10 @@ func (c *Client) listGroups(ctx context.Context) ([]principal.Principal, error) 
 
 // getJSON performs one read-only GET against path with the Bearer token and
 // decodes the (length-capped) JSON body into dst. It honors ctx and returns the
-// constant errRefreshFailed on any transport/status/decode failure so nothing
-// path- or token-bearing reaches the caller (and thus the log).
+// constant errRefreshFailed on a transport or decode failure, and a code-only
+// "authentik: unexpected status N" for a non-200, so nothing path- or
+// token-bearing reaches the caller. Either way List logs only the constant, so
+// neither shape reaches the log.
 func (c *Client) getJSON(ctx context.Context, path string, page int, dst any) error {
 	q := url.Values{}
 	q.Set("page", strconv.Itoa(page))

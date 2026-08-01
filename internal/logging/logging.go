@@ -1,7 +1,9 @@
 // Package logging is scrim's sole sanctioned logging surface for the
-// daemon (internal/server and internal/daemon). Every log call site in
-// those packages goes through here instead of calling log.Printf or
-// writing to os.Stderr/os.Stdout directly.
+// daemon: internal/server, plus internal/config's startup permission
+// hardening and internal/authentik's directory feeder -- the two the
+// CategoryConfig and CategoryDirectory constants below exist for. Every log
+// call site in those packages goes through here instead of calling log.Printf
+// or writing to os.Stderr/os.Stdout directly.
 //
 // The API is deliberately narrow: Error takes a fixed Category label and an
 // error value, never a free-form format string. That's what keeps a

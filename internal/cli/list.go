@@ -43,9 +43,9 @@ func cmdList(args []string, stdout, stderr io.Writer) int {
 		}
 		lines := urlLines(st.Host, c.URL)
 		outf(stdout, "%s\t%s\t%s\n", c.ID, title, lines[0])
-		// When mDNS is active there's a second (fallback, plain host:port)
-		// line — print it indented under the same row rather than widening
-		// the tab-separated columns for every canvas.
+		// When the daemon is bound beyond loopback there's a second (fallback,
+		// plain host:port) line — print it indented under the same row rather
+		// than widening the tab-separated columns for every canvas.
 		for _, fallback := range lines[1:] {
 			outf(stdout, "\t\t%s\n", fallback)
 		}

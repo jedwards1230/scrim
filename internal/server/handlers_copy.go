@@ -156,10 +156,11 @@ func (s *Server) handleCopyCanvas(w http.ResponseWriter, r *http.Request) {
 		_ = os.RemoveAll(aside)
 	}
 
-	// Carry the source's authored metadata (title/description/icon) onto the
-	// copy. CopyMeta duplicates only explicit metadata -- a derived default
-	// icon stays derived from the target's own id -- and clears stale target
-	// metadata on an overwrite. The content swap is already committed here, so
+	// Carry the source's metadata onto the copy. CopyMeta duplicates the whole
+	// metadata file, so title/description/icon come across along with the
+	// recorded owner and grants -- a derived default icon stays derived from
+	// the target's own id -- and it clears stale target metadata on an
+	// overwrite. The content swap is already committed here, so
 	// a metadata failure returns 500 with the files already copied; metadata is
 	// non-critical and the overwrite path already snapshotted the old target.
 	if err := canvas.CopyMeta(s.metaDir, from, to); err != nil {

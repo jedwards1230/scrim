@@ -42,8 +42,8 @@ const maxPrincipalSuggestions = 20
 // It adds no auth of its own: the read is gated exactly like any other
 // non-canvas read -- an OIDC session when OIDC is configured, the CIDR
 // allowlist otherwise -- so by the time it runs the caller is already
-// permitted. The body stays thin so the #54 directory driver plugs in behind
-// principalLister with no handler change.
+// permitted. The body stays thin, which is why the Authentik directory driver
+// (#54) plugs in behind principalLister with no handler change at all.
 func (s *Server) handlePrincipals(w http.ResponseWriter, r *http.Request) {
 	if s.directory == nil {
 		writeJSON(w, http.StatusOK, []principalSuggestion{})

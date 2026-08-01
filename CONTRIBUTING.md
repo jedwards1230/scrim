@@ -74,10 +74,12 @@ does not release. A release publishes a single immutable `vX.Y.Z` tag.
 This repo hosts its own Claude Code plugin marketplace (`.claude-plugin/marketplace.json`,
 `plugins/scrim/`) so `scrim` can be installed via
 `/plugin marketplace add jedwards1230/scrim`. `plugins/scrim`'s
-`.claude-plugin/plugin.json` version tracks the **scrim tool's** version, not
-independent semver — it doesn't bump on every commit, only when the tool's
-functionality changes in a way that changes the plugin-relevant surface (new
-verbs, changed behavior the skill documents).
+`.claude-plugin/plugin.json` version is the **plugin's own** semver and
+deliberately does not track the scrim tool's release version — the two drift
+apart on purpose (the plugin is at `0.4.1` while the tool is at `v0.9.0`). It
+doesn't bump on every commit, only when the tool's functionality changes in a
+way that changes the plugin-relevant surface (new verbs, changed behavior the
+skill documents).
 
 When that happens:
 
@@ -90,4 +92,7 @@ When that happens:
 
 `.github/workflows/plugin-version-check.yml` (via `scripts/check-plugin-versions.sh`)
 enforces steps 1 and 2 in CI on any PR touching `plugins/**` or
-`.claude-plugin/marketplace.json`.
+`.claude-plugin/marketplace.json`, and enforces that step 3's `metadata.version`
+was bumped *at all* — an unchanged one fails the job. What it does **not**
+enforce is step 3's major/minor/patch *sizing*: that convention is printed as
+advisory prose in the job summary and is never checked.

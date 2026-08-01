@@ -83,7 +83,8 @@ func (s *Server) routes() http.Handler {
 
 		// Principal autocomplete (#53): the share dialog's grantee suggestions.
 		// A session-gated read (general non-canvas read at the gate), thin over
-		// the principalLister seam so #54 can layer a directory driver (#54).
+		// the principalLister seam the Authentik directory driver (#54) layers
+		// behind.
 		mux.HandleFunc("GET /api/principals", s.handlePrincipals)
 
 		// The my-tokens management page (#53): a server-rendered HTML page that

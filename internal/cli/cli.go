@@ -53,7 +53,7 @@ Verbs:
                           endpoint (see "scrim push --help"). Never
                           self-starts or talks to a local daemon.
   mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-public-url URL]
-      [--hub-token-file PATH]
+      [--hub-token-file PATH] [--oauth-issuer URL] [--oauth-audience AUD]
                           Run an MCP server exposing scrim as tools (add, list,
                           link, rm, snap, snaps, revert, copy_canvas, status,
                           list_files, read_file, write_file, edit_file,

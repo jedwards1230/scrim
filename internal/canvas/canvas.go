@@ -30,9 +30,12 @@ import (
 // update -- most dangerously, a grant revoke (RemoveGrant) racing a concurrent
 // AddGrant/auto-share can RESURRECT a revoked share. Keyed by canvas id so
 // different canvases never contend; the same id is mutually exclusive across
-// every caller. Package-level so the serialization holds regardless of which
-// handler/goroutine drives the write, mirroring the whole-file mutex the
-// usertoken.Store and principal.Registry hold over their own RMW.
+// every caller of those four. Package-level so the serialization holds
+// regardless of which handler/goroutine drives the write, mirroring the
+// whole-file mutex the usertoken.Store and principal.Registry hold over their
+// own RMW. Scope is exactly those four functions: CopyMeta writes (and
+// removes) the metadata file directly without acquiring metaLocks, so it is
+// not serialized against them.
 var metaLocks keyedMutex
 
 // keyedMutex hands out a distinct mutex per string key, so callers can
@@ -415,10 +418,11 @@ func Files(canvasesDir, id string) ([]FileMeta, error) {
 }
 
 // CopyMeta duplicates canvas from's external metadata onto canvas to. It
-// copies the raw metadata FILE, so only authored title/description/icon are
-// carried -- a derived default icon stays derived from to's own id rather than
-// being baked in from the source (Get would otherwise return the source's
-// derived icon, which is the wrong default for a differently-named canvas). If
+// copies the raw metadata FILE verbatim, so every field recorded in it is
+// carried onto to: authored title/description/icon, and `owner` and `grants`
+// along with them. A derived default icon stays derived from to's own id
+// rather than being baked in from the source (Get would otherwise return the
+// source's derived icon, the wrong default for a differently-named canvas). If
 // from has no metadata file, any existing metadata for to is removed, so an
 // overwrite-copy never leaves the previous canvas's metadata behind.
 func CopyMeta(metaDir, from, to string) error {

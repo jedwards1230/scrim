@@ -27,11 +27,15 @@ or grab a release binary from
 ## What it does
 
 A `scrim` skill teaches Claude the current CLI surface (`add`, `path`, `list`,
-`link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`) and
-the core loop: `scrim add <id>` → Write/Edit files in the printed directory →
-the browser reloads itself → always surface the canvas URL back to the user
-via `link` (never `open`, which is reserved for the human's own explicit
-browser-launch opt-in).
+`link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`,
+`mcp`) and the core loop: `scrim add <id>` → Write/Edit files in the printed
+directory → the browser reloads itself → always surface the canvas URL back to
+the user via `link` (never `open`, which is reserved for the human's own
+explicit browser-launch opt-in).
+
+`scrim mcp` gets the skill's largest section: it serves those same verbs as MCP
+tools, and the skill tells Claude to prefer the tools over shelling out
+whenever the server is wired into the session.
 
 The skill also draws the local-vs-hub line: the local loop is the default
 experience; `push` (upload a canvas to a deployed hub) is agent-usable when

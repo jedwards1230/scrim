@@ -108,9 +108,11 @@ func TestStopUsesStateHostPortNotConfig(t *testing.T) {
 		t.Fatalf("starting short-lived process: %v", err)
 	}
 	pid := cmd.Process.Pid
-	// Reap it as soon as it exits -- otherwise it lingers as a zombie
-	// (still "alive" to pidAlive's signal-0 check) until Wait is called,
-	// which would make finalizeStop's poll for its exit time out.
+	// Reap it as soon as it exits -- on Unix it would otherwise linger as a
+	// zombie (still "alive" to pidAlive's signal-0 check) until Wait is called,
+	// which would make finalizeStop's poll for its exit time out. This file
+	// carries no build tag and runs on Windows too, where pidAlive uses
+	// OpenProcess and there are no zombies; the reap is harmless there.
 	waitDone := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()

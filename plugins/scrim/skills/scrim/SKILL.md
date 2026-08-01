@@ -83,20 +83,28 @@ exactly once**, in that call's result; append it to the canvas URL as
 surface it to the user in the same reply or mint a new link grant.
 `list_grants` reports a canvas's owner plus its current grants (each grant's
 kind, target, and public link id) and deliberately never returns link secrets
-or their hashes. Local mode is single-user and applies a grant directly; in
-hub mode the hub enforces ownership and whatever allowance is bound to the
-calling token, rejecting a target that isn't permitted.
+or their hashes. **`?k=` URLs only work against a hub.** In hub mode the hub
+enforces ownership and whatever allowance is bound to the calling token,
+rejecting a target that isn't permitted, and honors a link secret presented as
+`?k=`. Local mode is single-user: a grant is recorded on the canvas but nothing
+enforces it, and the local daemon never reads `?k=` at all — its gate is the
+capability token (`?t=`/cookie), so handing someone a local `?k=` URL just
+gets them a 401. Share a local canvas by pushing it to a hub, or by handing
+over the `link` URL as-is.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which
 you still must surface to the user (see the critical rules above). `push`
-targets a hub and stays a human/CI concern; the everyday loop is still
-`add` → write files → `link`.
+targets a hub and **is agent-usable, on request** (see "Local vs. hub" below);
+running the hub server itself is the human/CI concern. The everyday loop is
+still `add` → write files → `link`.
 
 The server is started with `scrim mcp` (stdio by default; `--http ADDR` for a
 remote/streamable-HTTP endpoint, which fails closed on a non-loopback bind
-unless `--allow-lan` is passed). Wiring it up is a user/config step — surface
-the command, don't start a long-running server yourself.
+unless `--allow-lan` is passed or OAuth is configured via `--oauth-issuer`,
+which authenticates the endpoint and lifts the same gate). Wiring it up is a
+user/config step — surface the command, don't start a long-running server
+yourself.
 
 ## Workflow
 
@@ -206,9 +214,9 @@ unsanitized, the same trust model as a `.html` canvas.
 This means simple content doesn't need any boilerplate — write a fragment or
 a markdown file and scrim supplies the shell. **This is the opposite of the
 claude.ai Artifact tool**, whose skeleton-wrap only ever wraps (an Artifact
-must always be a complete document): scrim wraps only when you *don't*
-provide your own document shell, and gets out of the way completely when you
-do.
+must never carry its own `<!doctype>`/`<html>`/`<head>`/`<body>`): scrim wraps
+only when you *don't* provide your own document shell, and gets out of the way
+completely when you do.
 
 ## Gallery & canvas metadata
 

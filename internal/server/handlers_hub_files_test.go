@@ -39,10 +39,13 @@ const hubToken = "test-push-token"
 
 // TestHubMachineAPIBearerGated is the CRITICAL fail-closed test: with
 // AllowCIDRs nil (deny-all browser reads -- loopback would otherwise be
-// allowed by a permissive allowlist and mask the gate), EVERY machine
-// endpoint, reads included, must reject a request with no bearer token and
-// accept one that carries the push token. This proves the machine API is
-// bearer-gated end to end, not just for writes.
+// allowed by a permissive allowlist and mask the gate), every machine
+// endpoint IN THE TABLE BELOW, reads included, must reject a request with no
+// bearer token and accept one that carries the push token. This proves the
+// machine API is bearer-gated end to end, not just for writes. The table is a
+// sample of the surface, not the whole of it -- list-files, copy, the grants
+// routes, claim, /api/tokens*, principals, push, and canvas delete are not in
+// it.
 func TestHubMachineAPIBearerGated(t *testing.T) {
 	_, ts := newHubTestServer(t, nil, "")
 

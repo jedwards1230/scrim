@@ -1,11 +1,11 @@
 // Package principal maintains the hub's lazily-populated registry of the
 // principals it has seen -- from logins, verified forwarded-identity headers,
-// and grant targets. It exists purely for display and autocomplete (a future
-// share UI listing who a canvas can be shared with); enforcement NEVER reads
-// it. The registry is a single whole-file JSON document under the meta
-// directory, read and written atomically under a mutex, and a missing or
-// corrupt file is tolerated as an empty registry -- a feeder that can't
-// persist must never break the request that fed it.
+// and grant targets. It exists purely for display and autocomplete -- it backs
+// GET /api/principals, the share dialog's grantee suggestions -- and
+// enforcement NEVER reads it. The registry is a single whole-file JSON
+// document under the meta directory, read and written atomically under a
+// mutex, and a missing or corrupt file is tolerated as an empty registry -- a
+// feeder that can't persist must never break the request that fed it.
 package principal
 
 import (
@@ -27,10 +27,13 @@ type Principal struct {
 	GroupsSeen  []string  `json:"groups_seen,omitempty"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
-	Source      string    `json:"source"` // "login" | "cf-header" | "grant-target"
+	Source      string    `json:"source"` // "login" | "cf-header" | "grant-target" | "authentik" | "authentik-group"
 }
 
-// Sources for Observe's source argument.
+// Sources for Observe's source argument. The two authentik values are NOT
+// here: internal/authentik stamps them on the principals its read-only
+// directory driver synthesizes, which never pass through Observe and are never
+// persisted into this registry.
 const (
 	SourceLogin       = "login"
 	SourceCFHeader    = "cf-header"

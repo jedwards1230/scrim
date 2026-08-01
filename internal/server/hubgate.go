@@ -25,7 +25,10 @@ const bearerPrefix = "Bearer "
 
 // withHubGate replaces withAuth in hub mode (see routes.go): it gates
 // writes (any method other than GET/HEAD -- POST /api/push, POST /api/stop,
-// any POST/DELETE under /api/canvases) behind the hub's push token, and
+// any POST/DELETE under /api/canvases or /api/tokens) behind a machine or
+// owner credential -- the admin push token, a user bearer token whose owner
+// may write the target, or, for claim, token management, and grant mutation
+// on a canvas the session owns, a browser session (see serveWrite) -- and
 // reads (GET/HEAD -- the index, /c/..., SSE, favicon, /api/status) behind
 // EITHER the OIDC session gate (when OIDC is configured) OR, otherwise, a
 // CIDR allowlist check first and then, if configured, the hub's separate

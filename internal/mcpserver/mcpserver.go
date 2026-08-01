@@ -224,10 +224,12 @@ func newServer(b backend, cfg config.Config, ver string, local bool) *mcp.Server
 		Annotations: toolAnnotations("list_grants", "List canvas grants", false, true),
 	}, s.handleListGrants)
 
-	// push is local-only whole-canvas push to an external hub, reading the
-	// canvas straight off local disk — unchanged from single-mode. It stays
-	// registered in both modes: it operates on the mcp process's own --dir,
-	// independent of the backend.
+	// push moves a whole canvas from LOCAL DISK to an external hub, reading the
+	// canvas straight off that disk — unchanged from single-mode. "Local" here
+	// describes the source, not the registration: push is registered in BOTH
+	// modes, and always operates on the mcp process's own --dir, independent of
+	// the backend. (Contrast `path` just below, which really is registered in
+	// local mode only.)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "push",
 		Description: "Pack a canvas from the MACHINE RUNNING THIS MCP SERVER's own disk (its --dir) and push it once to a hub. It sources from the MCP server's filesystem — NOT the calling agent's machine and NOT the hub — so it's only useful when scrim mcp runs where the canvas files live. For a remotely-hosted MCP server (e.g. in-cluster beside the hub) that disk is the pod's, not yours: author canvas content over the wire with write_file/edit_file instead. Never launches a browser.",

@@ -22,9 +22,11 @@ import (
 // middleware (see withHubGate in hubgate.go). It has no default-daemon
 // equivalent; server.New (the default daemon constructor) never sees it.
 type HubOptions struct {
-	// PushToken is the bearer token required on every write request
-	// (POST /api/push, POST /api/stop, any non-GET/HEAD /api/canvases
-	// call). Required -- NewHub fails closed if it's empty.
+	// PushToken is the hub's admin/bootstrap bearer: it authorizes ANY
+	// request, reads included, is the ONLY credential POST /api/stop
+	// accepts, and is the machine-plane fallback for every write no user
+	// bearer token or browser session covers (see serveWrite in
+	// hubgate.go). Required -- NewHub fails closed if it's empty.
 	PushToken string
 	// ReadToken, if non-empty, is additionally required (after the CIDR
 	// check passes) on every read request.

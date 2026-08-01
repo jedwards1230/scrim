@@ -18,9 +18,12 @@ and it owns every legacy canvas.
   in-cluster MCP deployment), and rotate it as a read-capable secret. A
   logged-in principal that wants its own scoped credential should mint a [user
   token](identity.md#ownership-sharing--tokens) instead of sharing the admin
-  token. Browser reads remain separately gated by the CIDR allowlist (+ optional
-  read token), so the push token isn't the only thing standing between the
-  network and canvas content.
+  token. Browser reads remain separately gated either way — by OIDC login plus
+  per-canvas visibility when `--oidc-issuer` is set (which replaces the CIDR
+  allowlist and read token entirely; `scrim hub` warns that both are then
+  ignored), and by that CIDR allowlist (+ optional read token) when it isn't —
+  so the push token isn't the only thing standing between the network and
+  canvas content.
 
 ## CIDR checked on RemoteAddr
 
