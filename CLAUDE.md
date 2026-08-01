@@ -28,7 +28,7 @@ Key packages under `internal/`:
 | Package | Responsibility |
 |---------|---------------|
 | `version` | Build-time version stamping via ldflags |
-| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file on Unix (Windows lacks an equivalent primitive, logged as a one-time warning instead of claiming success -- tracked in #19) |
+| `config` | Resolves --dir/--host/--port/--idle-timeout/--no-auth/--no-mdns from flags/env/defaults; derives on-disk paths; enforces owner-only filesystem permissions on --dir/state file/log file with each platform's native primitive (`harden_unix.go`: 0700/0600 mode bits; `harden_windows.go`: an inheritance-protected DACL granting only the owner, the process token user, SYSTEM, and Administrators, via `golang.org/x/sys/windows`) |
 | `state` | Daemon state file (`daemon.json`): atomic read/write, corruption handling |
 | `canvas` | Canvas directory CRUD, ID validation, per-canvas metadata (title, description, icon) stored externally under `config.Config.MetaDir()`, and deterministic default icon/color derivation from a canvas's ID |
 | `apiclient` | Thin HTTP client for the daemon's `/api/*` control surface |
@@ -39,12 +39,10 @@ Key packages under `internal/`:
 | `logging` | Sole sanctioned logging surface for `server`/`daemon`: category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog` |
 | `openurl` | Cross-platform "launch the default browser" (`open`/`xdg-open`/`rundll32 url.dll,FileProtocolHandler`) |
 | `pushclient` | Client side of `scrim push`: packs a local canvas directory into an uncompressed tar archive, POSTs it to a hub's push endpoint, and (via `Watch`) debounced-re-pushes on local changes. Self-contained -- does not import `internal/server`, and is imported only by `cli`'s push verb. |
-| `mcpserver` | The `scrim mcp` server (`github.com/modelcontextprotocol/go-sdk`): exposes the CLI verbs as MCP tools over stdio (default) or streamable HTTP (`--http ADDR`, binds 127.0.0.1; a non-loopback bind needs `--allow-lan` unless OAuth authenticates it — see below). Dual-mode via a `backend` interface: `localBackend` drives the local daemon + on-disk canvas dir (the SAME `daemon`/`apiclient`/`canvas`/`snapshot` primitives the CLI verbs use); `hubBackend` (`--hub URL`, push-token auth via `SCRIM_PUSH_TOKEN`/`--hub-token-file`, fail-closed) drives a remote hub's machine API over HTTP. `list_files` (recursive path/size listing, no content), `read_file`/`write_file` (inline content, ~2 MiB cap, optional `gzip+base64` encoding for large/binary payloads), `edit_file` (server-side exact-string replacement, single or a transactional `edits` batch, shared semantics in `internal/fileedit` — token cost scales with the change, not the file) and `copy_canvas` (server-side duplication) are the remote-authoring primitives and exist in both modes; `share_canvas`/`list_grants` manage a canvas's view-only sharing grants (user/group/everyone/link; a link grant's secret is returned once); `path` is local-only (absent in hub mode). On the streamable-HTTP transport, `scrim mcp` verifies HMAC-signed `X-Forwarded-User-*` identity headers from a **trusted gateway** (shared secret in `SCRIM_MCP_IDENTITY_HMAC_SECRET`; canonicalization/wire format isolated in `internal/mcpserver/identity.go` — the gateway is any reverse proxy that authenticates the end user and forwards a signed principal in that format, e.g. the ContextForge MCP gateway) and re-emits the verified principal to the hub as `X-Scrim-Actor-*` on top of the admin bearer, so a canvas is attributed to the real user rather than the shared push token — unset secret ⇒ anonymous ⇒ admin attribution (fail-closed). Orthogonally, `--http` can become an RFC 9728 OAuth 2.0 protected resource (`--oauth-issuer`/`SCRIM_MCP_OAUTH_ISSUER` + `--oauth-audience`, reference AS Authentik; `internal/mcpserver/oauth.go`): unauthenticated protected-resource metadata at `/.well-known/oauth-protected-resource`, per-request bearer-JWT validation (signature/issuer/audience/expiry via the AS JWKS) on `/mcp`, and per-tool `scrim:read`/`scrim:write` scope enforcement (401/403 with `WWW-Authenticate`). It authenticates the CLIENT connection AND, on the same validated-JWT path, derives per-user attribution from the token's `sub`/`email`/`groups`, re-emitted to the hub as the same `X-Scrim-Actor-*` headers — the JWT-derived actor is authoritative (independently verified), so the forwarded-identity HMAC header-trust plane is only the fallback when OAuth is off; stdio stays auth-free. Safety invariants identical either way: `link` returns URLs as data (never a browser), nothing logs URLs/content/tokens, `push` is local + one-shot. |
+| `mcpserver` | The `scrim mcp` server (`github.com/modelcontextprotocol/go-sdk`): exposes the CLI verbs as MCP tools over stdio (default) or streamable HTTP (`--http ADDR`, binds 127.0.0.1; a non-loopback bind needs `--allow-lan` unless OAuth authenticates it — see below). Dual-mode via a `backend` interface: `localBackend` drives the local daemon + on-disk canvas dir (the SAME `daemon`/`apiclient`/`canvas`/`snapshot` primitives the CLI verbs use); `hubBackend` (`--hub URL`, push-token auth via `SCRIM_PUSH_TOKEN`/`--hub-token-file`, fail-closed) drives a remote hub's machine API over HTTP, with optional `--hub-public-url URL`/`SCRIM_HUB_PUBLIC_URL` as a link-only public base (`hubBackend.linkBase()`) for when the API endpoint isn't browser-reachable — it changes the URLs returned to callers, never where a request goes. `list_files` (recursive path/size listing, no content), `read_file`/`write_file` (inline content, ~2 MiB cap, optional `gzip+base64` encoding for large/binary payloads), `edit_file` (server-side exact-string replacement, single or a transactional `edits` batch, shared semantics in `internal/fileedit` — token cost scales with the change, not the file) and `copy_canvas` (server-side duplication) are the remote-authoring primitives and exist in both modes; `share_canvas`/`list_grants` manage a canvas's view-only sharing grants (user/group/everyone/link; a link grant's secret is returned once); `path` is local-only (absent in hub mode). In hub mode `add`/`list`/`link`/`copy_canvas` build the returned canvas URL from `--hub-public-url` when set, else from the `--hub` value itself — so an in-cluster `--hub` (`http://scrim-hub:7788`) needs the public base set, or it yields links that don't resolve outside the cluster. On the streamable-HTTP transport, `scrim mcp` verifies HMAC-signed `X-Forwarded-User-*` identity headers from a **trusted gateway** (shared secret in `SCRIM_MCP_IDENTITY_HMAC_SECRET`; canonicalization/wire format isolated in `internal/mcpserver/identity.go` — the gateway is any reverse proxy that authenticates the end user and forwards a signed principal in that format) and re-emits the verified principal to the hub as `X-Scrim-Actor-*` on top of the admin bearer, so a canvas is attributed to the real user rather than the shared push token — unset secret ⇒ anonymous ⇒ admin attribution (fail-closed). Orthogonally, `--http` can become an RFC 9728 OAuth 2.0 protected resource (`--oauth-issuer`/`SCRIM_MCP_OAUTH_ISSUER` + `--oauth-audience`, reference AS Authentik; `internal/mcpserver/oauth.go`): unauthenticated protected-resource metadata at `/.well-known/oauth-protected-resource`, per-request bearer-JWT validation (signature/issuer/audience/expiry via the AS JWKS) on `/mcp`, and per-tool `scrim:read`/`scrim:write` scope enforcement (401/403 with `WWW-Authenticate`). It authenticates the CLIENT connection AND, on the same validated-JWT path, derives per-user attribution from the token's `sub`/`email`/`groups`, re-emitted to the hub as the same `X-Scrim-Actor-*` headers — the JWT-derived actor is authoritative (independently verified), so the forwarded-identity HMAC header-trust plane is only the fallback when OAuth is off; stdio stays auth-free. Safety invariants identical either way: `link` returns URLs as data (never a browser), nothing logs URLs/content/tokens, `push` is local + one-shot. |
 | `cli` | Verb parsing/dispatch for `add`, `path`, `list`, `link`, `open`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`, `serve`, `hub`, `push`, `mcp`; prints `?t=<token>`-qualified URLs (and, when mDNS is active, both the `scrim.local` and plain `ip:port` forms). `hub`/`push` are the two verbs that deliberately don't use the shared `commonFlags` (their defaults -- data dir, host, port -- differ on purpose) and don't self-start/talk to a local daemon at all. |
 
-Phase 3 (auth via the state file's `token`/`no_auth` fields, mDNS
-advertisement) and Phase 4 (`open` launching a browser, version-skew
-restart) are both built. `internal/daemon.Ensure` compares its own
+**Version-skew restart.** `internal/daemon.Ensure` compares its own
 `internal/version.Short()` against a healthy daemon's reported version on
 every self-start check; a mismatch stops that daemon and starts a fresh one
 transparently (canvases are untouched -- they live on disk, independent of
@@ -63,12 +61,14 @@ serves canvases and pushes SSE reloads on file changes (`server`, via
 - **No CGO**: the binary must be cross-compilable without a C toolchain.
 - **Dependencies stay minimal**: Go stdlib + `fsnotify` + one mDNS library +
   `goldmark` (serve-time markdown rendering) + the MCP SDK
-  (`github.com/modelcontextprotocol/go-sdk`, for `scrim mcp` only) only. Don't
-  add a dependency without a real need.
+  (`github.com/modelcontextprotocol/go-sdk`, for `scrim mcp` only) +
+  `golang.org/x/sys` (Windows-only, for the `config` package's ACL hardening —
+  there is no stdlib equivalent and CGO is off the table) only. Don't add a
+  dependency without a real need.
 - **Single binary, self-starting daemon**: no separate install/systemd step —
   the first verb that needs the daemon starts it if it isn't running.
 
-### Hub (Phase 1)
+### Hub
 
 `scrim hub` is the same serving engine as `scrim serve`, run at its own data
 directory (`~/.scrim-hub` by default) and port (`7788`), with
@@ -101,7 +101,7 @@ by `internal/server/hub_test.go`.
 ### Package organization
 
 All business logic lives under `internal/`. `main.go` stays thin — it only
-dispatches to `internal/cli` (once that package exists).
+dispatches to `internal/cli`.
 
 ### Adding a new internal package
 
@@ -116,9 +116,25 @@ default port `7777`) on a dev machine -- that's a developer's actual running
 daemon and live canvases. A `scrim stop` (or `--dir ~/.scrim`) run against it
 kills real work, not a fixture. Always use an isolated `--dir`/`SCRIM_DIR`
 (e.g. a fresh `t.TempDir()` in Go tests, or a `mktemp -d` in shell) and a
-non-default `SCRIM_PORT` (a high, unlikely-to-collide port) for anything that
-starts a daemon -- `scripts/e2e.sh` and every test in this repo already follow
-this; match it in anything new.
+non-default port for anything that starts a daemon; match it in anything new.
+
+How each suite does it: Go tests bind `Port: 0` (the kernel picks a free one)
+or never listen at all. `scripts/e2e.sh` gives **every** scenario its own port
+via `use_port`, which allocates from a per-run block (base derived from the
+run's PID, `SCRIM_E2E_PORT_BASE` to override) and exports it as `SCRIM_PORT`
+for that scenario's verbs; `hub`/`push`, which don't take `commonFlags`, call
+`alloc_port` and pass `--port` explicitly. None of it touches 7777 -- scenario 1
+asserts that directly against the daemon's own state file, so the property is
+tested rather than merely intended. New scenarios must call `use_port`, not
+inherit a port from an earlier one.
+
+Concurrent runs are *usually* safe, not guaranteed: the per-run block offset is
+PID-derived, so two suites can land on the same block (~1/119) and collide. The
+allocator narrows the race rather than closing it. A collision fails loudly
+(exit 1) and can never produce a false green. Note that **exporting**
+`SCRIM_E2E_PORT_BASE` collapses every run in that shell onto one block, which
+makes collision certain rather than unlikely -- set it per-invocation if you set
+it at all.
 
 ## Build Variables
 

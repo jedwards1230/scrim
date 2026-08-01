@@ -24,6 +24,13 @@ import (
 // payload shapes -- a drift on either side fails here.
 func newHubBackendAgainstRealHub(t *testing.T) *hubBackend {
 	t.Helper()
+	return newHubBackendWithPublicBase(t, "")
+}
+
+// newHubBackendWithPublicBase is newHubBackendAgainstRealHub with an explicit
+// link-only public base (empty = the default, links built from the API base).
+func newHubBackendWithPublicBase(t *testing.T, publicBase string) *hubBackend {
+	t.Helper()
 	const token = "integration-push-token"
 	cfg := config.Config{Dir: t.TempDir(), Host: "127.0.0.1", Port: 0, IdleTimeout: time.Hour, NoAuth: true}
 	s, err := scrimserver.NewHub(cfg, scrimserver.HubOptions{PushToken: token, AllowCIDRs: nil})
@@ -32,7 +39,7 @@ func newHubBackendAgainstRealHub(t *testing.T) *hubBackend {
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	return newHubBackend(ts.URL, token)
+	return newHubBackend(ts.URL, publicBase, token)
 }
 
 func TestHubBackendRoundTrip(t *testing.T) {
@@ -225,7 +232,7 @@ func TestHubBackendReadMissingFile(t *testing.T) {
 // TestHubBackendClientSideTraversalGuard confirms hubBackend refuses a
 // traversal path locally, before any request is sent.
 func TestHubBackendClientSideTraversalGuard(t *testing.T) {
-	b := newHubBackend("http://127.0.0.1:1", "tok") // never actually dialed
+	b := newHubBackend("http://127.0.0.1:1", "", "tok") // never actually dialed
 	for _, p := range []string{"../escape.txt", "a/../../escape.txt", "/etc/passwd", ""} {
 		if _, err := b.ReadFile(context.Background(), "c1", p); err == nil {
 			t.Errorf("ReadFile(%q) error = nil, want a client-side rejection", p)
@@ -242,7 +249,7 @@ func TestHubBackendClientSideTraversalGuard(t *testing.T) {
 // TestHubBackendWriteSizeCap confirms an oversize write is rejected client-side
 // before crossing the wire.
 func TestHubBackendWriteSizeCap(t *testing.T) {
-	b := newHubBackend("http://127.0.0.1:1", "tok")
+	b := newHubBackend("http://127.0.0.1:1", "", "tok")
 	big := make([]byte, maxFileBytes+1)
 	if err := b.WriteFile(context.Background(), "c1", "big.txt", big); err == nil {
 		t.Fatal("oversize WriteFile error = nil, want a client-side cap rejection")
@@ -324,7 +331,7 @@ func TestHubBackendRefusesRedirects(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	b := newHubBackend(ts.URL, "tok")
+	b := newHubBackend(ts.URL, "", "tok")
 	if err := b.WriteFile(context.Background(), "c1", "x.html", []byte("x")); err == nil {
 		t.Error("WriteFile through a redirecting hub error = nil, want a refusal")
 	} else if !strings.Contains(err.Error(), "redirect") {
@@ -422,6 +429,140 @@ func TestHubBackendCopyCanvas(t *testing.T) {
 	// Conflict without overwrite.
 	if _, err := b.CopyCanvas(ctx, "src", "dst", false); err == nil {
 		t.Error("copy onto existing target: err = nil, want a 409-derived error")
+	}
+}
+
+// TestLinkURLAndLinkBase covers the pure link-building layer: linkURL's
+// empty-id (hub root) and trailing-slash handling, and linkBase's
+// public-base-else-API-base choice -- with and without a public base, including
+// the trailing-slash trimming newHubBackend applies to both bases.
+func TestLinkURLAndLinkBase(t *testing.T) {
+	t.Run("linkURL", func(t *testing.T) {
+		tests := []struct{ name, base, id, want string }{
+			{"canvas id", "https://scrim.example", "c1", "https://scrim.example/c/c1/"},
+			{"trailing slash trimmed", "https://scrim.example/", "c1", "https://scrim.example/c/c1/"},
+			{"repeated trailing slashes trimmed", "https://scrim.example///", "c1", "https://scrim.example/c/c1/"},
+			{"empty id is the hub root", "https://scrim.example", "", "https://scrim.example/"},
+			{"empty id with trailing slash", "https://scrim.example/", "", "https://scrim.example/"},
+			{"host:port base", "http://127.0.0.1:7788", "c1", "http://127.0.0.1:7788/c/c1/"},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := linkURL(tc.base, tc.id); got != tc.want {
+					t.Errorf("linkURL(%q, %q) = %q, want %q", tc.base, tc.id, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("linkBase", func(t *testing.T) {
+		tests := []struct{ name, base, public, wantAPI, wantLink string }{
+			{
+				name: "no public base falls back to the API base",
+				base: "http://scrim-hub.internal:7788", public: "",
+				wantAPI: "http://scrim-hub.internal:7788", wantLink: "http://scrim-hub.internal:7788",
+			},
+			{
+				name: "public base wins for links only",
+				base: "http://scrim-hub.internal:7788", public: "https://scrim.example",
+				wantAPI: "http://scrim-hub.internal:7788", wantLink: "https://scrim.example",
+			},
+			{
+				name: "both bases are trailing-slash trimmed",
+				base: "http://scrim-hub.internal:7788/", public: "https://scrim.example/",
+				wantAPI: "http://scrim-hub.internal:7788", wantLink: "https://scrim.example",
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				b := newHubBackend(tc.base, tc.public, "tok")
+				if b.baseURL != tc.wantAPI {
+					t.Errorf("baseURL = %q, want %q (API endpoint must be untouched by the public base)", b.baseURL, tc.wantAPI)
+				}
+				if got := b.linkBase(); got != tc.wantLink {
+					t.Errorf("linkBase() = %q, want %q", got, tc.wantLink)
+				}
+				// The root link and a canvas link both follow linkBase.
+				if got, want := linkURL(b.linkBase(), ""), tc.wantLink+"/"; got != want {
+					t.Errorf("root link = %q, want %q", got, want)
+				}
+				if got, want := linkURL(b.linkBase(), "c1"), tc.wantLink+"/c/c1/"; got != want {
+					t.Errorf("canvas link = %q, want %q", got, want)
+				}
+			})
+		}
+	})
+}
+
+// TestHubBackendPublicBaseLinksOnly proves the split --hub-public-url exists
+// for: every URL handed back to a caller is built from the public base, while
+// every request still goes to the API base. The public base here is a bogus
+// host that resolves nowhere -- so the round trip succeeding at all is the
+// proof that no request followed it. The unset case (links == API base) is
+// covered by TestHubBackendRoundTrip and TestHubBackendCopyCanvas.
+func TestHubBackendPublicBaseLinksOnly(t *testing.T) {
+	ctx := context.Background()
+	const public = "https://scrim.example"
+	b := newHubBackendWithPublicBase(t, public)
+	if b.baseURL == public {
+		t.Fatalf("test setup: API base %q must differ from the public base", b.baseURL)
+	}
+
+	// Add returns a public link, but actually created the canvas on the hub.
+	info, err := b.Add(ctx, "c1", "Title", "", "")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if info.URL != public+"/c/c1/" {
+		t.Errorf("Add URL = %q, want %q", info.URL, public+"/c/c1/")
+	}
+
+	// A real write/read round trip against the API base: this can only pass if
+	// the requests went to the test hub, never to the unreachable public base.
+	const content = "<h1>links are not endpoints</h1>"
+	if err := b.WriteFile(ctx, "c1", "index.html", []byte(content)); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	got, err := b.ReadFile(ctx, "c1", "index.html")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("ReadFile = %q, want %q", got, content)
+	}
+
+	// List, Link and CopyCanvas all present the public base too.
+	list, err := b.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].URL != public+"/c/c1/" {
+		t.Errorf("List = %+v, want one canvas with URL %s/c/c1/", list, public)
+	}
+	links, err := b.Link(ctx, "c1")
+	if err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if len(links) != 1 || links[0] != public+"/c/c1/" {
+		t.Errorf("Link = %v, want [%s/c/c1/]", links, public)
+	}
+	root, err := b.Link(ctx, "")
+	if err != nil {
+		t.Fatalf("Link root: %v", err)
+	}
+	if len(root) != 1 || root[0] != public+"/" {
+		t.Errorf("Link root = %v, want [%s/]", root, public)
+	}
+	copied, err := b.CopyCanvas(ctx, "c1", "c2", false)
+	if err != nil {
+		t.Fatalf("CopyCanvas: %v", err)
+	}
+	if copied.URL != public+"/c/c2/" {
+		t.Errorf("CopyCanvas URL = %q, want %q", copied.URL, public+"/c/c2/")
+	}
+	// ...and the copy really happened on the hub, at the API base.
+	if got, err := b.ReadFile(ctx, "c2", "index.html"); err != nil || string(got) != content {
+		t.Errorf("copied content = %q, err = %v; want %q, nil", got, err, content)
 	}
 }
 

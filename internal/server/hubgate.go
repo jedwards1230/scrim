@@ -95,8 +95,8 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 		// authorizes ANY method, reads included, and is a visibility superuser
 		// (see identity.CanView). It is distinct from the browser read gate
 		// (OIDC / CIDR / read-token) below. A request carrying a verified
-		// CF-forwarded actor is Admin=false (resolveClaims branch 1), so it does
-		// NOT hit this bypass: it is authorized as the actor -- writes via
+		// gateway-forwarded actor is Admin=false (resolveClaims branch 1), so it
+		// does NOT hit this bypass: it is authorized as the actor -- writes via
 		// serveWrite's machine-plane branch, reads via serveOIDCRead's CanView.
 		if c.Admin {
 			next.ServeHTTP(w, r)
@@ -157,11 +157,12 @@ const (
 // order, returning the resolving user token too (nil unless a user bearer token
 // matched). It never calls out to the IdP -- it reads the presented credential
 // only. Its one side effect is feeding the display-only principal registry when
-// a CF actor is resolved (best-effort; enforcement never reads that registry).
+// a forwarded actor is resolved (best-effort; enforcement never reads that
+// registry).
 func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Token) {
 	// 1. The global admin push token: the machine/bootstrap credential.
 	if s.hasValidPushToken(r) {
-		// A CF-forwarded actor rides the admin push token: when scrim-mcp
+		// A gateway-forwarded actor rides the admin push token: when scrim-mcp
 		// attaches verified X-Scrim-Actor-* headers, the request acts AS that
 		// actor (Admin:false) rather than as the raw admin superuser. This is the
 		// ONLY branch that honors those headers -- their trust derives entirely
@@ -223,8 +224,9 @@ func splitActorGroups(raw string) []string {
 }
 
 // observeCFActor feeds the display-only principal registry with a verified
-// CF-forwarded actor. Best-effort: a registry write failure is logged (scrubbed)
-// but never fails the request, and enforcement never reads the registry.
+// gateway-forwarded actor. Best-effort: a registry write failure is logged
+// (scrubbed) but never fails the request, and enforcement never reads the
+// registry.
 func (s *Server) observeCFActor(c identity.Claims) {
 	if s.principals == nil || c.Email == "" {
 		return
@@ -239,16 +241,16 @@ func (s *Server) observeCFActor(c identity.Claims) {
 // session (a logged-in principal mints/revokes its own tokens); every other
 // write requires a user bearer token whose owner may write the target canvas.
 func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims, tok *usertoken.Token) {
-	// A CF-forwarded actor rides the admin push token (the machine plane) but
-	// acts AS the actor (Admin:false, no user token). It is distinguished from a
-	// browser session -- also non-admin and tokenless -- by the presence of the
-	// valid admin bearer, so recompute it once here.
+	// A gateway-forwarded actor rides the admin push token (the machine plane)
+	// but acts AS the actor (Admin:false, no user token). It is distinguished
+	// from a browser session -- also non-admin and tokenless -- by the presence
+	// of the valid admin bearer, so recompute it once here.
 	machineActor := tok == nil && c.Authenticated() && s.hasValidPushToken(r)
 
 	// Claiming ownership of a legacy (admin-owned) canvas is the one write the
 	// browser plane permits: it's how a logged-in principal takes ownership, so
-	// any authenticated caller (session, user token, or CF actor) may reach the
-	// claim handler, which enforces the admin-owned/409 rules itself.
+	// any authenticated caller (session, user token, or forwarded actor) may
+	// reach the claim handler, which enforces the admin-owned/409 rules itself.
 	if isClaimPath(r.URL.Path) {
 		if c.Authenticated() {
 			next.ServeHTTP(w, r)
@@ -260,8 +262,8 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 
 	// Token management: a logged-in OIDC session mints/revokes its OWN tokens.
 	// A user-token principal may not mint further tokens (no privilege
-	// escalation); nor may the machine plane (admin bearer / CF actor) or an
-	// anonymous caller.
+	// escalation); nor may the machine plane (admin bearer / forwarded actor)
+	// or an anonymous caller.
 	if isTokenPath(r.URL.Path) {
 		if c.Email != "" && tok == nil && !machineActor {
 			next.ServeHTTP(w, r)
@@ -275,9 +277,9 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 
-	// A CF-forwarded actor writes AS itself on the machine plane: authorized by
-	// the same ownership check a user token uses (creating a new canvas is always
-	// allowed; writing an existing one requires CanWrite).
+	// A gateway-forwarded actor writes AS itself on the machine plane:
+	// authorized by the same ownership check a user token uses (creating a new
+	// canvas is always allowed; writing an existing one requires CanWrite).
 	if machineActor {
 		if !s.userTokenMayWrite(r, c) {
 			http.Error(w, "forbidden: your identity does not own this canvas", http.StatusForbidden)
@@ -292,15 +294,14 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// canvas's OWN sharing grants is a legitimate owner action the share dialog
 	// must perform natively in the browser -- so a session that OWNS the target
 	// canvas may POST/DELETE its grants. This is CSRF-safe for exactly the reason
-	// POST /api/tokens already is (PR1): the session cookie is HttpOnly +
+	// POST /api/tokens already is: the session cookie is HttpOnly +
 	// SameSite=Lax, so a cross-site POST/DELETE can never carry it -- only a
-	// same-site request the owner actually initiated reaches here. Grants were
-	// simply an inconsistent omission in PR1's session-writable surface.
+	// same-site request the owner actually initiated reaches here.
 	//
 	// Ownership is the whole gate: the handler bodies additionally bound a USER
 	// TOKEN's allowance, but a session owner is unrestricted over its own canvas,
-	// which is correct. The admin (served earlier), user-token, and CF-actor
-	// grant paths are handled above and stay unchanged.
+	// which is correct. The admin (served earlier), user-token, and
+	// forwarded-actor grant paths are handled above and stay unchanged.
 	if isGrantMutationPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
 		id, ok := writeTargetCanvasID(r.URL.Path)
 		if !ok {
@@ -520,10 +521,10 @@ func (s *Server) hasValidPushToken(r *http.Request) bool {
 //
 // X-Forwarded-For is deliberately NOT honored here: it's a plain request
 // header any client can set to an arbitrary value, so trusting it would let
-// any caller claim to be inside the allowlist. Phase 2 (a trusted-proxy
-// layer in front of the hub, e.g. Traefik) will need to add explicit
-// trusted-proxy handling before that header can be trusted; Phase 1 (this
-// code) has no such layer, so it stays unused.
+// any caller claim to be inside the allowlist. Running the hub behind a
+// reverse proxy (e.g. Traefik) would need explicit trusted-proxy handling
+// added before that header could be trusted; there is no such layer today,
+// so it stays unused -- see docs/threat-model.md.
 func clientIP(r *http.Request) (net.IP, error) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

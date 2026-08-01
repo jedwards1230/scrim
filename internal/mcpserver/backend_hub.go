@@ -32,25 +32,34 @@ const maxCompressedReadBytes = maxFileBytes + maxFileBytes/1000 + 64
 
 // hubTimeout bounds a single hub machine-API call. These are control-plane and
 // per-file operations against a hub the operator controls (commonly in-cluster
-// behind ContextForge), not long-running streams.
+// alongside this MCP server), not long-running streams.
 const hubTimeout = 30 * time.Second
 
 // hubBackend drives a remote scrim hub's bearer-authenticated machine API over
 // HTTP -- the counterpart to the routes in internal/server's hub mode. It has
 // no shared disk with the hub: every file read/write carries its bytes inline
-// over the wire. baseURL is the hub's externally-reachable base (e.g.
-// https://scrim-hub.example); token is the hub's push token, sent as
-// "Authorization: Bearer <token>" on every request.
+// over the wire. baseURL is the base every API call is made against (e.g.
+// https://scrim-hub.example, or an in-cluster address); token is the hub's push
+// token, sent as "Authorization: Bearer <token>" on every request.
+//
+// publicBaseURL is the OPTIONAL browser-reachable base used only to build the
+// view URLs handed back to callers (see linkBase). It exists because the API
+// base and the human-facing base need not be the same host: a server pointed at
+// an in-cluster address would otherwise return links no browser outside the
+// cluster can open. Empty -- the default -- means links are built from baseURL,
+// exactly as before.
 type hubBackend struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL       string
+	publicBaseURL string
+	token         string
+	http          *http.Client
 }
 
-func newHubBackend(baseURL, token string) *hubBackend {
+func newHubBackend(baseURL, publicBaseURL, token string) *hubBackend {
 	return &hubBackend{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		token:         token,
 		http: &http.Client{
 			Timeout: hubTimeout,
 			// Refuse redirects outright. cleanRelPath keeps request paths
@@ -78,13 +87,14 @@ type canvasWire struct {
 	SSEClients  int       `json:"sse_clients"`
 }
 
-func (c canvasWire) toInfo(baseURL string) CanvasInfo {
+func (c canvasWire) toInfo(linkBase string) CanvasInfo {
 	return CanvasInfo{
 		ID:    c.ID,
 		Title: c.Title,
-		// Always present the client-reachable view URL, never the hub's
-		// own internal host:port (which may be a container address).
-		URL:        linkURL(baseURL, c.ID),
+		// Always rebuild the URL from the configured link base, never the
+		// hub's self-reported host:port (which is its bind address --
+		// 0.0.0.0 or a container address -- and reaches nobody).
+		URL:        linkURL(linkBase, c.ID),
 		Dir:        c.Dir,
 		Icon:       c.Icon,
 		Color:      c.Color,
@@ -113,14 +123,27 @@ type snapWire struct {
 	Label     string    `json:"label"`
 }
 
-// linkURL builds the client-reachable view URL for a canvas from the hub base,
-// without any token in the URL. id=="" yields the hub root.
+// linkURL builds the view URL for a canvas from the base it is given, without
+// any token in the URL. id=="" yields the hub root. Callers pass linkBase(),
+// not b.baseURL directly -- see linkBase for which base that resolves to.
 func linkURL(baseURL, id string) string {
 	base := strings.TrimRight(baseURL, "/")
 	if id == "" {
 		return base + "/"
 	}
 	return base + "/c/" + id + "/"
+}
+
+// linkBase returns the base every client-facing view URL is built from: the
+// operator-supplied public base when set (--hub-public-url), else the API base.
+// Only link building consults it -- every API call keeps using b.baseURL, so
+// pointing the two at different hosts changes what callers are told, never
+// where the requests go.
+func (b *hubBackend) linkBase() string {
+	if b.publicBaseURL != "" {
+		return b.publicBaseURL
+	}
+	return b.baseURL
 }
 
 func (b *hubBackend) List(ctx context.Context) ([]CanvasInfo, error) {
@@ -130,7 +153,7 @@ func (b *hubBackend) List(ctx context.Context) ([]CanvasInfo, error) {
 	}
 	out := make([]CanvasInfo, 0, len(wire))
 	for _, c := range wire {
-		out = append(out, c.toInfo(b.baseURL))
+		out = append(out, c.toInfo(b.linkBase()))
 	}
 	return out, nil
 }
@@ -141,7 +164,7 @@ func (b *hubBackend) Add(ctx context.Context, id, title, description, icon strin
 	if err := b.doJSON(ctx, http.MethodPost, "/api/canvases", body, &wire); err != nil {
 		return CanvasInfo{}, err
 	}
-	return wire.toInfo(b.baseURL), nil
+	return wire.toInfo(b.linkBase()), nil
 }
 
 func (b *hubBackend) Remove(ctx context.Context, id string) error {
@@ -170,7 +193,7 @@ func (b *hubBackend) Status(ctx context.Context) (StatusInfo, error) {
 func (b *hubBackend) Link(_ context.Context, id string) ([]string, error) {
 	// No round-trip needed: the view URL is a pure function of the hub base
 	// and the canvas id, and carries no token.
-	return []string{linkURL(b.baseURL, id)}, nil
+	return []string{linkURL(b.linkBase(), id)}, nil
 }
 
 func (b *hubBackend) Snap(ctx context.Context, id, label string) (SnapInfo, error) {
@@ -244,8 +267,8 @@ func (b *hubBackend) CopyCanvas(ctx context.Context, from, to string, overwrite 
 	if err := b.doJSON(ctx, http.MethodPost, "/api/canvases/"+url.PathEscape(from)+"/copy", body, &resp); err != nil {
 		return CopyInfo{}, err
 	}
-	// Present the client-reachable view URL, never the hub's internal path.
-	return CopyInfo{From: resp.From, To: resp.To, URL: linkURL(b.baseURL, resp.To)}, nil
+	// Present the view URL built from the configured link base (see linkURL).
+	return CopyInfo{From: resp.From, To: resp.To, URL: linkURL(b.linkBase(), resp.To)}, nil
 }
 
 func (b *hubBackend) ShareCanvas(ctx context.Context, id, kind, target string) (GrantResult, error) {
@@ -444,8 +467,9 @@ func (b *hubBackend) newRequest(ctx context.Context, method, rawURL string, body
 		return nil, fmt.Errorf("building hub request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+b.token)
-	// When the call carries a verified CF-forwarded actor, attribute it to the
-	// hub via X-Scrim-Actor-* on top of the admin bearer (#51). The hub trusts
+	// When the call carries a verified actor (gateway-forwarded, or derived
+	// from a validated OAuth token), attribute it to the hub via
+	// X-Scrim-Actor-* on top of the admin bearer. The hub trusts
 	// these headers ONLY because they ride the valid admin push token above; a
 	// call with no verified actor sends the admin bearer alone and is attributed
 	// to admin. localBackend, having no remote hub, ignores the actor entirely.

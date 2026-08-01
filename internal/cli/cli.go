@@ -1,13 +1,14 @@
 // Package cli implements scrim's verb parsing and dispatch: add, path, list,
-// link, open, rm, snap, snaps, revert, status, stop, serve, hub, and push.
-// Each verb is a thin wrapper that either talks to a running daemon over its
-// local HTTP API (self-starting it first if needed) or, for path/rm's
+// link, open, rm, snap, snaps, revert, status, stop, serve, hub, push, and
+// mcp. Each verb is a thin wrapper that either talks to a running daemon over
+// its local HTTP API (self-starting it first if needed) or, for path/rm's
 // fallback/snap/snaps/revert/status/stop, works directly against the
 // filesystem/daemon state. hub and push are the two exceptions: hub runs
 // the same serving engine in a separate, network-reachable central-store
 // mode (see internal/server's hub mode), and push is a standalone client
 // that tars a local canvas and POSTs it to a hub -- neither self-starts or
-// talks to a local daemon at all.
+// talks to a local daemon at all. mcp runs the MCP server (see
+// internal/mcpserver), which drives either the local daemon or a remote hub.
 package cli
 
 import (
@@ -51,13 +52,17 @@ Verbs:
                           Tar a LOCAL canvas and POST it to a hub's push
                           endpoint (see "scrim push --help"). Never
                           self-starts or talks to a local daemon.
-  mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-token-file PATH]
+  mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-public-url URL]
+      [--hub-token-file PATH]
                           Run an MCP server exposing scrim as tools (add, list,
-                          link, rm, snap, snaps, revert, status, read_file,
-                          write_file, edit_file, push, plus path in local
+                          link, rm, snap, snaps, revert, copy_canvas, status,
+                          list_files, read_file, write_file, edit_file,
+                          share_canvas, list_grants, push, plus path in local
                           mode); stdio by default, --http ADDR for streamable
                           HTTP, --hub URL to drive a remote hub instead of
-                          the local daemon (see "scrim mcp --help").
+                          the local daemon, --hub-public-url URL for the
+                          browser-reachable base the returned links are built
+                          from when --hub isn't one (see "scrim mcp --help").
 
 Flags (all verbs except hub/push, which have their own -- see their --help):
   --dir DIR              Directory for canvases + daemon state (env SCRIM_DIR, default ~/.scrim)

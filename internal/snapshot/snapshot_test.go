@@ -2,12 +2,40 @@ package snapshot
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
+
+// requireUnprivileged guards the tests below that provoke a failure by
+// removing a permission bit -- something root ignores, so as root they assert
+// nothing at all.
+//
+// A bare t.Skip is the dangerous shape here: a containerised CI job running as
+// root would quietly stop exercising these cleanup/rollback paths and still
+// report the suite green. So under CI the skip is an outright failure -- CI is
+// expected to run unprivileged (GitHub's ubuntu-latest runner does), and if it
+// ever doesn't, that is the bug. Off CI it stays a skip, but one written to
+// stderr so it is visible without -v.
+//
+// internal/server/handlers_push_swap_test.go carries the same helper for the
+// same reason; the two are deliberate copies rather than a shared package,
+// which would mean importing "testing" from non-test code.
+func requireUnprivileged(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return
+	}
+	const why = "running as root bypasses the permission check this test relies on"
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s -- a CI job must not run the suite as root, or this failure-injection test verifies nothing while still reporting success", why)
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: skipping %s: %s\n", t.Name(), why)
+	t.Skip(why)
+}
 
 func writeCanvasFile(t *testing.T, canvasDir, name, content string) {
 	t.Helper()
@@ -78,9 +106,7 @@ func TestCreateCleansUpPartialSnapshotOnCopyFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission-based copy-failure simulation is not reliable on windows")
 	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses the permission check this test relies on")
-	}
+	requireUnprivileged(t)
 
 	canvasDir := filepath.Join(t.TempDir(), "canvas")
 	versionsDir := t.TempDir()
@@ -404,9 +430,7 @@ func TestRevertLeavesCanvasUntouchedOnCopyFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission-based copy-failure simulation is not reliable on windows")
 	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses the permission check this test relies on")
-	}
+	requireUnprivileged(t)
 
 	canvasDir := filepath.Join(t.TempDir(), "canvas")
 	versionsDir := t.TempDir()

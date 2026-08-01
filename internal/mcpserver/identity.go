@@ -23,10 +23,9 @@ const IdentitySecretEnv = "SCRIM_MCP_IDENTITY_HMAC_SECRET" //nolint:gosec // G10
 // Forwarded-identity request headers (trusted gateway → scrim-mcp). A trusted
 // reverse proxy / gateway authenticates the end user and forwards the resulting
 // principal as these headers, signed with the shared secret so scrim-mcp can
-// verify the gateway -- and only the gateway -- set them. (In this project's
-// deployment the gateway is the ContextForge MCP gateway, but the mechanism is
-// generic: any proxy that authenticates the user and emits a signed principal
-// in this wire format works.)
+// verify the gateway -- and only the gateway -- set them. The mechanism names
+// no particular product: any proxy that authenticates the end user and emits
+// a signed principal in this wire format works.
 const (
 	hdrFwdUserID     = "X-Forwarded-User-Id"
 	hdrFwdUserEmail  = "X-Forwarded-User-Email"
@@ -39,15 +38,16 @@ const (
 // headers, on top of the admin push-token bearer. The hub trusts them ONLY
 // because they ride a valid admin bearer (see internal/server/hubgate.go's
 // resolveClaims) -- this hop is scrim-mcp asserting "I verified this actor",
-// distinct from the CF→mcp hop above which scrim-mcp must itself verify.
+// distinct from the gateway→mcp hop above which scrim-mcp must itself verify.
 const (
 	hdrActorID     = "X-Scrim-Actor-Id"
 	hdrActorEmail  = "X-Scrim-Actor-Email"
 	hdrActorGroups = "X-Scrim-Actor-Groups"
 )
 
-// actor is the verified CF-forwarded principal a single tool call acts as. It
-// is mcpserver's OWN small identity type -- deliberately not internal/server's
+// actor is the verified principal a single tool call acts as -- forwarded by a
+// trusted gateway, or derived from a validated OAuth token. It is mcpserver's
+// OWN small identity type -- deliberately not internal/server's
 // identity.Claims -- so this package keeps no dependency on internal/server.
 // The zero value is the anonymous principal (no verified identity).
 type actor struct {

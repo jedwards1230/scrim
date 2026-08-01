@@ -47,7 +47,7 @@ const (
 var renameStagedSwap = os.Rename
 
 // errPushTooLarge is returned by extractTar when an archive exceeds
-// maxPushBytes or maxPushFiles.
+// maxPushBytes or maxPushEntries.
 var errPushTooLarge = errors.New("push: archive exceeds the hub's size or file-count limit")
 
 // errPushBadEntry is returned by extractTar for a tar entry that would
@@ -178,11 +178,12 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	title := r.URL.Query().Get("title")
 	description := r.URL.Query().Get("description")
 	icon := r.URL.Query().Get("icon")
-	// Attribute ownership to the pushing principal (admin for the push token;
-	// #51 will carry a CF-forwarded actor), but never clobber an existing owner
-	// -- a later claim/transfer (#55) must win over a re-push. Passing owner ""
-	// to canvas.Create leaves any existing owner in place and preserves grants,
-	// so this also records metadata even when no title/description/icon is given.
+	// Attribute ownership to the pushing principal (admin for the bare push
+	// token, or the gateway-forwarded actor riding it), but never clobber an
+	// existing owner -- a later claim/transfer must win over a re-push. Passing
+	// owner "" to canvas.Create leaves any existing owner in place and preserves
+	// grants, so this also records metadata even when no title/description/icon
+	// is given.
 	owner := ownerFromClaims(claimsFrom(r.Context()))
 	existingOwner, _, _ := canvas.GetOwnerGrants(s.metaDir, id)
 	if existingOwner != "" {

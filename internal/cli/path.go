@@ -8,8 +8,8 @@ import (
 
 // cmdPath implements `scrim path <id>`. It's a pure filesystem computation
 // from --dir/SCRIM_DIR — it does not talk to the daemon and works whether
-// or not the daemon is running or the canvas has been created yet, so it's
-// deliberately the one verb that never self-starts.
+// or not the daemon is running or the canvas has been created yet, so (like
+// snap/snaps/revert/status/stop) it never self-starts one.
 func cmdPath(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("path", stderr)
 	cf := registerCommonFlags(fs)

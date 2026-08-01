@@ -131,12 +131,16 @@ no-referrer`, canvas content responses are marked `Cache-Control: no-store` so
 browsers never retain them, and the daemon's own logging never includes a
 request path, canvas ID, query string, or the raw token, at any log level.
 
-On Unix-like systems (Linux, macOS), `~/.scrim` (or whatever `--dir` points to)
-is tightened to owner-only permissions on every startup (0700 for the directory,
-0600 for the state and log files) — even if an older scrim created it looser.
-This isn't implemented on Windows yet (`os.Chmod` there only toggles the
-read-only attribute); a one-time warning is logged instead of silently claiming
-success, tracked in [#19](https://github.com/jedwards1230/scrim/issues/19).
+`~/.scrim` (or whatever `--dir` points to) is tightened to owner-only access on
+every startup — even if an older scrim created it looser. On Unix-like systems
+(Linux, macOS) that's mode bits: 0700 for the directory, 0600 for the state and
+log files. On Windows it's an ACL granting full control to only the directory's
+owner, the account scrim runs as, `SYSTEM`, and `BUILTIN\Administrators` (the
+same set Windows gives `%USERPROFILE%`); the ACL is inheritance-protected, so
+the parent's more permissive entries can't leak back in, and it propagates to
+everything scrim creates underneath — which it has to, since Windows grants
+*Bypass traverse checking* to everyone by default, so unlike the Unix 0700
+directory gate the protection is per-object rather than one barrier at the top.
 
 ## link vs. open
 

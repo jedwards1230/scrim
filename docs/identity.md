@@ -109,11 +109,11 @@ authenticates the end user and forwards the principal as HMAC-signed
 verified principal to the hub as `X-Scrim-Actor-*` on top of its own hub bearer,
 so a canvas is attributed to the real caller rather than the shared credential.
 
-The mechanism is generic: the gateway is any reverse proxy that authenticates
-the end user and forwards a signed principal in scrim's wire format — the
-`X-Forwarded-User-*` header names plus the canonicalization + HMAC scheme in
-`internal/mcpserver/identity.go`. (In this project's own deployment that gateway
-is the ContextForge MCP gateway.)
+The mechanism is generic and names no particular product: the gateway is any
+reverse proxy that authenticates the end user and forwards a signed principal in
+scrim's wire format — the `X-Forwarded-User-*` header names plus the
+canonicalization + HMAC scheme in `internal/mcpserver/identity.go`. Pointing a
+given gateway at it is a configuration/adapter task, not a code change.
 
 An unset secret is fail-closed: identity is not verified and every call is
 attributed to whatever hub credential scrim mcp itself holds. This is why a
