@@ -9,7 +9,8 @@
 # cross-builds the Go binaries (5 platforms), builds and pushes a multi-arch
 # container image to GHCR, and publishes the GitHub Release. The release job
 # also attaches an aggregate SHA256SUMS manifest and a keyless cosign signature
-# over it (Sigstore, via the job's GitHub OIDC identity) as .sig/.pem.
+# over it (Sigstore, via the job's GitHub OIDC identity) as a single
+# SHA256SUMS.cosign.bundle.
 #
 # The git tag is the single source of truth: the build/image jobs check out the
 # TAGGED commit and stamp the computed version into the binaries (via -ldflags)
@@ -306,9 +307,18 @@ jobs:
 
       # Keyless (Sigstore) signature over the checksum manifest: no long-lived
       # key, identity is the workflow's OIDC token, logged to the Rekor
-      # transparency log. Verify with:
-      #   cosign verify-blob --certificate SHA256SUMS.pem \
-      #     --signature SHA256SUMS.sig \
+      # transparency log.
+      #
+      # --bundle, not --output-signature/--output-certificate: cosign now
+      # defaults to the new bundle format, which IGNORES those two flags and
+      # writes a single bundle to --bundle instead. Passing the old pair alone
+      # left --bundle empty and failed with
+      #   "signing SHA256SUMS: create bundle file: open : no such file or directory"
+      # which silently cost v0.8.1 and v0.9.0 their GitHub Releases (the tag and
+      # image jobs run earlier and had already succeeded). See scrim#98.
+      #
+      # Verify with:
+      #   cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
       #     --certificate-identity-regexp \
       #       'https://github.com/jedwards1230/scrim/.github/workflows/release.yml@.*' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -318,9 +328,12 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign-blob --yes \
-            --output-signature SHA256SUMS.sig \
-            --output-certificate SHA256SUMS.pem \
+            --bundle SHA256SUMS.cosign.bundle \
             SHA256SUMS
+          # Fail loudly here rather than shipping a release whose signature is
+          # missing: the attach step globs dist/*, so an absent bundle would
+          # otherwise just produce a quietly unsigned release.
+          test -s SHA256SUMS.cosign.bundle
 
       - name: Compose release body (AI notes)
         env:
@@ -358,5 +371,5 @@ jobs:
             echo "| Bump | ${BUMP_TYPE} |"
             # Keep this in sync with the "platforms" list in the build job.
             echo "| Binaries | linux/darwin (amd64 + arm64), windows (amd64) |"
-            echo "| Integrity | SHA256SUMS + keyless cosign signature (.sig/.pem) |"
+            echo "| Integrity | SHA256SUMS + keyless cosign signature (SHA256SUMS.cosign.bundle) |"
           } >> "$GITHUB_STEP_SUMMARY"
