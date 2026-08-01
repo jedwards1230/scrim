@@ -76,15 +76,6 @@ if you pass the flag anyway).
 The tradeoff is disk vs token: local mode trusts the shared filesystem; hub
 mode trusts the bearer token and moves bytes over HTTP.
 
-**The `--hub` URL is also the link base.** In hub mode `add`, `link`, and
-`copy_canvas` build their returned canvas URL from the `--hub` value — there is
-no separate "external URL" setting. So a server pointed at an in-cluster address
-(`--hub http://scrim-hub:7788`) hands back `http://scrim-hub:7788/c/<id>/`,
-which is correct for the API hop but does **not** resolve for a human outside
-the cluster. Point `--hub` at the hub's externally-reachable URL whenever the
-returned links are meant to be opened by a person, and let ingress route it to
-the in-cluster service.
-
 ## Streamable HTTP transport
 
 Transport is stdio by default; pass `--http ADDR` for streamable HTTP. The HTTP
