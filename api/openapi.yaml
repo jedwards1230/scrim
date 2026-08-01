@@ -31,8 +31,11 @@ info:
     configured with OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a
     browser navigation) and the CIDR/read-token path is NOT consulted at all; otherwise the client
     IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a separate read token is
-    configured, present it. A machine client authenticates with the bearer and never touches the
-    browser gate.
+    configured, present it. A machine client holding the ADMIN PUSH TOKEN never touches that
+    browser gate — it is authorized before the read/write split. A USER TOKEN is only exempt on an
+    OIDC hub: with no OIDC configured, EVERY non-admin read is decided by the CIDR allowlist plus
+    the optional read token and the bearer is not consulted at all, so a user token buys no read
+    privilege there.
 
     **Error shapes — two of them.** Errors a HANDLER produces are JSON: `{"error": "<message>"}`.
     Denials the GATE produces are `text/plain` (they go through `http.Error`/`http.NotFound`), so
@@ -1066,7 +1069,9 @@ components:
         writes and reads alike, and it is the only credential `POST /api/stop` accepts. A USER
         TOKEN, minted by a logged-in principal, authorizes the same machine API bounded to canvases
         its owner may write (`403` otherwise) and, under OIDC, may read only what its owner may
-        view. Absent any valid bearer, a machine-API write is `401`; a read falls to the browser
+        view. A user token grants NO read privilege on a hub without OIDC: that read is decided by
+        the CIDR allowlist + optional read token like any other, and the bearer is ignored. Absent
+        any valid bearer, a machine-API write is `401`; a read falls to the browser
         gate (OIDC session, or CIDR allowlist + optional read token) and may instead be `403`
         (outside the allowlist) or `401` (OIDC configured, no session).
     sessionCookie:
