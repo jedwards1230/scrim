@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,13 @@ func assertNoStagingLeak(t *testing.T, s *Server) {
 // so the push aborts before touching the served canvas at all. The previous
 // content must remain fully intact.
 func TestHandlePushAsideRenameFailsLeavesCanvasIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The failure is injected by chmod'ing the canvases dir to 0555. On
+		// windows os.Chmod only toggles the read-only attribute and does not
+		// restrict directory renames or deletes, so the rename would succeed
+		// and this test would fail for a reason unrelated to what it asserts.
+		t.Skip("permission-based rename-failure simulation is not reliable on windows")
+	}
 	requireUnprivileged(t)
 	s, ts := newHubTestServer(t, []string{"127.0.0.0/8", "::1/128"}, "")
 
