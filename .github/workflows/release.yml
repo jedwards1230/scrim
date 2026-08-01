@@ -9,7 +9,8 @@
 # cross-builds the Go binaries (5 platforms), builds and pushes a multi-arch
 # container image to GHCR, and publishes the GitHub Release. The release job
 # also attaches an aggregate SHA256SUMS manifest and a keyless cosign signature
-# over it (Sigstore, via the job's GitHub OIDC identity) as .sig/.pem.
+# over it (Sigstore, via the job's GitHub OIDC identity) as a single
+# SHA256SUMS.cosign.bundle.
 #
 # The git tag is the single source of truth: the build/image jobs check out the
 # TAGGED commit and stamp the computed version into the binaries (via -ldflags)
@@ -370,5 +371,5 @@ jobs:
             echo "| Bump | ${BUMP_TYPE} |"
             # Keep this in sync with the "platforms" list in the build job.
             echo "| Binaries | linux/darwin (amd64 + arm64), windows (amd64) |"
-            echo "| Integrity | SHA256SUMS + keyless cosign signature (.sig/.pem) |"
+            echo "| Integrity | SHA256SUMS + keyless cosign signature (SHA256SUMS.cosign.bundle) |"
           } >> "$GITHUB_STEP_SUMMARY"
