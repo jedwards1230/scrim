@@ -25,10 +25,12 @@ can't give.**
 Three things are true and worth stating plainly before any plan:
 
 1. ~~**`scripts/e2e.sh` runs in no workflow.**~~ **DONE.** This was the largest
-   risk in the repo when this document was written: 34 scenarios and ~124
-   assertions — including the entire hub token/grant/claim surface and the
-   privacy log-redaction regression — gated on someone remembering to run a
-   script. It now runs as its own parallel `e2e` job in `ci.yml`, present in the
+   risk in the repo when this document was written: the entire suite — the hub
+   token/grant/claim surface, actor attribution, and the privacy log-redaction
+   regression among them — gated on someone remembering to run a script. It
+   reports its own totals on every run (`passed:`/`failed:`/`skipped:`), which is
+   the number to trust; counts written into prose here go stale silently. It now
+   runs as its own parallel `e2e` job in `ci.yml`, present in the
    `ci` aggregate's `needs` *and* its results array, and mutation-tested to fail
    the build on a broken assertion.
 2. **Three load-bearing paths sit at 0% coverage.** `server/hub.go:74 broadcast`
@@ -245,10 +247,10 @@ Five rules, all derived from what's already in the tree:
 3. **Every test that starts a daemon gets its own `--dir` *and* its own port.**
    ~~`scripts/e2e.sh` does not follow this.~~ **DONE.** When this was written only
    6 scenarios passed `--port` and the rest used the default 7777. Every scenario
-   now allocates through `use_port`/`alloc_port` (23 call sites), and scenario 1
-   asserts against the daemon's own state file that it bound the allocated port
-   and not 7777 — so the property is tested, not merely intended. The rule stands
-   for anything new.
+   now allocates through `use_port` (or `alloc_port` for `hub`/`push`/`mcp`, which
+   don't take `commonFlags`), and scenario 1 asserts against the daemon's own state
+   file that it bound the allocated port and not 7777 — so the property is tested,
+   not merely intended. The rule stands for anything new.
 4. **No second-granularity timing assertions.** `$SECONDS`-based bounds like
    `-le 4` are one scheduling hiccup from failing. Either widen the bound
    drastically or assert ordering instead of duration.
