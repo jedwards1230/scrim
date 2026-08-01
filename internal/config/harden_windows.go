@@ -16,10 +16,16 @@ import (
 )
 
 // fileFullControl is FILE_ALL_ACCESS: the specific-rights mask a file or
-// directory object's generic mapping turns GENERIC_ALL into. SetEntriesInAcl
-// applies that mapping while building the ACL, so an ACE this package wrote
-// reads back carrying these bits rather than the generic one -- which is what
-// makes daclMatches able to recognize its own work.
+// directory object's generic mapping turns GENERIC_ALL into.
+//
+// The mapping is applied by the kernel when the descriptor is set on the object,
+// not by SetEntriesInAcl -- SetEntriesInAcl copies grfAccessPermissions verbatim
+// into the ACE. The observable result is the same either way: an ACE this package
+// wrote as GENERIC_ALL reads back carrying these specific bits, which is what lets
+// daclMatches recognize its own work. Stated precisely because that read-back is
+// the single assumption daclMatches rests on, and it has never been confirmed by
+// running on Windows: CI is ubuntu-only, so this package is type-checked under
+// GOOS=windows but never executed there.
 const fileFullControl = windows.ACCESS_MASK(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1FF)
 
 // hardenDir creates dir if missing and makes sure it carries the owner-only
