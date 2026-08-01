@@ -41,10 +41,11 @@ instead.
   agent and scrim share a machine.
 - **Hub mode** (`--hub URL`): the same tool surface operates on a **remote** hub
   over its bearer-authenticated machine API — for a scrim mcp hosted away from
-  the agent (e.g. in-cluster). Since there's no shared disk, authoring is done
-  entirely through `write_file`/`read_file` (inline content, ~2 MiB cap);
-  `path` is absent (a server-local path is meaningless remotely). A bearer token
-  authenticates every call — from `SCRIM_PUSH_TOKEN` (the admin credential) or
+  the agent (e.g. in-cluster). `--hub` is the **API endpoint**: every machine-API
+  call goes there. Since there's no shared disk, authoring is done entirely
+  through `write_file`/`read_file` (inline content, ~2 MiB cap); `path` is absent
+  (a server-local path is meaningless remotely). A bearer token authenticates
+  every call — from `SCRIM_PUSH_TOKEN` (the admin credential) or
   `--hub-token-file PATH` — and can be either the admin push token or a [user
   token](identity.md#ownership-sharing--tokens); `scrim mcp --hub` fails closed
   with no token. A user token attributes everything it creates/writes to its
@@ -55,17 +56,25 @@ instead.
 { "command": "scrim", "args": ["mcp", "--hub", "https://scrim-hub.example"] }
 ```
 
+By default the URLs `add`/`list`/`link`/`copy_canvas` hand back are built from
+`--hub` itself, which is right when that endpoint is also browser-reachable.
+When it isn't — a server calling the hub at an in-cluster address, say
+`--hub http://scrim-hub:7788` — those links are dead for a human. Pass
+`--hub-public-url URL` (env `SCRIM_HUB_PUBLIC_URL`, flag wins) with the
+browser-reachable base to build links from instead:
+
+```bash
+scrim mcp --hub http://scrim-hub:7788 --hub-public-url https://scrim.example
+# API calls → http://scrim-hub:7788 ; links returned → https://scrim.example/c/<id>/
+```
+
+It is **link-only**: no request is ever made to it, so it changes nothing about
+where calls go, what they carry, or how they're authenticated. Unset, links are
+built from `--hub` exactly as before; it has no effect in local mode (a warning
+if you pass the flag anyway).
+
 The tradeoff is disk vs token: local mode trusts the shared filesystem; hub
 mode trusts the bearer token and moves bytes over HTTP.
-
-**The `--hub` URL is also the link base.** In hub mode `add`, `link`, and
-`copy_canvas` build their returned canvas URL from the `--hub` value — there is
-no separate "external URL" setting. So a server pointed at an in-cluster address
-(`--hub http://scrim-hub:7788`) hands back `http://scrim-hub:7788/c/<id>/`,
-which is correct for the API hop but does **not** resolve for a human outside
-the cluster. Point `--hub` at the hub's externally-reachable URL whenever the
-returned links are meant to be opened by a person, and let ingress route it to
-the in-cluster service.
 
 ## Streamable HTTP transport
 
