@@ -44,11 +44,13 @@ log() { printf '\n=== %s ===\n' "$1"; }
 # gap before the daemon binds -- it narrows the window rather than closing it,
 # which is why the per-run block offset carries the real isolation.
 #
-# The 20000-31900 span is deliberate: it is above anything scrim or a dev tool
-# claims by default, and the whole block (base + 100) still lands below 32768,
-# where Linux's default ephemeral range starts. A port already held as some
-# other process's ephemeral *client* socket would fail to bind while looking
-# free to port_in_use, which only detects listeners.
+# The span is deliberate: bases land on 20000..31800 (119 blocks of 100), and a
+# block's last port is base+99, so the highest port this can ever hand out is
+# 31899 -- above anything scrim or a dev tool claims by default, and still
+# below 32768, where Linux's default ephemeral range starts. Keep that ceiling
+# if you widen the range: a port already held as some other process's ephemeral
+# *client* socket would fail to bind while looking free to port_in_use, which
+# only detects listeners.
 E2E_PORT_BLOCK=100
 E2E_PORT_BASE=${SCRIM_E2E_PORT_BASE:-$((20000 + ($$ % 119) * E2E_PORT_BLOCK))}
 E2E_PORT_NEXT=$E2E_PORT_BASE
