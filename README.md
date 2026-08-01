@@ -65,8 +65,10 @@ scrim mcp [--http ADDR]       # Serve scrim's verbs as MCP tools (see docs/mcp.m
 ```
 
 The daemon self-starts on first use of any verb that needs it (`add`, `list`,
-`link`, `open`, and `mcp` in local mode) and idles down after `--idle-timeout`
-of inactivity.
+`link`, `open`) and idles down after `--idle-timeout` of inactivity. `scrim mcp`
+in local mode self-starts it too, but not at invocation — launching the MCP
+server touches no daemon; the first tool call that needs one (`add`, `list`,
+`link`) is what starts it.
 `snap`/`snaps`/`revert` (and `path`/`rm`'s fallback) are pure filesystem
 operations and never self-start the daemon. Run `scrim --help` (or
 `scrim <verb> --help`) for the full reference.

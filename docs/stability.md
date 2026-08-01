@@ -34,7 +34,7 @@ Not everything that changed layout got a migration. The v0.1 `.scrim.json`
 sidecar was **replaced** by external `meta/<id>.json` files, not migrated: a
 v0.1 canvas upgraded in place keeps all of its content but silently loses its
 title, description, and icon, which have to be re-set with `scrim add --title`
-/`--description`/`--icon`.
+/`--desc`/`--icon`.
 
 Because migrations run **forward** on startup, downgrading to an older binary
 after a newer one has migrated the on-disk state is not supported — the older

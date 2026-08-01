@@ -113,9 +113,10 @@ func (s *Server) routes() http.Handler {
 
 		// The OIDC login routes exist only when a hub was started with OIDC
 		// configured. They must be reachable WITHOUT a session (that is how a
-		// user logs in), so withHubGate exempts the /auth/ prefix; registering
-		// them only here keeps that exemption inert for a non-OIDC hub, where
-		// the paths simply 404.
+		// user logs in), so withHubGate exempts exactly these three paths (see
+		// isAuthPath -- an exact match, deliberately not an "/auth/" prefix);
+		// registering them only here keeps that exemption inert for a non-OIDC
+		// hub, where the paths simply 404.
 		if s.oidcAuth != nil {
 			mux.HandleFunc("GET "+oidc.LoginPath, s.oidcAuth.HandleLogin)
 			mux.HandleFunc("GET "+oidc.CallbackPath, s.oidcAuth.HandleCallback)

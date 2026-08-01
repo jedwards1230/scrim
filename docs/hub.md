@@ -117,12 +117,15 @@ contract straight from a live instance — `curl http://<hub>/api/openapi.yaml`.
 Only YAML is served (scrim adds no YAML-to-JSON dependency; modern tools read
 YAML natively).
 
-The machine API is gated by a bearer token on **every** call, reads included —
-either the admin push token or a [user
-token](identity.md#ownership-sharing--tokens) — separate from the browser read
-gate (CIDR/read-token or OIDC). Under OIDC, per-canvas machine-API reads are
-additionally visibility-filtered: a user token only sees canvases its owner may
-view. File PUTs may carry a
+The machine API is gated by a bearer token on **every** call, reads included,
+separate from the browser read gate (CIDR/read-token or OIDC). The admin push
+token is the credential that always suffices: it authorizes any method on any
+hub. A [user token](identity.md#ownership-sharing--tokens) authorizes writes
+the same way, but only authorizes *reads* on a hub configured with OIDC — with
+no OIDC, every non-admin GET falls through to the browser read gate, which
+inspects the client IP and the read token and never the bearer, so a user token
+buys nothing there. Under OIDC, per-canvas machine-API reads are additionally
+visibility-filtered: a user token only sees canvases its owner may view. File PUTs may carry a
 `Content-Encoding: gzip` body and GETs an `Accept-Encoding: gzip` request; the
 hub inflates/deflates transparently (the per-file cap applies to the decoded
 size).

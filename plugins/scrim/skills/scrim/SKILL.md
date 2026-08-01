@@ -69,8 +69,8 @@ only `path` is local-only. Prefer `edit_file` over `write_file` for changes
 to an existing file — it replaces an exact string server-side, so it costs
 tokens proportional to the change, not the whole file; pass it an `edits`
 array to apply many replacements in one transactional call. `list_files`
-enumerates a canvas's files (paths + sizes, no content) so you can discover
-what to read or edit; `copy_canvas` duplicates a canvas server-side. For large
+enumerates a canvas's files (paths, sizes, and modification times — no content)
+so you can discover what to read or edit; `copy_canvas` duplicates a canvas server-side. For large
 or binary files, `read_file`/`write_file` accept `encoding: "gzip+base64"` to
 move content compressed.
 
@@ -83,14 +83,16 @@ exactly once**, in that call's result; append it to the canvas URL as
 surface it to the user in the same reply or mint a new link grant.
 `list_grants` reports a canvas's owner plus its current grants (each grant's
 kind, target, and public link id) and deliberately never returns link secrets
-or their hashes. **`?k=` URLs only work against a hub.** In hub mode the hub
-enforces ownership and whatever allowance is bound to the calling token,
-rejecting a target that isn't permitted, and honors a link secret presented as
-`?k=`. Local mode is single-user: a grant is recorded on the canvas but nothing
-enforces it, and the local daemon never reads `?k=` at all — its gate is the
-capability token (`?t=`/cookie), so handing someone a local `?k=` URL just
-gets them a 401. Share a local canvas by pushing it to a hub, or by handing
-over the `link` URL as-is.
+or their hashes. **`?k=` URLs only work against a hub with OIDC configured.**
+Such a hub enforces ownership and whatever allowance is bound to the calling
+token, rejecting a target that isn't permitted, and honors a link secret
+presented as `?k=`. Nothing else consults the secret. Local mode is
+single-user: a grant is recorded on the canvas but nothing enforces it, and the
+local daemon never reads `?k=` at all — its gate is the capability token
+(`?t=`/cookie), so handing someone a local `?k=` URL just gets them a 401. A
+hub with no OIDC configured ignores `?k=` exactly the same way; there its reads
+are decided by the CIDR allowlist plus the optional read token. Share a local
+canvas by pushing it to a hub, or by handing over the `link` URL as-is.
 
 The tools honor every rule below unchanged: there is **no** `open` tool and
 no browser-launch anywhere — the `link` tool only ever returns the URL, which
@@ -187,14 +189,18 @@ only updates when pushed again.
 
 ## Daemon self-start behavior
 
-- **Self-starts the daemon if needed**: `add`, `list`, `link`, `open`.
+- **Self-starts the daemon if needed**: `add`, `list`, `link`, `open` — plus
+  `mcp` in local mode, though not at invocation: launching the MCP server
+  touches no daemon, and the first `add`/`list`/`link` tool call is what
+  starts one.
 - **Never self-starts** (filesystem-only, or report-only against whatever's
   already running): `path`, `rm`, `snap`, `snaps`, `revert`, `status`, `stop`.
 
 This matters if you're chaining verbs: `snap`/`status`/etc. won't start the
 daemon on their own, so if it isn't already running (or crashes mid-script),
-the next `add`/`list`/`link`/`open` call is what starts a fresh one — not the
-filesystem-only or report-only verbs. `status`/`stop` print "no daemon
+the next `add`/`list`/`link`/`open` call — or the equivalent local-mode MCP
+tool call — is what starts a fresh one, not the filesystem-only or report-only
+verbs. `status`/`stop` print "no daemon
 running" instead of starting one if there isn't one to act on.
 
 ## Fragments, markdown, and full documents

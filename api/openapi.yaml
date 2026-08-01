@@ -15,7 +15,10 @@ info:
     daemon is started as a hub (`NewHub`). Five are NOT: `GET /api/status`, `GET`/`POST
     /api/canvases`, `DELETE /api/canvases/{id}`, and `POST /api/stop` are registered
     unconditionally, so the default local daemon (`scrim serve`) exposes them too — gated there by a
-    query-string capability token instead of a bearer. This document describes the hub.
+    query-string capability token instead of a bearer. The three `/auth/*` paths sit under a
+    stricter condition than either group: they are registered only when the daemon is a hub AND was
+    given an OIDC issuer, and `404` on a hub without one (`routes.go`). This document describes the
+    hub.
 
     **Authorization model** (`hubgate.go`). A machine bearer presented as `Authorization: Bearer
     <token>` authorizes the machine API, reads included. Two credentials qualify: the ADMIN PUSH
@@ -133,6 +136,9 @@ paths:
         it is subject to the browser read gate (OIDC session, or CIDR allowlist + optional read
         token). Under OIDC the reported canvas count reflects only what the caller may see, so a
         `?k=` share-link secret widens it by that link's canvas.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/LinkSecret'
       responses:
@@ -159,6 +165,9 @@ paths:
         owns or has been granted (or, with a `?k=` share-link secret, that link's canvas) are
         returned; the admin push token sees all. On a non-OIDC hub / the local daemon every canvas
         is returned.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/LinkSecret'
       responses:
@@ -332,6 +341,9 @@ paths:
         Returns every regular file in the canvas, recursively, as `{path, size, modified_at}` with
         canvas-relative slash-separated paths — sorted by path, no content. An empty canvas returns
         `[]`.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/CanvasId'
         - $ref: '#/components/parameters/LinkSecret'
@@ -369,6 +381,9 @@ paths:
         when the client sends `Accept-Encoding: gzip` AND the file is at least 1024 bytes; smaller
         files are always served identity. `Cache-Control: no-store` and `X-Content-Type-Options:
         nosniff` are always set.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/LinkSecret'
         - name: Accept-Encoding
@@ -515,8 +530,10 @@ paths:
         copy is staged outside the servable tree and atomically swapped in — one clean SSE reload.
         Source and target must differ (`400` otherwise). A target that already exists is `409`
         UNLESS `overwrite: true`, in which case the existing target is snapshotted first (so the
-        overwrite is itself undoable via revert) and then replaced. The source's authored metadata
-        (title/description/icon) is carried onto the copy. A source exceeding the copy size or
+        overwrite is itself undoable via revert) and then replaced. The source's metadata file is
+        duplicated verbatim onto the copy, so every field it records comes across — authored
+        title/description/icon, and the recorded `owner` and `grants` along with them (a derived
+        default icon stays derived from the target's own id). A source exceeding the copy size or
         file-count limit is `413`.
       parameters:
         - $ref: '#/components/parameters/CanvasId'
@@ -572,6 +589,9 @@ paths:
         `user`/`group` grantee may read it. A caller who can see the canvas only via a share link or
         an `everyone` grant is refused (`403`), so a link holder cannot enumerate the owner's email
         or the other grantees.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/LinkSecret'
       responses:
@@ -824,6 +844,9 @@ paths:
         is NOT an authorization source, and a principal absent here can still be granted access by
         typing its email. A session-gated read like the gallery: under OIDC an authenticated session
         is required; otherwise the CIDR/read-token browser gate applies.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - name: q
           in: query
@@ -853,6 +876,9 @@ paths:
       operationId: listSnapshots
       summary: List a canvas's snapshots.
       description: Every snapshot for the canvas, newest-first. A canvas with no snapshots returns `[]`.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/LinkSecret'
       responses:
@@ -870,6 +896,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
     post:
@@ -1046,9 +1074,10 @@ components:
       in: cookie
       name: scrim_session
       description: >-
-        The browser session cookie minted by the OIDC login flow (`HttpOnly`, `SameSite=Lax`). The
-        session plane is read-only for the machine API, with three deliberate exceptions that accept
-        it as a WRITE credential: canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
+        The browser session cookie minted by the OIDC login flow (`HttpOnly`, `SameSite=Lax`), and
+        therefore only ever present on a hub configured with OIDC. It authorizes machine-API READS,
+        subject to the same per-canvas visibility filter a user token gets. Beyond that the session
+        plane is read-only, with three deliberate exceptions that accept it as a WRITE credential: canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
         Those are owner actions the browser must perform natively; `SameSite=Lax` is what makes them
         CSRF-safe. `POST /api/tokens` accepts a session or the admin push token but rejects a USER
         token with `403` — minting from a token would be privilege escalation.

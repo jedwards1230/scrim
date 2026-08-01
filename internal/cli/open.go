@@ -127,10 +127,14 @@ func shouldOpenBrowser(flagSet bool, envVal string) bool {
 
 // primaryURL returns the URL that was printed as the first line -- i.e. the
 // one the browser should actually be pointed at. When the daemon is bound
-// beyond loopback, lines[0] is the scrim.local URL, which works even when it is
-// bound to an address like 0.0.0.0 or :: that isn't itself navigable; the
-// raw fallback is only used defensively, in case lines somehow came back
-// empty (urlLines never actually returns an empty slice).
+// beyond loopback, lines[0] is the scrim.local URL -- preferred because it
+// stays navigable where the raw bind address may not be (0.0.0.0 or :: is not
+// something a browser can go to). It is the better bet, not a guarantee:
+// urlLines keys on the bind host alone and cannot observe whether the mDNS
+// advertisement actually went out, so a --no-mdns daemon still leads with a
+// scrim.local URL that won't resolve. The raw fallback is only used
+// defensively, in case lines somehow came back empty (urlLines never actually
+// returns an empty slice).
 func primaryURL(lines []string, fallback string) string {
 	if len(lines) > 0 {
 		return lines[0]

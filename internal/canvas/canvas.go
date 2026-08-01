@@ -33,9 +33,9 @@ import (
 // every caller of those four. Package-level so the serialization holds
 // regardless of which handler/goroutine drives the write, mirroring the
 // whole-file mutex the usertoken.Store and principal.Registry hold over their
-// own RMW. Scope is exactly those four functions: CopyMeta writes (and
-// removes) the metadata file directly without acquiring metaLocks, so it is
-// not serialized against them.
+// own RMW. Scope is exactly those four functions -- the other two mutators of
+// the file take no lock at all: CopyMeta writes (and removes) it directly, and
+// Delete removes it directly, so neither is serialized against them.
 var metaLocks keyedMutex
 
 // keyedMutex hands out a distinct mutex per string key, so callers can

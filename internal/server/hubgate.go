@@ -15,8 +15,11 @@ import (
 	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
-// pushAuthHeader is the header a write request must present the hub's push
-// token in, as a standard bearer credential.
+// pushAuthHeader is the header any bearer credential arrives in, as a standard
+// "Bearer <token>" value: the hub's admin push token or a user token (see
+// resolveClaims). Despite the name it is neither push-specific nor
+// write-specific -- the admin push token authorizes machine-plane reads
+// through this same header.
 const pushAuthHeader = "Authorization"
 
 // bearerPrefix is the value prefix pushAuthHeader must carry before the
@@ -25,15 +28,22 @@ const bearerPrefix = "Bearer "
 
 // withHubGate replaces withAuth in hub mode (see routes.go): it gates
 // writes (any method other than GET/HEAD -- POST /api/push, POST /api/stop,
-// any POST/DELETE under /api/canvases or /api/tokens) behind a machine or
-// owner credential -- the admin push token, a user bearer token whose owner
-// may write the target, or, for claim, token management, and grant mutation
-// on a canvas the session owns, a browser session (see serveWrite) -- and
-// reads (GET/HEAD -- the index, /c/..., SSE, favicon, /api/status) behind
-// EITHER the OIDC session gate (when OIDC is configured) OR, otherwise, a
-// CIDR allowlist check first and then, if configured, the hub's separate
-// read token via checkToken (the same logic withAuth uses for the default
-// daemon, just against a different expected token).
+// POST/DELETE under /api/canvases, PUT/PATCH on a canvas's files, POST/DELETE
+// under /api/tokens) behind one of four credentials, and reads (GET/HEAD --
+// the index, /c/..., SSE, favicon, /api/status) behind EITHER the OIDC session
+// gate (when OIDC is configured) OR, otherwise, a CIDR allowlist check first
+// and then, if configured, the hub's separate read token via checkToken (the
+// same logic withAuth uses for the default daemon, just against a different
+// expected token).
+//
+// The four write credentials are: the admin push token, a superuser bypass
+// taken before any per-target check; that SAME admin bearer carrying verified
+// X-Scrim-Actor-* headers, which resolves to Admin:false (resolveClaims branch
+// 1) and so deliberately does NOT take that bypass -- it writes as the
+// forwarded actor, bounded by userTokenMayWrite; a user bearer token whose
+// owner may write the target, bounded the same way; and a browser session, for
+// claim, token management, and grant mutation on a canvas the session owns
+// (see serveWrite).
 //
 // OIDC vs CIDR is deliberately exclusive, not layered: when OIDC is on it is
 // the whole read gate -- a valid session cookie is required and the CIDR/
@@ -43,11 +53,11 @@ const bearerPrefix = "Bearer "
 // config the hub behaves EXACTLY as before -- this is the fail-closed,
 // opt-in contract from issue #32.
 //
-// The push token is the write gate on its own -- writes are deliberately
-// not also CIDR/OIDC-checked, since a legitimate push client is a machine
-// with the token, commonly outside any human read allowlist (e.g. a
-// developer's laptop pushing to a homelab hub it isn't itself permitted to
-// browse from).
+// Whichever of those four a write presents, it is never LAYERED with the read
+// gate: a write is deliberately not additionally CIDR- or OIDC-checked, since
+// a legitimate push client is a machine holding a token, commonly outside any
+// human read allowlist (e.g. a developer's laptop pushing to a homelab hub it
+// isn't itself permitted to browse from).
 func (s *Server) withHubGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The OpenAPI spec is public (committed in the repo, carries no canvas
