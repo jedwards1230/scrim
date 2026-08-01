@@ -24,10 +24,13 @@ can't give.**
 
 Three things are true and worth stating plainly before any plan:
 
-1. **`scripts/e2e.sh` runs in no workflow.** 34 scenarios and ~107 assertions —
-   including the entire hub token/grant/claim surface and the privacy
-   log-redaction regression — are gated on someone remembering to run a script.
-   `rg e2e.sh` finds one hit, a prose mention in `CLAUDE.md`.
+1. ~~**`scripts/e2e.sh` runs in no workflow.**~~ **DONE.** This was the largest
+   risk in the repo when this document was written: 34 scenarios and ~124
+   assertions — including the entire hub token/grant/claim surface and the
+   privacy log-redaction regression — gated on someone remembering to run a
+   script. It now runs as its own parallel `e2e` job in `ci.yml`, present in the
+   `ci` aggregate's `needs` *and* its results array, and mutation-tested to fail
+   the build on a broken assertion.
 2. **Three load-bearing paths sit at 0% coverage.** `server/hub.go:74 broadcast`
    (the SSE fan-out — SSE is tested for *shutdown* and for the connection *cap*,
    never for actually delivering a reload to a live client), `daemon.go:49 Ensure`
@@ -240,11 +243,12 @@ Five rules, all derived from what's already in the tree:
    true is "exactly one daemon is *serving*" — one pid in `daemon.json`, both
    canvases reachable — not "the process table has one match right now".
 3. **Every test that starts a daemon gets its own `--dir` *and* its own port.**
-   `CLAUDE.md` already requires this and claims `scripts/e2e.sh` follows it. It
-   does not: only 6 scenarios pass `--port`, and the rest use the default 7777,
-   which means e2e on a dev machine can collide with a real daemon and
-   back-to-back scenarios race on listener release. Fix this before adding
-   anything.
+   ~~`scripts/e2e.sh` does not follow this.~~ **DONE.** When this was written only
+   6 scenarios passed `--port` and the rest used the default 7777. Every scenario
+   now allocates through `use_port`/`alloc_port` (23 call sites), and scenario 1
+   asserts against the daemon's own state file that it bound the allocated port
+   and not 7777 — so the property is tested, not merely intended. The rule stands
+   for anything new.
 4. **No second-granularity timing assertions.** `$SECONDS`-based bounds like
    `-le 4` are one scheduling hiccup from failing. Either widen the bound
    drastically or assert ordering instead of duration.
@@ -252,12 +256,15 @@ Five rules, all derived from what's already in the tree:
    before rule 3 is universally true would manufacture exactly the class of flake
    this section is about.
 
-One more trap worth closing: **running as root silently skips four
-failure-injection tests** (`snapshot_test.go:82`, `handlers_push_swap_test.go:91`
-and neighbors) because root bypasses the permission checks they inject. In a
-container-based CI that means the rollback and staging-leak paths quietly stop
-being verified with no red signal. Add a check that fails the suite if it runs as
-root in CI, rather than a skip.
+One more trap worth closing: ~~running as root silently skips four
+failure-injection tests~~ **DONE.** The count was wrong — it is **three** tests,
+not four (`internal/snapshot/snapshot_test.go` ×2, `internal/server/handlers_push_swap_test.go`
+×1); the fourth push-swap failure-injection test is uid-independent by construction.
+Root bypasses the permission checks they inject, so in a container-based CI the
+rollback and staging-leak paths would quietly stop being verified with no red
+signal. `requireUnprivileged` now `t.Fatal`s when `CI` is set and euid is 0, and
+prints to stderr otherwise. `scripts/e2e.sh` got the same treatment: it records
+skips and fails when `CI` is set and anything was skipped.
 
 ## CI budget and cadence
 
@@ -286,11 +293,22 @@ existing. The nightly matrix is how that gets honest without taxing every PR.
 
 ## Phasing
 
-**Phase 0 — wire up what exists (half a day).** Add the e2e job to `ci.yml`.
-Give every scenario its own port. Fix scenario 10's assertion per rule 2. This
-is the best value-per-hour in the whole document: it takes 107 existing
-assertions from unenforced to enforced, and it very likely resolves #8 without
-touching `internal/daemon/lock.go` at all. Nothing else should start first.
+**Phase 0 — wire up what exists. MOSTLY DONE.** The e2e job is in `ci.yml` and
+every scenario is port-isolated; that took ~124 existing assertions from
+unenforced to enforced, which was the best value-per-hour in this document.
+
+**Still outstanding: scenario 10's assertion.** It remains a fixed `sleep 0.3`
+followed by `pgrep … | wc -l` requiring exactly 1. Diagnostics were added around
+it, but the assertion itself was not converted to deadline polling per rule 2.
+
+Note the original rationale for this item no longer holds: it was expected to
+resolve #8 without touching `internal/daemon/lock.go`. It will not. The recovered
+failure output shows this assertion **passed** (`found 1`) — the lock worked, and
+#8 was never the double-start race its title claimed. The real bug is a negative
+timeout margin (worst-case spawn-lock hold ~15.4s against a 15s
+`spawnLockTimeout`, with `cmdAdd` calling `daemon.Ensure` before creating the
+canvas). Converting the assertion is still correct hygiene — a fixed sleep plus a
+process count is the wrong shape regardless — but it is not a fix for #8.
 
 **Phase 1 — close the 0% seams (1-2 days).** Build `internal/testenv` by
 consolidating the three existing wire-ups, then use it for SSE delivery, the
