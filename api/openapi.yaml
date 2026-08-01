@@ -1077,7 +1077,8 @@ components:
         The browser session cookie minted by the OIDC login flow (`HttpOnly`, `SameSite=Lax`), and
         therefore only ever present on a hub configured with OIDC. It authorizes machine-API READS,
         subject to the same per-canvas visibility filter a user token gets. Beyond that the session
-        plane is read-only, with three deliberate exceptions that accept it as a WRITE credential: canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
+        plane is read-only, with three deliberate exceptions that accept it as a WRITE credential:
+        canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
         Those are owner actions the browser must perform natively; `SameSite=Lax` is what makes them
         CSRF-safe. `POST /api/tokens` accepts a session or the admin push token but rejects a USER
         token with `403` — minting from a token would be privilege escalation.

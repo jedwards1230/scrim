@@ -40,10 +40,13 @@ const bearerPrefix = "Bearer "
 // taken before any per-target check; that SAME admin bearer carrying verified
 // X-Scrim-Actor-* headers, which resolves to Admin:false (resolveClaims branch
 // 1) and so deliberately does NOT take that bypass -- it writes as the
-// forwarded actor, bounded by userTokenMayWrite; a user bearer token whose
-// owner may write the target, bounded the same way; and a browser session, for
-// claim, token management, and grant mutation on a canvas the session owns
-// (see serveWrite).
+// forwarded actor; a user bearer token acting as its owner; and a browser
+// session. serveWrite dispatches by PATH before credential, so the bound each
+// one carries varies: claim is open to ANY authenticated caller (session, user
+// token, or forwarded actor) and skips the ownership check, which the claim
+// handler enforces itself; /api/tokens* is session-only (a user token or the
+// machine plane gets 403); grant mutation needs a session that OWNS the canvas;
+// and every other write needs a bearer, bounded by userTokenMayWrite.
 //
 // OIDC vs CIDR is deliberately exclusive, not layered: when OIDC is on it is
 // the whole read gate -- a valid session cookie is required and the CIDR/

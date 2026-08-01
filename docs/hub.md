@@ -125,7 +125,9 @@ the same way, but only authorizes *reads* on a hub configured with OIDC — with
 no OIDC, every non-admin GET falls through to the browser read gate, which
 inspects the client IP and the read token and never the bearer, so a user token
 buys nothing there. Under OIDC, per-canvas machine-API reads are additionally
-visibility-filtered: a user token only sees canvases its owner may view. File PUTs may carry a
+visibility-filtered: a user token only sees canvases its owner may view.
+
+File PUTs may carry a
 `Content-Encoding: gzip` body and GETs an `Accept-Encoding: gzip` request; the
 hub inflates/deflates transparently (the per-file cap applies to the decoded
 size).
