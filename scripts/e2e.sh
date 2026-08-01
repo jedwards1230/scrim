@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end test of the scrim core engine: builds the real binary and
 # drives it as a subprocess, asserting real observable behavior rather than
-# just "it ran". Each scenario uses its own --dir so repeated runs never
-# collide with a stale state file from a previous run.
+# just "it ran". Each scenario uses its own --dir AND its own --port (see
+# "Port isolation" below) so repeated runs never collide with a stale state
+# file, with each other, or with a developer's real daemon.
 #
 # Auth is on by default (Phase 3), so every scenario that curls the daemon
 # directly must either present the token scrim itself printed (the URLs
@@ -14,6 +15,66 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$REPO_ROOT/.e2e-scrim"
 BIN2="$REPO_ROOT/.e2e-scrim-v2"
 WORKDIR="$(mktemp -d)"
+
+# --- Port isolation ---------------------------------------------------------
+# Test Isolation (CLAUDE.md): nothing in this suite may bind scrim's real
+# default port 7777 -- on a dev machine that is the developer's actual running
+# daemon, and binding it (or worse, `stop`ping it) destroys real work.
+#
+# Every server this suite starts therefore takes an explicit --port derived
+# from one base as $E2E_PORT_BASE + <slot>. Ports are collision-free by
+# construction (distinct slots), the whole suite relocates with a single env
+# var (so two runs can share a machine), and no slot can ever land on 7777 --
+# asserted below rather than assumed.
+#
+# The slot is the scenario number wherever a scenario starts at most one
+# server. Slots 2-5 and 7 are intentionally unused: those scenarios start no
+# server of their own, they exercise scenario 1's daemon.
+#
+#    1  scenario 1+2   (scenarios 3/4/5 deliberately reuse this same daemon)
+#    6  scenario 6     --no-auth daemon
+#    8  scenario 8     idle-timeout exit
+#    9  scenario 9     stale-pid recovery (both adds share it -- same --dir)
+#   10  scenario 10    double-start race (BOTH racers share it -- that is the
+#                      point: same dir + same port must converge on ONE daemon)
+#   11  scenario 11/11b  open / link
+#   12  scenario 12    version skew (both binaries share it -- the v2 binary
+#                      must find, and replace, the v1 daemon at the same addr)
+#   13  scenario 13    stop with an open SSE connection
+#   14  scenario 14    SIGTERM with an open SSE connection
+#   15  scenario 15    index.md
+#   16  scenario 16    HTML fragment
+#   17  scenario 17    complete HTML document
+#   18  scenario 18    dashboard gallery
+#   19  scenario 19    snap/snaps -- asserts NO daemon starts; the port is a
+#   20  scenario 20    revert -- ditto. Belt-and-braces: if either ever
+#                      regressed into self-starting, it must still not land on
+#                      7777, so the assertion fails without collateral damage.
+#   21  scenario 21    privacy run 1
+#   22  scenario 21    privacy run 2
+#   23  scenario 22    hub 1
+#   24  scenario 22    the local canvas that gets pushed to hub 1
+#   25  scenario 22    hub 2 (CIDR-denied)
+#   26  oauth scenario the fake authorization server
+#   27  oauth scenario `scrim mcp --http` in OAuth protected-resource mode
+E2E_PORT_BASE="${E2E_PORT_BASE:-17700}"
+# Highest slot claimed above. Bump it when a new scenario claims a new slot --
+# the 7777 guard and the range printed in the job summary both read it.
+E2E_PORT_SLOTS=27
+
+# port_slot echoes the port for a given slot. Callers pass the slot, never a
+# literal port -- that is what keeps the scheme mechanical instead of 30
+# hand-picked magic numbers.
+port_slot() { printf '%s' "$((E2E_PORT_BASE + $1))"; }
+
+if [ "$E2E_PORT_BASE" -le 7777 ] && [ "$((E2E_PORT_BASE + E2E_PORT_SLOTS))" -ge 7777 ]; then
+  echo "E2E_PORT_BASE=$E2E_PORT_BASE puts a scenario port on scrim's real default 7777; pick another base" >&2
+  exit 1
+fi
+if [ "$((E2E_PORT_BASE + E2E_PORT_SLOTS))" -gt 65535 ]; then
+  echo "E2E_PORT_BASE=$E2E_PORT_BASE overflows the port range; pick a lower base" >&2
+  exit 1
+fi
 
 PASS=0
 FAIL=0
@@ -137,7 +198,7 @@ sse_client_count() {
 # --- Scenario 1 + 2: self-start on `add`, HTML served with injected script ---
 log "Scenario 1+2: add self-starts daemon; canvas HTML is served with injected SSE script"
 DIR1="$WORKDIR/s1"
-OUT=$("$BIN" add e2e-test --title "E2E" --dir "$DIR1" --idle-timeout 5m 2>&1)
+OUT=$("$BIN" add e2e-test --title "E2E" --dir "$DIR1" --port "$(port_slot 1)" --idle-timeout 5m 2>&1)
 CANVAS_DIR=$(echo "$OUT" | sed -n '1p')
 CANVAS_URL=$(echo "$OUT" | sed -n '2p')
 
@@ -245,11 +306,11 @@ fi
 
 # --- Scenario 6: --no-auth bypasses gating entirely ---
 log "Scenario 6: --no-auth disables gating entirely"
-# DIR1's daemon (default port 7777) is still running at this point (it's
-# stopped in Scenario 7, below) -- use a distinct port so this daemon can
-# actually bind.
+# DIR1's daemon is still running at this point (it's stopped in Scenario 7,
+# below), so this daemon needs a port of its own to bind at all -- which the
+# suite-wide per-scenario port scheme already guarantees.
 DIR_NOAUTH="$WORKDIR/s-noauth"
-OUT_NOAUTH=$("$BIN" add noauth-test --dir "$DIR_NOAUTH" --port 7778 --no-auth --idle-timeout 5m 2>&1)
+OUT_NOAUTH=$("$BIN" add noauth-test --dir "$DIR_NOAUTH" --port "$(port_slot 6)" --no-auth --idle-timeout 5m 2>&1)
 NOAUTH_CANVAS_DIR=$(echo "$OUT_NOAUTH" | sed -n '1p')
 NOAUTH_CANVAS_URL=$(echo "$OUT_NOAUTH" | sed -n '2p')
 if [ -f "$DIR_NOAUTH/daemon.json" ]; then
@@ -296,7 +357,7 @@ echo "(stop said: $STOP_OUT)"
 # --- Scenario 8: idle-exit ---
 log "Scenario 8: daemon exits on its own after --idle-timeout with no SSE clients"
 DIR5="$WORKDIR/s5"
-"$BIN" add idle-test --dir "$DIR5" --idle-timeout 3s >/dev/null
+"$BIN" add idle-test --dir "$DIR5" --port "$(port_slot 8)" --idle-timeout 3s >/dev/null
 if [ -f "$DIR5/daemon.json" ]; then
   ok "idle-exit scenario: daemon started"
 else
@@ -311,7 +372,11 @@ fi
 # --- Scenario 9: stale-pid recovery ---
 log "Scenario 9: stale-pid recovery after a simulated crash"
 DIR6="$WORKDIR/s6"
-"$BIN" add stale-test --dir "$DIR6" >/dev/null
+# Both adds share one port on purpose: the recovery add must re-spawn at the
+# same address the killed daemon held, which is what makes the state file
+# stale rather than merely pointing at a second daemon.
+PORT6=$(port_slot 9)
+"$BIN" add stale-test --dir "$DIR6" --port "$PORT6" >/dev/null
 PID6=$(pid_of_state "$DIR6/daemon.json")
 if [ -z "${PID6:-}" ]; then
   bad "stale-pid scenario: got a pid to kill"
@@ -321,7 +386,7 @@ else
   DEADLINE=$((SECONDS + 5))
   while kill -0 "$PID6" 2>/dev/null && [ $SECONDS -lt $DEADLINE ]; do sleep 0.2; done
 
-  RECOVER_OUT=$("$BIN" add stale-test-2 --dir "$DIR6" 2>&1)
+  RECOVER_OUT=$("$BIN" add stale-test-2 --dir "$DIR6" --port "$PORT6" 2>&1)
   if [ $? -eq 0 ] || echo "$RECOVER_OUT" | grep -q "canvases"; then
     :
   fi
@@ -347,10 +412,14 @@ DIR7="$WORKDIR/s7"
 # historical flake here was never characterized).
 RACE_OUT_A="$WORKDIR/race-a.out"
 RACE_OUT_B="$WORKDIR/race-b.out"
+# The two racers share one port deliberately -- same --dir, same --port is
+# exactly the collision this scenario exists to test. They must converge on a
+# single daemon rather than both binding.
+PORT7=$(port_slot 10)
 S10_FAIL_START=$FAIL
-"$BIN" add race-a --dir "$DIR7" >"$RACE_OUT_A" 2>&1 &
+"$BIN" add race-a --dir "$DIR7" --port "$PORT7" >"$RACE_OUT_A" 2>&1 &
 RACE_PID_A=$!
-"$BIN" add race-b --dir "$DIR7" >"$RACE_OUT_B" 2>&1 &
+"$BIN" add race-b --dir "$DIR7" --port "$PORT7" >"$RACE_OUT_B" 2>&1 &
 RACE_PID_B=$!
 wait "$RACE_PID_A"
 RACE_RC_A=$?
@@ -374,18 +443,35 @@ else
   bad "double-start race: a daemon came up"
 fi
 
-# Count actually-listening scrim serve processes for this dir's port (default
-# 7777 unless overridden) to prove convergence on one process, not just "no
-# crash".
-sleep 0.3
-MATCHING_PIDS=$(pgrep -f "scrim serve --dir $DIR7" 2>/dev/null | wc -l | tr -d ' ')
+# Count scrim serve processes for this dir to prove convergence on one
+# process, not just "no crash".
+#
+# Poll to a deadline rather than sleeping a fixed 0.3s and counting once --
+# the same pattern used by wait_for_file just above and by the version-skew
+# and SSE-registration waits elsewhere in this script. A fixed sleep is a
+# guess about how long a losing racer takes to exit; a deadline poll asserts
+# the property (convergence) instead of a timing assumption, and returns as
+# soon as it holds.
+#
+# This is harness hygiene, NOT a fix for the scenario-10 flake (issue #8):
+# the recovered output from the one real occurrence shows this pid-count
+# assertion PASSING with "found 1" and the NEXT assertion -- a canvas that
+# was never created -- failing. Whatever #8 is, it is not this sleep.
+S10_DEADLINE=$((SECONDS + 10))
+MATCHING_PIDS=0
+while :; do
+  MATCHING_PIDS=$(pgrep -f "scrim serve --dir $DIR7" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$MATCHING_PIDS" = "1" ] && break
+  [ $SECONDS -ge $S10_DEADLINE ] && break
+  sleep 0.2
+done
 if [ "$MATCHING_PIDS" = "1" ]; then
   ok "exactly one 'scrim serve' process is running for the racing dir (found $MATCHING_PIDS)"
 else
-  bad "exactly one 'scrim serve' process is running for the racing dir (found $MATCHING_PIDS)"
+  bad "exactly one 'scrim serve' process is running for the racing dir (found $MATCHING_PIDS after polling to a 10s deadline)"
 fi
 
-LIST_OUT=$("$BIN" list --dir "$DIR7" 2>&1)
+LIST_OUT=$("$BIN" list --dir "$DIR7" --port "$PORT7" 2>&1)
 if echo "$LIST_OUT" | grep -q "race-a" && echo "$LIST_OUT" | grep -q "race-b"; then
   ok "both racing canvases exist against the single converged daemon"
 else
@@ -426,7 +512,10 @@ fi
 # popping a real browser tab on the machine running this script.
 log "Scenario 11: open prints the URL by default (no browser launch); --browser/SCRIM_OPEN_BROWSER opts in"
 DIR_OPEN="$WORKDIR/s-open"
-"$BIN" add open-test --dir "$DIR_OPEN" --idle-timeout 5m >/dev/null
+# Shared by scenarios 11 and 11b -- one daemon, one port, several verbs
+# against it. `open`/`link` self-start, so each needs the port too.
+PORT_OPEN=$(port_slot 11)
+"$BIN" add open-test --dir "$DIR_OPEN" --port "$PORT_OPEN" --idle-timeout 5m >/dev/null
 
 STUB_BIN_DIR="$WORKDIR/stub-bin"
 mkdir -p "$STUB_BIN_DIR"
@@ -448,7 +537,7 @@ fi
 # stub is never invoked (no "could not open a browser" notice either, since
 # openBrowser is never even called).
 rm -f "$BROWSER_MARKER"
-OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
+OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" --port "$PORT_OPEN" 2>/tmp/e2e-open-stderr.$$)
 OPEN_STATUS=$?
 OPEN_ERR=$(cat /tmp/e2e-open-stderr.$$)
 if [ "$OPEN_STATUS" -eq 0 ]; then
@@ -480,7 +569,7 @@ fi
 # (b) --browser opts in: same URL on stdout, plus an actual launch attempt.
 if [ -n "$STUB_CMD_NAME" ]; then
   rm -f "$BROWSER_MARKER"
-  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" --browser 2>/tmp/e2e-open-stderr.$$)
+  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" "$BIN" open open-test --dir "$DIR_OPEN" --port "$PORT_OPEN" --browser 2>/tmp/e2e-open-stderr.$$)
   OPEN_STATUS=$?
   if [ "$OPEN_STATUS" -eq 0 ]; then
     ok "open --browser exits 0"
@@ -499,7 +588,7 @@ fi
 # (c) SCRIM_OPEN_BROWSER=1 opts in persistently, without the flag.
 if [ -n "$STUB_CMD_NAME" ]; then
   rm -f "$BROWSER_MARKER"
-  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" open open-test --dir "$DIR_OPEN" 2>/tmp/e2e-open-stderr.$$)
+  OPEN_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" open open-test --dir "$DIR_OPEN" --port "$PORT_OPEN" 2>/tmp/e2e-open-stderr.$$)
   OPEN_STATUS=$?
   if [ "$OPEN_STATUS" -eq 0 ]; then
     ok "SCRIM_OPEN_BROWSER=1 open exits 0"
@@ -524,7 +613,7 @@ rm -f /tmp/e2e-open-stderr.$$ "$BROWSER_MARKER"
 log "Scenario 11b: link prints the canonical URL and never launches a browser"
 if [ -n "$STUB_CMD_NAME" ]; then
   rm -f "$BROWSER_MARKER"
-  LINK_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" link open-test --dir "$DIR_OPEN" 2>/tmp/e2e-link-stderr.$$)
+  LINK_OUT=$(PATH="$STUB_BIN_DIR:$PATH" SCRIM_OPEN_BROWSER=1 "$BIN" link open-test --dir "$DIR_OPEN" --port "$PORT_OPEN" 2>/tmp/e2e-link-stderr.$$)
   LINK_STATUS=$?
   LINK_ERR=$(cat /tmp/e2e-link-stderr.$$)
   if [ "$LINK_STATUS" -eq 0 ]; then
@@ -561,7 +650,10 @@ fi
 # internal/openurl/openurl_test.go.
 log "Scenario 12: a CLI built at a different version transparently restarts a mismatched daemon"
 DIR8="$WORKDIR/s8"
-"$BIN" add version-test --dir "$DIR8" --idle-timeout 5m >/dev/null
+# Both binaries share one port on purpose: the v2 binary must find the v1
+# daemon at the same address, stop it, and re-spawn there.
+PORT8=$(port_slot 12)
+"$BIN" add version-test --dir "$DIR8" --port "$PORT8" --idle-timeout 5m >/dev/null
 PID8=$(pid_of_state "$DIR8/daemon.json")
 if [ -n "${PID8:-}" ] && kill -0 "$PID8" 2>/dev/null; then
   ok "version-skew scenario: initial daemon started (pid $PID8)"
@@ -580,7 +672,7 @@ else
 fi
 
 # `list` self-starts (calls daemon.Ensure) without creating a new canvas.
-"$BIN2" list --dir "$DIR8" >/dev/null 2>&1
+"$BIN2" list --dir "$DIR8" --port "$PORT8" >/dev/null 2>&1
 
 RESTARTED=0
 NEWPID8=""
@@ -621,7 +713,7 @@ rm -f "$BIN2"
 # timeout even though the daemon went on to exit anyway.
 log "Scenario 13: stop succeeds within a few seconds despite an open SSE connection (issue #11)"
 DIR9="$WORKDIR/s9"
-OUT9=$("$BIN" add sse-stop-test --dir "$DIR9" --idle-timeout 5m 2>&1)
+OUT9=$("$BIN" add sse-stop-test --dir "$DIR9" --port "$(port_slot 13)" --idle-timeout 5m 2>&1)
 CANVAS_DIR9=$(echo "$OUT9" | sed -n '1p')
 CANVAS_URL9=$(echo "$OUT9" | sed -n '2p')
 echo '<html><body>sse-stop e2e</body></html>' >"$CANVAS_DIR9/index.html"
@@ -704,7 +796,7 @@ wait "$SSE_CURL_PID" 2>/dev/null || true
 # process (not via `scrim stop`) to exercise that path specifically.
 log "Scenario 14: SIGTERM to the daemon process exits promptly despite an open SSE connection (issue #11, ctx.Done path)"
 DIR10="$WORKDIR/s10"
-OUT10=$("$BIN" add sigterm-test --dir "$DIR10" --idle-timeout 5m 2>&1)
+OUT10=$("$BIN" add sigterm-test --dir "$DIR10" --port "$(port_slot 14)" --idle-timeout 5m 2>&1)
 CANVAS_DIR10=$(echo "$OUT10" | sed -n '1p')
 CANVAS_URL10=$(echo "$OUT10" | sed -n '2p')
 echo '<html><body>sigterm e2e</body></html>' >"$CANVAS_DIR10/index.html"
@@ -774,7 +866,7 @@ wait "$SSE_CURL_PID10" 2>/dev/null || true
 # still fires when the markdown file itself is touched ---
 log "Scenario 15: a canvas with only index.md renders via goldmark + the skeleton, and SSE live-reload works when the .md file is touched"
 DIR11="$WORKDIR/s11"
-OUT11=$("$BIN" add md-test --dir "$DIR11" --idle-timeout 5m 2>&1)
+OUT11=$("$BIN" add md-test --dir "$DIR11" --port "$(port_slot 15)" --idle-timeout 5m 2>&1)
 CANVAS_DIR11=$(echo "$OUT11" | sed -n '1p')
 CANVAS_URL11=$(echo "$OUT11" | sed -n '2p')
 printf '# Hello Markdown\n\nSome *body* text.\n' >"$CANVAS_DIR11/index.md"
@@ -836,7 +928,7 @@ fi
 # the skeleton ---
 log "Scenario 16: an HTML fragment with no doctype/html wrapper renders wrapped in the skeleton"
 DIR12="$WORKDIR/s12"
-OUT12=$("$BIN" add fragment-test --dir "$DIR12" --idle-timeout 5m 2>&1)
+OUT12=$("$BIN" add fragment-test --dir "$DIR12" --port "$(port_slot 16)" --idle-timeout 5m 2>&1)
 CANVAS_DIR12=$(echo "$OUT12" | sed -n '1p')
 CANVAS_URL12=$(echo "$OUT12" | sed -n '2p')
 printf '<h1>Just a fragment</h1>\n<p>no doctype or html tag here</p>\n' >"$CANVAS_DIR12/index.html"
@@ -858,7 +950,7 @@ fi
 # --- Scenario 17: a complete HTML document passes through unwrapped ---
 log "Scenario 17: a complete HTML document (with <!doctype html>) is served byte-equivalent to the original modulo reload-script injection only"
 DIR13="$WORKDIR/s13"
-OUT13=$("$BIN" add complete-test --dir "$DIR13" --idle-timeout 5m 2>&1)
+OUT13=$("$BIN" add complete-test --dir "$DIR13" --port "$(port_slot 17)" --idle-timeout 5m 2>&1)
 CANVAS_DIR13=$(echo "$OUT13" | sed -n '1p')
 CANVAS_URL13=$(echo "$OUT13" | sed -n '2p')
 printf '<!doctype html>\n<html><head><title>e2e complete</title></head><body><h1>Complete Doc</h1></body></html>\n' >"$CANVAS_DIR13/index.html"
@@ -897,7 +989,8 @@ fi
 # --- Scenario 18: add --title/--desc/--icon renders in the dashboard gallery ---
 log "Scenario 18: add --title/--desc/--icon renders in the dashboard gallery"
 DIR14="$WORKDIR/s14"
-"$BIN" add gallery-test --title "Gallery Title" --desc "Gallery Desc" --icon "🎨" --dir "$DIR14" --idle-timeout 5m >/dev/null
+PORT14=$(port_slot 18)
+"$BIN" add gallery-test --title "Gallery Title" --desc "Gallery Desc" --icon "🎨" --dir "$DIR14" --port "$PORT14" --idle-timeout 5m >/dev/null
 if [ -f "$DIR14/daemon.json" ]; then
   ok "gallery scenario: daemon started"
 else
@@ -914,7 +1007,7 @@ fi
 # internal/server/auth.go) -- follow it (-L), picking up and resending the
 # cookie it sets along the way (-b/-c a jar), just like a real browser would
 # (same pattern as Scenario 5/21).
-DASHBOARD_URL14=$("$BIN" open --dir "$DIR14" 2>/dev/null | head -1)
+DASHBOARD_URL14=$("$BIN" open --dir "$DIR14" --port "$PORT14" 2>/dev/null | head -1)
 JAR14="$WORKDIR/jar14.txt"
 BODY14=$(curl -fsS -L -b "$JAR14" -c "$JAR14" "$DASHBOARD_URL14" || true)
 if echo "$BODY14" | grep -q "Gallery Title"; then
@@ -937,11 +1030,16 @@ fi
 # --- Scenario 19: snap + snaps are pure filesystem operations (no daemon) ---
 log "Scenario 19: snap + snaps are pure filesystem operations, no daemon required"
 DIR15="$WORKDIR/s15"
-CANVAS_DIR15=$("$BIN" path snaptest --dir "$DIR15")
+# None of these verbs should bind anything -- that is what the first assertion
+# below proves. The port is carried anyway so a regression that made one of
+# them self-start would still land on this scenario's own port rather than on
+# a developer's real daemon at 7777.
+PORT15=$(port_slot 19)
+CANVAS_DIR15=$("$BIN" path snaptest --dir "$DIR15" --port "$PORT15")
 mkdir -p "$CANVAS_DIR15"
 echo '<html><body>v1</body></html>' >"$CANVAS_DIR15/index.html"
 
-SNAP_OUT=$("$BIN" snap snaptest --label mysnap --dir "$DIR15" 2>&1)
+SNAP_OUT=$("$BIN" snap snaptest --label mysnap --dir "$DIR15" --port "$PORT15" 2>&1)
 if [ -f "$DIR15/daemon.json" ]; then
   bad "snap scenario: snap did not self-start the daemon (found daemon.json)"
 else
@@ -953,7 +1051,7 @@ else
   bad "snap scenario: snap reports the label"
 fi
 
-SNAPS_OUT=$("$BIN" snaps snaptest --dir "$DIR15" 2>&1)
+SNAPS_OUT=$("$BIN" snaps snaptest --dir "$DIR15" --port "$PORT15" 2>&1)
 if echo "$SNAPS_OUT" | grep -q "mysnap"; then
   ok "snaps scenario: snaps lists the snapshot"
 else
@@ -963,16 +1061,18 @@ fi
 # --- Scenario 20: modify after a snapshot, then revert restores it ---
 log "Scenario 20: modify after a snapshot, then revert (default: latest) restores the pre-modification contents"
 DIR16="$WORKDIR/s16"
-CANVAS_DIR16=$("$BIN" path reverttest --dir "$DIR16")
+# Same reasoning as scenario 19: no daemon is expected, the port is a guard.
+PORT16=$(port_slot 20)
+CANVAS_DIR16=$("$BIN" path reverttest --dir "$DIR16" --port "$PORT16")
 mkdir -p "$CANVAS_DIR16"
 echo '<html><body>pre-modification</body></html>' >"$CANVAS_DIR16/index.html"
 
-"$BIN" snap reverttest --dir "$DIR16" >/dev/null 2>&1
+"$BIN" snap reverttest --dir "$DIR16" --port "$PORT16" >/dev/null 2>&1
 
 echo '<html><body>MODIFIED</body></html>' >"$CANVAS_DIR16/index.html"
 echo "extra" >"$CANVAS_DIR16/extra.txt"
 
-"$BIN" revert reverttest --dir "$DIR16" >/dev/null 2>&1
+"$BIN" revert reverttest --dir "$DIR16" --port "$PORT16" >/dev/null 2>&1
 if [ -f "$DIR16/daemon.json" ]; then
   bad "revert scenario: revert did not self-start the daemon (found daemon.json)"
 else
@@ -991,7 +1091,7 @@ fi
 
 # revert takes its own "prerevert" safety snapshot of the pre-revert state
 # before restoring -- confirm it actually did.
-PREREVERT_SNAPS=$("$BIN" snaps reverttest --dir "$DIR16" 2>&1)
+PREREVERT_SNAPS=$("$BIN" snaps reverttest --dir "$DIR16" --port "$PORT16" 2>&1)
 if echo "$PREREVERT_SNAPS" | grep -q "prerevert"; then
   ok "revert scenario: a prerevert safety snapshot was taken automatically"
 else
@@ -1018,8 +1118,13 @@ run_privacy_scenario() {
   local id="privacy-test-$n"
   local jar="$WORKDIR/privacy-cookies-$n.txt"
   local out canvas_dir canvas_url token base body status
+  # Runs 1 and 2 take slots 21 and 22 -- they run sequentially, but giving
+  # them separate ports keeps the two runs independent rather than relying on
+  # run 1's daemon having fully released the port before run 2 binds.
+  local port
+  port=$(port_slot $((20 + n)))
 
-  out=$("$BIN" add "$id" --dir "$dir" --idle-timeout 5m 2>&1)
+  out=$("$BIN" add "$id" --dir "$dir" --port "$port" --idle-timeout 5m 2>&1)
   canvas_dir=$(echo "$out" | sed -n '1p')
   canvas_url=$(echo "$out" | sed -n '2p')
   echo '<html><body>privacy e2e content</body></html>' >"$canvas_dir/index.html"
@@ -1102,14 +1207,15 @@ run_privacy_scenario 2
 # daemon's ~/.scrim or port 7777.
 log "Scenario 22: hub central store (push, curl-served canvas, push-token gate, CIDR gate)"
 HUB1_DATA="$WORKDIR/hub1-data"
-HUB1_PORT=19291
+HUB1_PORT=$(port_slot 23)
 HUB_PUSH_TOKEN="e2e-hub-push-token"
 DIR_PUSH_SRC="$WORKDIR/push-src"
+PUSH_SRC_PORT=$(port_slot 24)
 
 # A local canvas that will be pushed to the hub. It's never served from
 # here in this scenario -- `scrim push` reads it straight off disk -- so the
 # local daemon that `add` self-started is stopped again immediately.
-OUT_PUSH=$("$BIN" add hub-push-test --dir "$DIR_PUSH_SRC" --port 19292 --idle-timeout 5m --title "Hub Push Test" 2>&1)
+OUT_PUSH=$("$BIN" add hub-push-test --dir "$DIR_PUSH_SRC" --port "$PUSH_SRC_PORT" --idle-timeout 5m --title "Hub Push Test" 2>&1)
 PUSH_SRC_CANVAS_DIR=$(echo "$OUT_PUSH" | sed -n '1p')
 echo '<html><body><h1>hub e2e content</h1></body></html>' >"$PUSH_SRC_CANVAS_DIR/index.html"
 "$BIN" stop --dir "$DIR_PUSH_SRC" >/dev/null 2>&1 || true
@@ -1362,8 +1468,8 @@ fi
 # for these paths). A tiny static file server provides that doc, so the scenario
 # is skipped cleanly where python3 is unavailable.
 if command -v python3 >/dev/null 2>&1; then
-  OAUTH_ISS_PORT=19501
-  OAUTH_MCP_PORT=19502
+  OAUTH_ISS_PORT=$(port_slot 26)
+  OAUTH_MCP_PORT=$(port_slot 27)
   OAUTH_DIR="$WORKDIR/oauth-issuer"
   ISS="http://127.0.0.1:$OAUTH_ISS_PORT"
   mkdir -p "$OAUTH_DIR/.well-known"
@@ -1438,7 +1544,7 @@ fi
 # a 127.0.0.1 read against it must be refused (403), not merely
 # unauthenticated (401).
 HUB2_DATA="$WORKDIR/hub2-data"
-HUB2_PORT=19391
+HUB2_PORT=$(port_slot 25)
 "$BIN" hub --data "$HUB2_DATA" --port "$HUB2_PORT" --push-token "e2e-hub2-push-token" --allow 10.0.0.0/8 >"$WORKDIR/hub2.log" 2>&1 &
 HUB2_PID=$!
 if wait_for_file "$HUB2_DATA/daemon.json" 10; then
@@ -1475,6 +1581,26 @@ fi
 log "Summary"
 echo "passed: $PASS"
 echo "failed: $FAIL"
+
+# When running under GitHub Actions, mirror the summary into the job summary
+# so a failure is readable without opening the raw log. Writing it here rather
+# than piping the script's stdout through `tee` in the workflow keeps the
+# workflow step a bare `bash scripts/e2e.sh`, so nothing can swallow this
+# script's exit status on the way out.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    printf '## E2E: %s passed, %s failed\n' "$PASS" "$FAIL"
+    printf '\nPorts %s-%s (E2E_PORT_BASE=%s)\n' \
+      "$(port_slot 1)" "$(port_slot "$E2E_PORT_SLOTS")" "$E2E_PORT_BASE"
+    if [ "$FAIL" -gt 0 ]; then
+      printf '\n### Failed assertions\n\n'
+      for s in "${FAILED_SCENARIOS[@]}"; do
+        printf -- '- %s\n' "$s"
+      done
+    fi
+  } >>"$GITHUB_STEP_SUMMARY"
+fi
+
 if [ "$FAIL" -gt 0 ]; then
   echo "failed scenarios:"
   for s in "${FAILED_SCENARIOS[@]}"; do

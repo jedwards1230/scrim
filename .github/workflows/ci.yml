@@ -137,6 +137,32 @@ jobs:
       - name: Scan for known vulnerabilities
         run: govulncheck ./...
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    # Its own job rather than extra steps on `test`: the suite is almost
+    # entirely wall-clock spent waiting on daemon startup, idle timeouts and
+    # SSE deadlines rather than CPU (~15s locally), so bolting it onto `test`
+    # would just extend the critical path. Run in parallel it finishes long
+    # before spec-lint and costs the overall pipeline nothing.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # A bare invocation on purpose: no pipe, no `|| true`, no `continue-on-error`.
+      # The script exits non-zero whenever any assertion failed, and that status
+      # is what fails this job. It writes its own $GITHUB_STEP_SUMMARY section,
+      # so there is nothing to `tee` and nothing that could swallow the status.
+      - name: Run e2e suite
+        run: bash scripts/e2e.sh
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -163,12 +189,12 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [test, lint, spec-lint, govulncheck, build]
+    needs: [test, lint, spec-lint, govulncheck, e2e, build]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.spec-lint.result }}" "${{ needs.govulncheck.result }}" "${{ needs.build.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.spec-lint.result }}" "${{ needs.govulncheck.result }}" "${{ needs.e2e.result }}" "${{ needs.build.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               echo "CI failed"

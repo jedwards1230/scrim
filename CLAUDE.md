@@ -117,8 +117,15 @@ daemon and live canvases. A `scrim stop` (or `--dir ~/.scrim`) run against it
 kills real work, not a fixture. Always use an isolated `--dir`/`SCRIM_DIR`
 (e.g. a fresh `t.TempDir()` in Go tests, or a `mktemp -d` in shell) and a
 non-default `SCRIM_PORT` (a high, unlikely-to-collide port) for anything that
-starts a daemon -- `scripts/e2e.sh` and every test in this repo already follow
-this; match it in anything new.
+starts a daemon -- every test in this repo already follows this; match it in
+anything new.
+
+`scripts/e2e.sh` enforces it structurally rather than by convention: every
+server it starts takes an explicit `--port` derived as `$E2E_PORT_BASE + <slot>`
+(one slot per scenario, base `17700`, overridable so two runs can share a
+machine), and the script refuses to start at all if the resulting range would
+cover `7777`. Adding a scenario means claiming the next slot in the table at
+the top of that file -- not omitting `--port` and inheriting the default.
 
 ## Build Variables
 
