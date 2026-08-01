@@ -30,6 +30,27 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vet (Windows cross-compile)
+        # This workflow otherwise runs entirely on ubuntu-latest native GOOS, so
+        # the //go:build windows files (internal/config/harden_windows*.go) are
+        # type-checked NOWHERE in CI: release.yml cross-builds only at tag time,
+        # after merge, and never compiles _test.go at all. A Windows-only break
+        # would ship green and fail at release.
+        #
+        # `go vet` rather than `go build` on purpose — vet type-checks _test.go
+        # files too, and harden_windows_test.go is the larger of the two files a
+        # bare build would still leave unchecked.
+        run: |
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=windows GOARCH=arm64 go vet ./...
+
+      - name: Build (Windows cross-compile, both arches)
+        # Syscall-level code can compile on one architecture and not the other,
+        # so neither arch is redundant.
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+
       - name: Run tests
         # -coverpkg=./internal/... instruments every internal package across all
         # test binaries, so the reported total reflects cross-package coverage
