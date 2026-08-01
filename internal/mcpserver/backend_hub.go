@@ -123,15 +123,9 @@ type snapWire struct {
 	Label     string    `json:"label"`
 }
 
-// linkURL builds the view URL for a canvas from the hub base, without any token
-// in the URL. id=="" yields the hub root.
-//
-// The base is whatever --hub was given: there is no separate "external URL"
-// setting, so a server configured with an in-cluster address
-// (http://scrim-hub:7788) returns links on that address -- correct for the API
-// hop, but not resolvable for a human outside the cluster. Point --hub at the
-// externally-reachable URL when the returned links are meant to be opened by a
-// person (see docs/mcp.md).
+// linkURL builds the view URL for a canvas from the base it is given, without
+// any token in the URL. id=="" yields the hub root. Callers pass linkBase(),
+// not b.baseURL directly -- see linkBase for which base that resolves to.
 func linkURL(baseURL, id string) string {
 	base := strings.TrimRight(baseURL, "/")
 	if id == "" {
