@@ -8,8 +8,8 @@ Tools: `add`, `list`, `link`, `copy_canvas`, `rm`, `snap`, `snaps`, `revert`,
 `list_grants`, `push` (plus `path` in local mode only — a server-local
 directory has no remote meaning).
 
-- `list_files` enumerates a canvas's files (paths + sizes, no content) so an
-  agent can discover what to read or edit.
+- `list_files` enumerates a canvas's files (paths, sizes, and modification
+  times — no content) so an agent can discover what to read or edit.
 - `edit_file` applies an exact-string replacement server-side, so hub-mode
   edits cost tokens proportional to the change, not the file; it accepts an
   `edits` array to apply many replacements in one transactional

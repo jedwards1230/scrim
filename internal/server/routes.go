@@ -83,7 +83,8 @@ func (s *Server) routes() http.Handler {
 
 		// Principal autocomplete (#53): the share dialog's grantee suggestions.
 		// A session-gated read (general non-canvas read at the gate), thin over
-		// the principalLister seam so #54 can layer a directory driver (#54).
+		// the principalLister seam the Authentik directory driver (#54) layers
+		// behind.
 		mux.HandleFunc("GET /api/principals", s.handlePrincipals)
 
 		// The my-tokens management page (#53): a server-rendered HTML page that
@@ -112,9 +113,10 @@ func (s *Server) routes() http.Handler {
 
 		// The OIDC login routes exist only when a hub was started with OIDC
 		// configured. They must be reachable WITHOUT a session (that is how a
-		// user logs in), so withHubGate exempts the /auth/ prefix; registering
-		// them only here keeps that exemption inert for a non-OIDC hub, where
-		// the paths simply 404.
+		// user logs in), so withHubGate exempts exactly these three paths (see
+		// isAuthPath -- an exact match, deliberately not an "/auth/" prefix);
+		// registering them only here keeps that exemption inert for a non-OIDC
+		// hub, where the paths simply 404.
 		if s.oidcAuth != nil {
 			mux.HandleFunc("GET "+oidc.LoginPath, s.oidcAuth.HandleLogin)
 			mux.HandleFunc("GET "+oidc.CallbackPath, s.oidcAuth.HandleCallback)

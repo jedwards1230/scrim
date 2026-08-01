@@ -8,7 +8,7 @@ regressions get caught. This is a plan, not a description of the current state
 
 The unit and HTTP-level coverage is already good. 22 packages have tests; the
 two that carry the most behavior are also the two best covered — `internal/server`
-at 76% and `internal/mcpserver` at 80% — and both are *integration*-grade
+at 77% and `internal/mcpserver` at 80% — and both are *integration*-grade
 already, not unit tests wearing a costume. `internal/server` drives the real
 mux through `httptest`; `internal/mcpserver` stands up a real
 `server.NewHub` behind `httptest` and talks to it over the real wire
@@ -36,9 +36,9 @@ Three things are true and worth stating plainly before any plan:
 2. **Three load-bearing paths sit at 0% coverage.** `server/hub.go:74 broadcast`
    (the SSE fan-out — SSE is tested for *shutdown* and for the connection *cap*,
    never for actually delivering a reload to a live client), `daemon.go:49 Ensure`
-   / `:205 spawnAndWait` / `spawn_unix.go:13 detach` (the entire self-start path,
+   / `:206 spawnAndWait` / `spawn_unix.go:13 detach` (the entire self-start path,
    which the PRD itself calls "the main defect surface"), and
-   `mcpserver.go:804 handleShareCanvas` / `:852 handleListGrants`.
+   `mcpserver.go:813 handleShareCanvas` / `:861 handleListGrants`.
 3. **There are zero benchmarks, zero fuzz targets, and no `t.Parallel()` anywhere.**
 
 ## Integration testing
@@ -47,8 +47,8 @@ Three things are true and worth stating plainly before any plan:
 
 The repo already made the right call — OIDC-dependent cases went to Go rather
 than shell, because an OIDC hub fails closed at startup without a live IdP and
-standing one up in bash is impractical (`scripts/e2e.sh:1297`). Generalize that
-into a rule:
+standing one up in bash is impractical (`scripts/e2e.sh:1496-1503`). Generalize
+that into a rule:
 
 > **Go is the default. Shell e2e is only for what needs a real process, a real
 > built binary, or real CLI ergonomics.**
@@ -59,9 +59,13 @@ restart, idle-timeout self-exit, SIGTERM handling, browser-launch opt-in, and
 enforcement, SSE payloads, the machine API, MCP tool behavior — belongs in Go,
 where it is faster, debuggable, and race-detected.
 
-Do **not** duplicate what shell already covers well. Scenarios 22-32 (hub
-tokens, actor attribution, grants, principals, claim) are thorough and correct;
-the answer to them is to *run* them in CI, not to re-implement them in Go.
+Do **not** duplicate what shell already covers well. `e2e.sh` numbers scenarios
+only through 22; everything after it — user-minted tokens (#50), actor
+attribution (#51), grants and allowance (#52), principal autocomplete (#53),
+legacy migration and claim (#55), OAuth protected-resource mode (#33) — runs
+under unnumbered section headers rather than scenario numbers. Those sections are
+thorough and correct; the answer to them is to *run* them in CI, not to
+re-implement them in Go.
 
 ### The in-process trio
 
@@ -103,7 +107,7 @@ a once-observed shell flake into something `-race -count=100` can characterize
 in seconds.
 
 **3. The grant enforcement matrix (Go).** The largest *stated* gap
-(`scripts/e2e.sh:1297-1308`): per-grant-kind VIEW enforcement (user / group /
+(`scripts/e2e.sh:1496-1500`): per-grant-kind VIEW enforcement (user / group /
 everyone / link), owner-only visibility, and "a second token can't see the
 first's canvas". This is one table-driven test over
 (grant kind × viewer identity × expected status), built on the trio above. It is
@@ -114,7 +118,7 @@ a day of work and closes the largest single hole in the security surface.
 mechanical, do it while the trio is fresh.
 
 **5. Push/swap atomicity under concurrency (Go).** `assertNoStagingLeak`
-(`handlers_push_swap_test.go:66`) and the `renameStagedSwap` fault-injection seam
+(`handlers_push_swap_test.go:95`) and the `renameStagedSwap` fault-injection seam
 already exist. What's missing is the concurrent case: two simultaneous pushes to
 the same id must serialize through `pushLocks` and leave exactly one coherent
 canvas; two to *different* ids must not serialize. Run under `-race`.
@@ -132,9 +136,10 @@ scrim's workload is a handful of humans watching canvases, not a service under
 load. Most of the system has no interesting performance story and should get no
 tests. Five things do, ranked by actual risk:
 
-**1. The SSE connection cap is off in the local daemon.** `maxSSEClients` and
-`maxSSEClientsPerCanvas` (256 / 32) are set only in hub mode
-(`internal/server/hubmode.go:113`); the local daemon leaves both at 0 =
+**1. The SSE connection cap is off in the local daemon.**
+`defaultMaxSSEClients` and `defaultMaxSSEClientsPerCanvas` (256 / 32,
+`internal/server/hubmode.go:115-116`) are applied only in hub mode, surfacing as
+`hub.maxGlobal` / `hub.maxPerCanvas`; the local daemon leaves both at 0 =
 unlimited. Broadcast holds one global mutex while iterating a canvas's clients
 (`hub.go:74`). With the cap on, contention is bounded by construction. With it
 off, it isn't. This is a design question a benchmark should answer: measure
@@ -152,7 +157,8 @@ total, move it to a background goroutine; that is a two-line change the benchmar
 justifies.
 
 **3. Snapshots are full recursive copies with no retention.** `snapshot.Create`
-is a `WalkDir` + `io.Copy` per file (`internal/snapshot/snapshot.go:382`) — no
+(`internal/snapshot/snapshot.go:143`) copies through `copyTree`, a `WalkDir` +
+`io.Copy` per file (`:382`) — no
 tar, no dedup, no hardlinking — and nothing ever prunes (issue #45). Cost is
 O(canvas size) in time *and* disk, every snapshot, forever. The useful artifact
 here is not a benchmark, it's a **growth assertion**: a test that takes 50
@@ -161,7 +167,7 @@ today; it passes once #45 lands. Write it with #45, not before.
 
 **4. Token and principal stores are whole-file rewrites under one global mutex.**
 `tokens.json` and `principals.json` marshal the entire list on every write
-(`usertoken.go:253`, `principal.go:136`), each behind a single package-level
+(`usertoken.go:253`, `principal.go:139`), each behind a single package-level
 `sync.Mutex` — unlike canvas metadata, which is sharded per-canvas. Minting one
 token rewrites every token. Benchmark create/revoke at n = 10 / 100 / 1000 to
 find where it bends. This is the sleeper: it is fine now and quadratic later.
@@ -224,9 +230,10 @@ The repo has one known flake (issue #8) and it is instructive, because the bug
 is most likely in the *assertion*, not the lock. Scenario 10 does
 `wait_for_file daemon.json`, then a bare `sleep 0.3`, then
 `pgrep -f "scrim serve --dir $DIR7" | wc -l` and requires exactly `1` — a fixed
-300 ms settle window that also counts a losing racer that hasn't exited yet.
-Meanwhile, ten lines away, the same script does this correctly, polling
-server-observable truth with a deadline:
+300 ms settle window that also counts a losing racer that hasn't exited yet
+(`scripts/e2e.sh:512`). Meanwhile, some 280 lines further down (`:794`), the
+same script does this correctly, polling server-observable truth with a
+deadline:
 
 ```sh
 REG_DEADLINE=$((SECONDS + 5))
@@ -247,8 +254,9 @@ Five rules, all derived from what's already in the tree:
 3. **Every test that starts a daemon gets its own `--dir` *and* its own port.**
    ~~`scripts/e2e.sh` does not follow this.~~ **DONE.** When this was written only
    6 scenarios passed `--port` and the rest used the default 7777. Every scenario
-   now allocates through `use_port` (or `alloc_port` for `hub`/`push`/`mcp`, which
-   don't take `commonFlags`), and scenario 1 asserts against the daemon's own state
+   now allocates through `use_port` (or `alloc_port` for `hub`/`push`, the only
+   two verbs that don't take `commonFlags`; `mcp` does take them, so the OAuth
+   scenario uses both), and scenario 1 asserts against the daemon's own state
    file that it bound the allocated port and not 7777 — so the property is tested,
    not merely intended. The rule stands for anything new.
 4. **No second-granularity timing assertions.** `$SECONDS`-based bounds like
@@ -261,12 +269,21 @@ Five rules, all derived from what's already in the tree:
 One more trap worth closing: ~~running as root silently skips four
 failure-injection tests~~ **DONE.** The count was wrong — it is **three** tests,
 not four (`internal/snapshot/snapshot_test.go` ×2, `internal/server/handlers_push_swap_test.go`
-×1); the fourth push-swap failure-injection test is uid-independent by construction.
-Root bypasses the permission checks they inject, so in a container-based CI the
-rollback and staging-leak paths would quietly stop being verified with no red
+×1). `handlers_push_swap_test.go` has three failure-injection tests in all, and
+**two** of them are uid-independent by construction (the staged-swap rollback
+goes through the `renameStagedSwap` seam; the metadata-write failure occupies
+the metadata dir path with a regular file).
+Root bypasses the permission checks the third injects, so in a container-based CI
+the rollback and staging-leak paths would quietly stop being verified with no red
 signal. `requireUnprivileged` now `t.Fatal`s when `CI` is set and euid is 0, and
 prints to stderr otherwise. `scripts/e2e.sh` got the same treatment: it records
 skips and fails when `CI` is set and anything was skipped.
+
+That one uid-dependent test now carries **two** guards, not one: an
+unconditional `runtime.GOOS == "windows"` skip
+(`handlers_push_swap_test.go:119-124`, because `os.Chmod` there only toggles the
+read-only attribute and can't make a directory rename fail) *and*
+`requireUnprivileged` (`:126`).
 
 ## CI budget and cadence
 
@@ -289,9 +306,14 @@ That headroom makes the most important item on this list free:
 
 Two adjacent notes. First, caching the `vacuum` binary (or pinning
 `GOTOOLCHAIN`) would cut ~3 minutes off every PR — the single largest CI win
-available, and it costs one workflow edit. Second, **CI is Linux-only** despite
-`pid_windows.go`, `spawn_windows.go`, and a `//go:build windows` test file
-existing. The nightly matrix is how that gets honest without taxing every PR.
+available, and it costs one workflow edit. Second, **no test has ever executed
+on Windows**, though CI no longer ignores the platform: the `test` job
+cross-compiles `go vet` *and* `go build` for `GOOS=windows` on both arches
+(`.github/workflows/ci.yml:33-52`), so all **three** Windows source files
+(`config/harden_windows.go`, `daemon/pid_windows.go`, `daemon/spawn_windows.go`)
+and **both** `//go:build windows` test files are type-checked on every PR. What
+is still missing is a run — a Windows-only assertion has never fired. The
+nightly matrix is how that gets honest without taxing every PR.
 
 ## Phasing
 

@@ -10,23 +10,38 @@ info:
     client with no shared disk: per-file read/write/edit, whole-canvas push and copy, snapshot
     control, and canvas CRUD.
 
-    **Hub-only.** Every path here is registered ONLY when the daemon is started as a hub
-    (`NewHub`). The default local daemon (`scrim serve`) exposes a strict subset — `GET /api/status`,
-    `GET`/`POST /api/canvases`, `DELETE /api/canvases/{id}`, `POST /api/stop` — gated by a
-    query-string capability token instead of a bearer, and none of the `push`/`files`/`copy`/
-    `snapshots` routes. This document describes the hub.
+    **Mostly hub-only.** Every `push`/`files`/`copy`/`snapshots`/`grants`/`tokens`/`claim`/
+    `principals` path here, plus `GET /api/openapi.yaml` and `/healthz`, is registered ONLY when the
+    daemon is started as a hub (`NewHub`). Five are NOT: `GET /api/status`, `GET`/`POST
+    /api/canvases`, `DELETE /api/canvases/{id}`, and `POST /api/stop` are registered
+    unconditionally, so the default local daemon (`scrim serve`) exposes them too — gated there by a
+    query-string capability token instead of a bearer. The three `/auth/*` paths sit under a
+    stricter condition than either group: they are registered only when the daemon is a hub AND was
+    given an OIDC issuer, and `404` on a hub without one (`routes.go`). This document describes the
+    hub.
 
-    **Authorization model** (`hubgate.go`). A valid push token presented as
-    `Authorization: Bearer <token>` authorizes ANY method — it is the machine-API credential, reads
-    included. Absent a valid bearer, a write (any method other than GET/HEAD) is rejected `401`.
-    Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is configured with
-    OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a browser navigation);
-    otherwise the client IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a
-    separate read token is configured, present it. A machine client authenticates with the bearer
-    and never touches the browser gate.
+    **Authorization model** (`hubgate.go`). A machine bearer presented as `Authorization: Bearer
+    <token>` authorizes the machine API, reads included. Two credentials qualify: the ADMIN PUSH
+    TOKEN, which authorizes ANY method and is the sole credential `POST /api/stop` accepts; and a
+    USER TOKEN, which authorizes the same API bounded to canvases its owner may write (`403`
+    otherwise). Absent any valid bearer, a write (any method other than GET/HEAD) is rejected `401`
+    — except on the session plane: canvas claim, `/api/tokens*`, and mutating a canvas's own
+    `grants*` also accept a browser session cookie, and `POST /api/tokens` rejects a *user token*
+    with `403`. Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is
+    configured with OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a
+    browser navigation) and the CIDR/read-token path is NOT consulted at all; otherwise the client
+    IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a separate read token is
+    configured, present it. A machine client holding the ADMIN PUSH TOKEN never touches that
+    browser gate — it is authorized before the read/write split. A USER TOKEN is only exempt on an
+    OIDC hub: with no OIDC configured, EVERY non-admin read is decided by the CIDR allowlist plus
+    the optional read token and the bearer is not consulted at all, so a user token buys no read
+    privilege there.
 
-    **Common error shape.** Every non-2xx JSON response is `{"error": "<message>"}`. Messages are
-    deliberately path-free (no absolute server paths ever appear in a body).
+    **Error shapes — two of them.** Errors a HANDLER produces are JSON: `{"error": "<message>"}`.
+    Denials the GATE produces are `text/plain` (they go through `http.Error`/`http.NotFound`), so
+    every `401`, and the `403`/`404`/`400` the gate itself emits, carry a bare message rather than
+    the JSON shape. A generated client must not assume JSON on a non-2xx. Messages are deliberately
+    path-free either way (no absolute server paths ever appear in a body).
 
     **Served from a live hub.** A hub serves this document at `GET /api/openapi.yaml` (gate-exempt,
     hub-only) so standard OpenAPI tooling can consume the contract directly. Only YAML is served —
@@ -122,7 +137,13 @@ paths:
         Returns the daemon's health and runtime counters. Used by the CLI to decide whether to
         self-start, and as a general status query. A read: a bearer authorizes it; absent a bearer
         it is subject to the browser read gate (OIDC session, or CIDR allowlist + optional read
-        token).
+        token). Under OIDC the reported canvas count reflects only what the caller may see, so a
+        `?k=` share-link secret widens it by that link's canvas.
+      security:
+        - pushToken: []
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/LinkSecret'
       responses:
         '200':
           description: Current daemon status.
@@ -147,6 +168,11 @@ paths:
         owns or has been granted (or, with a `?k=` share-link secret, that link's canvas) are
         returned; the admin push token sees all. On a non-OIDC hub / the local daemon every canvas
         is returned.
+      security:
+        - pushToken: []
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/LinkSecret'
       responses:
         '200':
           description: Every canvas, each as a Canvas object.
@@ -203,6 +229,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -214,8 +242,9 @@ paths:
       operationId: stopDaemon
       summary: Stop the daemon.
       description: >-
-        Acknowledges the request, then triggers a graceful shutdown. A write, so it requires a
-        valid bearer.
+        Acknowledges the request, then triggers a graceful shutdown. The one ADMIN-ONLY operation:
+        only the hub's admin push token is accepted. A valid USER token is always `403` — never
+        `401` — regardless of what it owns; a session or an anonymous caller is `401`.
       responses:
         '200':
           description: Shutdown acknowledged; the daemon then exits.
@@ -230,6 +259,14 @@ paths:
                 required: [ok]
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: >-
+            A valid user token (or forwarded actor) presented on an admin-only operation. Always
+            `403` for a user token, whatever it owns. Plain-text body (gate-level denial).
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /api/push/{id}:
     post:
@@ -291,6 +328,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '500':
@@ -305,8 +344,12 @@ paths:
         Returns every regular file in the canvas, recursively, as `{path, size, modified_at}` with
         canvas-relative slash-separated paths — sorted by path, no content. An empty canvas returns
         `[]`.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/CanvasId'
+        - $ref: '#/components/parameters/LinkSecret'
       responses:
         '200':
           description: File listing.
@@ -341,7 +384,11 @@ paths:
         when the client sends `Accept-Encoding: gzip` AND the file is at least 1024 bytes; smaller
         files are always served identity. `Cache-Control: no-store` and `X-Content-Type-Options:
         nosniff` are always set.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
+        - $ref: '#/components/parameters/LinkSecret'
         - name: Accept-Encoding
           in: header
           required: false
@@ -411,6 +458,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '413':
@@ -432,7 +481,8 @@ paths:
 
         Sending both a single edit and a non-empty `edits` array is `400`. Conflict outcomes are
         `409`: `old_string` matching nothing (`"old_string not found in file"`), or matching more
-        than once without `replace_all` (`"old_string found N times ..."`). In a batch, the failing
+        than once without `replace_all` (`"old_string occurs N times; set replace_all or use a more
+        unique string"`). In a batch, the failing
         edit's index is named in the message (`"edit N: ..."`) and the WHOLE batch is aborted (no
         partial write). An edited result exceeding the 2 MiB per-file cap is `413`; an oversize edit
         REQUEST body (over 6 MiB) is also `413` with a distinct message. `old_string == new_string`
@@ -462,6 +512,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -481,8 +533,10 @@ paths:
         copy is staged outside the servable tree and atomically swapped in — one clean SSE reload.
         Source and target must differ (`400` otherwise). A target that already exists is `409`
         UNLESS `overwrite: true`, in which case the existing target is snapshotted first (so the
-        overwrite is itself undoable via revert) and then replaced. The source's authored metadata
-        (title/description/icon) is carried onto the copy. A source exceeding the copy size or
+        overwrite is itself undoable via revert) and then replaced. The source's metadata file is
+        duplicated verbatim onto the copy, so every field it records comes across — authored
+        title/description/icon, and the recorded `owner` and `grants` along with them (a derived
+        default icon stays derived from the target's own id). A source exceeding the copy size or
         file-count limit is `413`.
       parameters:
         - $ref: '#/components/parameters/CanvasId'
@@ -512,6 +566,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -536,6 +592,11 @@ paths:
         `user`/`group` grantee may read it. A caller who can see the canvas only via a share link or
         an `everyone` grant is refused (`403`), so a link holder cannot enumerate the owner's email
         or the other grantees.
+      security:
+        - pushToken: []
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/LinkSecret'
       responses:
         '200':
           description: The canvas's owner and grants.
@@ -563,7 +624,11 @@ paths:
         by its `allowed_grant_targets` allowance (`403` when a target is not permitted). For a `link`
         grant the hub mints a fresh link id + secret and returns the raw secret ONCE — append it to
         the canvas URL as `?k=<secret>`. Adding an already-present user/group/everyone grant is a
-        no-op (`200`).
+        no-op (`200`). A browser session that OWNS the canvas may call this directly (the share
+        dialog does), unrestricted over its own canvas; `SameSite=Lax` is what makes that CSRF-safe.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       requestBody:
         required: true
         content:
@@ -602,7 +667,11 @@ paths:
       description: >-
         Removes matching grants. `grantRef` addresses a link grant by its public `link_id`, a
         user/group grant by its `target`, and the everyone grant by the literal `everyone`. Owner or
-        admin only. No matching grant is `404`.
+        admin only. No matching grant is `404`. A browser session that OWNS the canvas may call this
+        directly (the share dialog does); `SameSite=Lax` is what makes that CSRF-safe.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/CanvasId'
         - name: grantRef
@@ -635,6 +704,9 @@ paths:
         by `admin` (a legacy/bootstrap canvas). Only admin-owned canvases are claimable: a canvas
         already owned by a different principal is `409`, and claiming one the caller already owns is a
         `200` no-op. A canvas that doesn't exist is `404`; an anonymous caller is `401`.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - $ref: '#/components/parameters/CanvasId'
       responses:
@@ -676,6 +748,9 @@ paths:
         Lists the calling principal's own user tokens (scoped by principal email), never their
         hashes or raw secrets. On an OIDC hub the caller is a browser session or a user-token
         principal; the admin push token has no email of its own and lists nothing here.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       responses:
         '200':
           description: The caller's tokens (secret-free).
@@ -700,6 +775,9 @@ paths:
         secret is returned ONCE in the response and never again — only its SHA-256 hash is stored.
         `auto_share` grants are applied to canvases the token creates; `allowed_grant_targets`
         bounds what it may later share (enforced by the grant endpoints).
+      security:
+        - pushToken: []
+        - sessionCookie: []
       requestBody:
         required: true
         content:
@@ -731,6 +809,9 @@ paths:
         Revokes a token. A principal may revoke only its OWN tokens; the admin push token may revoke
         any. A token that does not exist (or belongs to another principal) is `404` — never
         revealing that a token the caller can't touch exists.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - name: id
           in: path
@@ -756,13 +837,19 @@ paths:
       operationId: listPrincipals
       summary: Autocomplete observed principals for the share dialog.
       description: >-
-        Returns the principals the hub has observed (from logins, verified forwarded-identity headers, and
-        grant targets) whose email or display name case-insensitively starts with `q`, capped at 20
+        Returns the principals the hub knows about — those it has lazily observed (from logins,
+        verified forwarded-identity headers, and grant targets) and, when the hub is started with
+        the OPTIONAL read-only Authentik directory feeder configured, the users and groups pulled
+        from it (merged, de-duplicated by email, cached in memory only and never persisted) —
+        whose email or display name case-insensitively starts with `q`, capped at 20
         and sorted by email. With `q` omitted or empty it returns the first 20 principals. This is a
         display-only, best-effort convenience feeding the browser share dialog's grantee field — it
         is NOT an authorization source, and a principal absent here can still be granted access by
         typing its email. A session-gated read like the gallery: under OIDC an authenticated session
         is required; otherwise the CIDR/read-token browser gate applies.
+      security:
+        - pushToken: []
+        - sessionCookie: []
       parameters:
         - name: q
           in: query
@@ -792,6 +879,11 @@ paths:
       operationId: listSnapshots
       summary: List a canvas's snapshots.
       description: Every snapshot for the canvas, newest-first. A canvas with no snapshots returns `[]`.
+      security:
+        - pushToken: []
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/LinkSecret'
       responses:
         '200':
           description: Snapshot listing, newest-first.
@@ -807,6 +899,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
     post:
@@ -843,6 +937,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -884,6 +980,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -908,6 +1006,14 @@ paths:
       responses:
         '302':
           description: Redirect to the OIDC provider's authorization endpoint.
+        '500':
+          description: >-
+            The per-attempt state or nonce could not be generated, so no login was started.
+            Plain-text body.
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /auth/callback:
     get:
@@ -919,6 +1025,23 @@ paths:
       responses:
         '302':
           description: Redirect onward (to return_to or the dashboard) after establishing a session.
+        '400':
+          description: >-
+            The callback could not be tied back to the attempt that started it — a missing, invalid,
+            or expired flow cookie, a state mismatch, or no authorization code. Plain-text body.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: >-
+            The provider refused, or the identity could not be verified — an error from the IdP, a
+            failed token exchange, a missing/unverifiable `id_token`, a nonce mismatch, or a token
+            with no subject. Plain-text body.
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /auth/logout:
     post:
@@ -941,13 +1064,43 @@ components:
       type: http
       scheme: bearer
       description: >-
-        The hub's push token, presented as `Authorization: Bearer <token>`, compared in constant
-        time. A valid push token authorizes ANY method — writes and reads alike (it is the
-        machine-API credential). Absent a valid bearer, a write is `401`; a read falls to the
-        browser gate (OIDC session, or CIDR allowlist + optional read token) and may instead be
-        `403` (outside the allowlist) or `401` (OIDC configured, no session).
+        A machine bearer presented as `Authorization: Bearer <token>`. Two credentials share this
+        scheme. The hub's ADMIN PUSH TOKEN (compared in constant time) authorizes ANY method —
+        writes and reads alike, and it is the only credential `POST /api/stop` accepts. A USER
+        TOKEN, minted by a logged-in principal, authorizes the same machine API bounded to canvases
+        its owner may write (`403` otherwise) and, under OIDC, may read only what its owner may
+        view. A user token grants NO read privilege on a hub without OIDC: that read is decided by
+        the CIDR allowlist + optional read token like any other, and the bearer is ignored. Absent
+        any valid bearer, a machine-API write is `401`; a read falls to the browser
+        gate (OIDC session, or CIDR allowlist + optional read token) and may instead be `403`
+        (outside the allowlist) or `401` (OIDC configured, no session).
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: scrim_session
+      description: >-
+        The browser session cookie minted by the OIDC login flow (`HttpOnly`, `SameSite=Lax`), and
+        therefore only ever present on a hub configured with OIDC. It authorizes machine-API READS,
+        subject to the same per-canvas visibility filter a user token gets. Beyond that the session
+        plane is read-only, with three deliberate exceptions that accept it as a WRITE credential:
+        canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
+        Those are owner actions the browser must perform natively; `SameSite=Lax` is what makes them
+        CSRF-safe. `POST /api/tokens` accepts a session or the admin push token but rejects a USER
+        token with `403` — minting from a token would be privilege escalation.
 
   parameters:
+    LinkSecret:
+      name: k
+      in: query
+      required: false
+      description: >-
+        A share-link grant's raw secret, as returned once by `POST /api/canvases/{id}/grants`. On an
+        OIDC hub it proves view access to that link's canvas without a session, so an unauthenticated
+        holder can read it. It conveys a VIEW of the canvas only, never its access-control list — see
+        `GET /api/canvases/{id}/grants`, which still refuses a link-only caller `403`. Ignored on a
+        non-OIDC hub and by the local daemon, where visibility is not enforced.
+      schema:
+        type: string
     CanvasId:
       name: id
       in: path
@@ -969,29 +1122,51 @@ components:
 
   responses:
     BadRequest:
-      description: Invalid request (bad canvas id, malformed body, invalid file path, or bad tar entry).
+      description: >-
+        Invalid request (bad canvas id, malformed body, invalid file path, or bad tar entry).
+        Handler-level: `application/json`. The gate emits one plain-text `400` of its own, for a
+        write whose path names an unparseable canvas id.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+        text/plain:
+          schema:
+            type: string
     Unauthorized:
-      description: Missing or invalid push token on a write (or, for a read, an OIDC-configured hub with no session).
+      description: >-
+        Missing or invalid credential on a write, or, for a read, an OIDC-configured hub with no
+        session. ALWAYS produced by the gate, so the body is `text/plain` — never the JSON `Error`
+        shape.
       content:
-        application/json:
+        text/plain:
           schema:
-            $ref: '#/components/schemas/Error'
+            type: string
     Forbidden:
-      description: A read from outside the hub's CIDR allowlist (non-OIDC hub, no valid bearer).
+      description: >-
+        The credential is valid but not permitted: a user token writing a canvas it does not own, a
+        session minting a token it may not, or a read from outside the hub's CIDR allowlist
+        (non-OIDC hub, no valid bearer). Gate-level denials are `text/plain`; the handler-level ones
+        (claim, grant allowance, token ownership) are `application/json`.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+        text/plain:
+          schema:
+            type: string
     NotFound:
-      description: Canvas or file not found.
+      description: >-
+        Canvas or file not found. Handler-level: `application/json`. Under OIDC the read gate also
+        answers `404` — deliberately, so a canvas the caller may not see is indistinguishable from
+        one that does not exist — and that one is `text/plain`.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+        text/plain:
+          schema:
+            type: string
     EditConflict:
       description: >-
         The edit could not be applied cleanly — `old_string` matched nothing, or matched more than
@@ -1102,7 +1277,10 @@ components:
           description: The canvas's on-disk directory path.
         url:
           type: string
-          description: The canvas's browse URL (includes a `?t=` capability token unless the daemon runs with --no-auth).
+          description: >-
+            The canvas's browse URL. On a hub it never carries a `?t=` capability token: `scrim hub`
+            sets `NoAuth` unconditionally, since the hub gate replaces capability-token auth
+            entirely. (The local daemon does append `?t=` unless started with --no-auth.)
         modified_at:
           type: string
           format: date-time
@@ -1146,6 +1324,38 @@ components:
         link_id:
           type: string
           description: A share-link grant's public id (link kind only).
+      required: [kind]
+
+    StoredGrant:
+      type: object
+      description: >-
+        A grant in its STORED form, as a token's `auto_share` list carries it. Unlike `Grant` (the
+        projected, secret-free shape the canvas and grant-list endpoints return) this is the raw
+        on-disk record, so it also carries a share-link secret's HASH and the creation audit fields.
+        The hash is not the secret and cannot be turned back into one, but it is not part of the
+        secret-free projection either. Supplying `link_secret_hash` on input is accepted and stored
+        as given.
+      properties:
+        kind:
+          type: string
+          enum: [user, group, everyone, link]
+          description: As on Grant — the class of principal this entry widens visibility to.
+        target:
+          type: string
+          description: As on Grant — an email (user) or group name (group); empty for everyone/link.
+        link_id:
+          type: string
+          description: As on Grant — the share-link grant's public id (link kind only).
+        link_secret_hash:
+          type: string
+          description: SHA-256 hex of the share-link secret (link kind only). Never the secret itself.
+        created_by:
+          type: string
+          description: The principal id that created the grant, when recorded.
+        created_at:
+          type: string
+          format: date-time
+          description: When the grant was created, when recorded.
       required: [kind]
 
     GrantList:
@@ -1230,7 +1440,7 @@ components:
           type: array
           description: Grants automatically applied to canvases this token creates.
           items:
-            $ref: '#/components/schemas/Grant'
+            $ref: '#/components/schemas/StoredGrant'
         allowed_grant_targets:
           $ref: '#/components/schemas/Allowance'
 
@@ -1256,7 +1466,7 @@ components:
           type: array
           description: Grants automatically applied to canvases this token creates (as minted).
           items:
-            $ref: '#/components/schemas/Grant'
+            $ref: '#/components/schemas/StoredGrant'
         allowed_grant_targets:
           $ref: '#/components/schemas/Allowance'
       required: [id, name, owner_email, created_at]

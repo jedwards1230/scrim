@@ -85,8 +85,11 @@ func Ensure(cfg config.Config) (*state.State, error) {
 }
 
 // TryLoadHealthy reports whether a healthy daemon is currently running,
-// without starting one. Verbs that shouldn't self-start (status, stop, rm's
-// fallback path) use this.
+// without starting one. Verbs that shouldn't self-start use it: status and
+// rm's fallback path, plus -- via mcpserver.resolveDaemon(cfg, selfStart:
+// false) -- the status, rm, and copy_canvas MCP tools (copy_canvas only for
+// the best-effort view URL it returns). stop reaches the same check through
+// Stop, which calls healthyState directly.
 func TryLoadHealthy(cfg config.Config) (*state.State, bool) {
 	return healthyState(cfg)
 }

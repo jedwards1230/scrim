@@ -60,7 +60,7 @@ var errSnapshotEscape = errors.New("snapshot: name escapes versions directory")
 // component under a canvas's versions directory -- the same bare-component
 // precedent canvas.ValidateID holds IDs to, and labelPattern holds labels
 // to. Unlike an id or a label, though, a snapshot *name* (as accepted by
-// Revert, straight from a CLI argument -- see cmd/revert.go) is not
+// Revert, straight from a CLI argument -- see internal/cli/revert.go) is not
 // constrained by either of those: it's the on-disk directory name Create
 // produced, and parseName only validates that its leading timestampLayout
 // prefix parses as a timestamp, deliberately leaving everything after the

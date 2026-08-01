@@ -16,7 +16,9 @@ const openAPISpecPath = "/api/openapi.yaml"
 // machine API, so standard OpenAPI tooling can consume the contract straight
 // from a live hub. It is gate-exempt (see withHubGate) -- the spec is public
 // (committed in the repo), carries no canvas content, and must be fetchable by
-// a non-browser tool with no session or token; the hub's ingress is LAN-only.
+// a non-browser tool with no session or token. It discloses only the API
+// contract, which is already public in the repo, so exempting it adds no
+// exposure the repo doesn't already have.
 // Served verbatim from the embedded bytes; a single Write lets net/http set
 // Content-Length.
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {

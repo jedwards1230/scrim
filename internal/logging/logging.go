@@ -1,7 +1,14 @@
-// Package logging is scrim's sole sanctioned logging surface for the
-// daemon (internal/server and internal/daemon). Every log call site in
-// those packages goes through here instead of calling log.Printf or
-// writing to os.Stderr/os.Stdout directly.
+// Package logging is scrim's sole sanctioned logging surface for the daemon.
+// Exactly two packages import it: internal/server, which owns nearly every
+// call site, and internal/config -- whose use is Windows-only
+// (harden_windows.go, when the ACL primitives are unavailable; harden_unix.go
+// logs nothing). internal/authentik does not import this package at all: its
+// directory feeder exposes a Log func(error) hook that internal/server
+// (hubmode.go) wires to Error under CategoryDirectory. CategoryConfig is
+// likewise not exclusive to internal/config -- hubmode.go's legacy owner sweep
+// logs under it too. Every log call site in the importing packages goes
+// through here instead of calling log.Printf or writing to
+// os.Stderr/os.Stdout directly.
 //
 // The API is deliberately narrow: Error takes a fixed Category label and an
 // error value, never a free-form format string. That's what keeps a
@@ -31,7 +38,10 @@ import (
 // free text a caller could shape however it likes.
 type Category string
 
-// The full set of categories scrim's daemon logs under.
+// The defined category vocabulary -- the closed set a caller may label a line
+// with, not a claim that each one is in use. CategorySSE currently has no call
+// site anywhere, and CategoryDaemon only appears in this package's own tests;
+// both are kept as reserved labels for the subsystems they name.
 const (
 	CategoryHTTP   Category = "http"
 	CategoryMDNS   Category = "mdns"

@@ -1,6 +1,11 @@
 // Package server implements the scrim daemon's HTTP server: static canvas
 // serving with SSE live-reload injection, the per-canvas SSE endpoint, the
-// index page, the /api/* control surface, and the idle reaper.
+// index page, the /api/* control surface, and the idle reaper. It also
+// implements hub mode on the same engine: the push endpoint and its tar
+// extraction, the bearer/CIDR/OIDC gate, the machine API, the whole identity
+// plane (ownership, sharing grants, canvas claim, user tokens, the principal
+// directory), the served OpenAPI spec, and healthz -- all registered only for
+// a Server built via NewHub.
 package server
 
 import (
@@ -64,7 +69,7 @@ type Server struct {
 
 	// directory is the source GET /api/principals autocompletes from. It
 	// defaults to the lazy principals registry above (set in NewHub) but is an
-	// interface seam so #54 can layer an Authentik directory driver behind the
+	// interface seam, so the Authentik directory driver (#54) layers behind the
 	// same handler without touching it. Nil for the default daemon.
 	directory principalLister
 

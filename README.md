@@ -65,7 +65,10 @@ scrim mcp [--http ADDR]       # Serve scrim's verbs as MCP tools (see docs/mcp.m
 ```
 
 The daemon self-starts on first use of any verb that needs it (`add`, `list`,
-`link`, `open`) and idles down after `--idle-timeout` of inactivity.
+`link`, `open`) and idles down after `--idle-timeout` of inactivity. `scrim mcp`
+in local mode self-starts it too, but not at invocation — launching the MCP
+server touches no daemon; the first tool call that needs one (`add`, `list`,
+`link`) is what starts it.
 `snap`/`snaps`/`revert` (and `path`/`rm`'s fallback) are pure filesystem
 operations and never self-start the daemon. Run `scrim --help` (or
 `scrim <verb> --help`) for the full reference.
@@ -85,6 +88,11 @@ directory, under `~/.scrim/meta/<id>.json` — not as a sidecar file inside the
 canvas directory — since anything under the canvas directory is servable and
 filesystem-watched, and metadata must be neither.
 
+## Markdown rendering
+
+An `index.md` is rendered to HTML at serve time; raw HTML embedded in it is
+passed through unsanitized, the same trust model as a `.html` canvas.
+
 ## Snapshots
 
 `scrim snap <id> [--label L]` copies a canvas's current contents into
@@ -93,9 +101,6 @@ newest first. `scrim revert <id> [<snapshot>]` replaces the canvas's current
 contents with a snapshot's — entirely, not merged — defaulting to the latest
 snapshot when none is named; it takes its own `prerevert` snapshot of whatever
 was there first, so a revert is itself undoable via another revert.
-
-An `index.md` is rendered to HTML at serve time; raw HTML embedded in it is
-passed through unsanitized, the same trust model as a `.html` canvas.
 
 ## Flags & environment variables
 

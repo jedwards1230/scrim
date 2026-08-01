@@ -23,13 +23,18 @@ change to a flag name (annoying, but re-runnable).
 
 ## Metadata migrations happen on startup
 
-Layout changes are handled by forward migrations that run when the daemon or hub
-starts, so an upgrade is a restart, not a manual data step. For example, a hub
-stamps `owner: admin` on any canvas whose metadata predates ownership on every
-startup (see [identity.md](identity.md#ownership-sharing--tokens)), and the v0.1
-sidecar-metadata pattern was migrated out to external `meta/<id>.json` files.
-Migrations are additive and idempotent — a canvas's authored content is never
-touched, so a migration can't lose your work.
+Layout changes are handled by forward migrations that run when a hub starts, so
+an upgrade is a restart, not a manual data step. There is exactly one today: a
+hub stamps `owner: admin` on any canvas whose metadata predates ownership, on
+every startup (see [identity.md](identity.md#ownership-sharing--tokens)). It is
+additive and idempotent — a canvas's authored content is never touched, so it
+can't lose your work. The local daemon runs no migrations at all.
+
+Not everything that changed layout got a migration. The v0.1 `.scrim.json`
+sidecar was **replaced** by external `meta/<id>.json` files, not migrated: a
+v0.1 canvas upgraded in place keeps all of its content but silently loses its
+title, description, and icon, which have to be re-set with `scrim add --title`
+/`--desc`/`--icon`.
 
 Because migrations run **forward** on startup, downgrading to an older binary
 after a newer one has migrated the on-disk state is not supported — the older

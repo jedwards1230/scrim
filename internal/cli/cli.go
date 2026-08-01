@@ -53,7 +53,8 @@ Verbs:
                           endpoint (see "scrim push --help"). Never
                           self-starts or talks to a local daemon.
   mcp [--http ADDR] [--allow-lan] [--hub URL] [--hub-public-url URL]
-      [--hub-token-file PATH]
+      [--hub-token-file PATH] [--oauth-issuer URL] [--oauth-audience AUD]
+      [--oauth-resource URL]
                           Run an MCP server exposing scrim as tools (add, list,
                           link, rm, snap, snaps, revert, copy_canvas, status,
                           list_files, read_file, write_file, edit_file,
@@ -62,7 +63,11 @@ Verbs:
                           HTTP, --hub URL to drive a remote hub instead of
                           the local daemon, --hub-public-url URL for the
                           browser-reachable base the returned links are built
-                          from when --hub isn't one (see "scrim mcp --help").
+                          from when --hub isn't one. --oauth-issuer plus
+                          --oauth-audience turn an --http server into an OAuth
+                          2.0 protected resource, with --oauth-resource
+                          overriding the advertised resource URL (see "scrim
+                          mcp --help").
 
 Flags (all verbs except hub/push, which have their own -- see their --help):
   --dir DIR              Directory for canvases + daemon state (env SCRIM_DIR, default ~/.scrim)

@@ -92,7 +92,7 @@ func TestURLLines(t *testing.T) {
 			},
 		},
 		{
-			name:   "bind-all host advertises, but the plain URL is whatever the daemon reported",
+			name:   "bind-all host: scrim.local line first, but the plain URL is whatever the daemon reported",
 			host:   "0.0.0.0",
 			rawURL: "http://0.0.0.0:7777/",
 			want: []string{

@@ -396,8 +396,10 @@ func assertTrustees(t *testing.T, aces []*windows.ACCESS_ALLOWED_ACE, want []*wi
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			t.Errorf("ace %d type = %d, want ACCESS_ALLOWED_ACE_TYPE", i, ace.Header.AceType)
 		}
-		// SetEntriesInAcl maps GENERIC_ALL to the object's specific rights, so
-		// this is the mask a full-control ACE reads back with.
+		// The KERNEL applies the generic mapping when the descriptor is set on
+		// the object -- SetEntriesInAcl copies grfAccessPermissions verbatim --
+		// so this is the mask a full-control ACE reads back with (see
+		// fileFullControl in harden_windows.go).
 		if ace.Mask&fileFullControl != fileFullControl {
 			t.Errorf("ace %d mask = %#x, want full control (%#x) set", i, ace.Mask, fileFullControl)
 		}

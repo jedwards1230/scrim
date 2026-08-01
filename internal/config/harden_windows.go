@@ -157,10 +157,11 @@ func ensureOwnerOnlyDACL(path string, inheritance uint32) error {
 }
 
 // daclMatches reports whether sd already carries exactly the DACL
-// ensureOwnerOnlyDACL would write: protected, and one full-control allow ACE
-// per want trustee with the expected inheritance flags and nothing else. Any
-// doubt (an unreadable field, an ACE it can't account for) answers false --
-// the fallback is doing the write, which is always correct, just slower.
+// ensureOwnerOnlyDACL would write: protected, and one allow ACE per want
+// trustee with the expected inheritance flags and AT LEAST full control (a
+// superset mask still matches), and nothing else. Any doubt (an unreadable
+// field, an ACE it can't account for) answers false -- the fallback is doing
+// the write, which is always correct, just slower.
 func daclMatches(sd *windows.SECURITY_DESCRIPTOR, want []*windows.SID, inheritance uint32) bool {
 	if sd == nil || len(want) == 0 {
 		return false

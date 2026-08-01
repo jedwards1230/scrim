@@ -27,7 +27,7 @@ scrim hub --push-token "$(openssl rand -hex 32)" --allow 192.168.1.0/24
 | Bind / port    | `127.0.0.1:7777`                  | `0.0.0.0:7788`                          |
 | Reads gated by | Capability token → cookie         | CIDR allowlist (+ optional read token), or OIDC login |
 | Writes gated by| Same token                        | Push bearer token (required, fail-closed) |
-| Content source | Files you edit on disk (live)     | Whatever was last `push`ed              |
+| Content source | Files you edit on disk (live)     | Whatever was last `push`ed, or authored directly over the machine API (`PUT`/`PATCH .../files/...`, `POST .../copy`) |
 | Lifecycle      | Idles out after `--idle-timeout`  | Long-lived (idle-exit disabled)         |
 | mDNS           | On when bound beyond loopback     | Off by default                          |
 
@@ -117,8 +117,17 @@ contract straight from a live instance — `curl http://<hub>/api/openapi.yaml`.
 Only YAML is served (scrim adds no YAML-to-JSON dependency; modern tools read
 YAML natively).
 
-The machine API is gated by the push token on **every** call, reads included —
-separate from the browser read gate (CIDR/read-token). File PUTs may carry a
+The machine API is gated by a bearer token on **every** call, reads included,
+separate from the browser read gate (CIDR/read-token or OIDC). The admin push
+token is the credential that always suffices: it authorizes any method on any
+hub. A [user token](identity.md#ownership-sharing--tokens) authorizes writes
+the same way, but only authorizes *reads* on a hub configured with OIDC — with
+no OIDC, every non-admin GET falls through to the browser read gate, which
+inspects the client IP and the read token and never the bearer, so a user token
+buys nothing there. Under OIDC, per-canvas machine-API reads are additionally
+visibility-filtered: a user token only sees canvases its owner may view.
+
+File PUTs may carry a
 `Content-Encoding: gzip` body and GETs an `Accept-Encoding: gzip` request; the
 hub inflates/deflates transparently (the per-file cap applies to the decoded
 size).

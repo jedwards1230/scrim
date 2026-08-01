@@ -32,10 +32,11 @@ var ErrTooLarge = errors.New("dircopy: source exceeds the size or entry-count li
 
 // Copy recursively copies src into dst. dst is created if absent (an existing
 // empty dst -- e.g. a freshly-made staging temp dir -- is fine). Regular files
-// are copied with 0o644 permissions and directories with 0o755; every other
-// entry type fails with ErrUnsupported. Total copied content is bounded by
-// maxBytes and total entries by maxEntries (ErrTooLarge past either), matching
-// the caps the hub's push extraction enforces.
+// are created with mode 0o644 and directories with 0o755, each masked further
+// by the process umask; every other entry type fails with ErrUnsupported.
+// Total copied content is bounded by maxBytes and total entries by maxEntries
+// (ErrTooLarge past either), matching the caps the hub's push extraction
+// enforces.
 func Copy(src, dst string, maxBytes int64, maxEntries int) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil { //nolint:gosec // dst is a caller-owned staging/canvas dir, not sensitive
 		return fmt.Errorf("creating copy destination: %w", err)
@@ -84,8 +85,9 @@ func Copy(src, dst string, maxBytes int64, maxEntries int) error {
 // copyFile copies src to a new regular file at target, permitting at most
 // budget bytes -- one byte over trips ErrTooLarge without buffering the whole
 // file in memory. The parent directory is created if the walk hasn't reached
-// it yet. target's permission is 0o644 regardless of umask, matching the hub's
-// PUT/push writes.
+// it yet. target is created with mode 0o644, matching the hub's PUT/push
+// writes -- as always with open(2) the process umask masks it further, so the
+// resulting file may be more restrictive (0600 under umask 0077).
 func copyFile(src, target string, budget int64) (int64, error) {
 	if budget < 0 {
 		budget = 0

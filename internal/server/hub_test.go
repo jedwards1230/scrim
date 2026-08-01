@@ -52,10 +52,11 @@ func TestDefaultServerHasNoHubSurface(t *testing.T) {
 		t.Errorf("POST /api/push/foo status = %d, want 404 (route not registered in default mode)", resp.StatusCode)
 	}
 
-	// 1b. None of the machine-API routes exist in default mode either -- the
-	// list-files and copy routes added alongside the file/snapshot surface are
-	// hub-only exactly like push. A 404 (not a gate rejection) proves the
-	// routes themselves are unregistered.
+	// 1b. A representative sample of the machine-API routes -- the list-files,
+	// read-file, copy, snapshot, and spec routes -- are absent in default mode
+	// too, hub-only exactly like push. A 404 (not a gate rejection) proves the
+	// routes themselves are unregistered. It is a sample, not the full hub-only
+	// set: grants, claim, and /api/tokens* have no absence assertion here.
 	for _, mr := range []struct {
 		method, path string
 	}{

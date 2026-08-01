@@ -5,10 +5,10 @@
 # collide with a stale state file from a previous run, and its own port (see
 # use_port/alloc_port below) so no scenario ever binds the default 7777.
 #
-# Auth is on by default (Phase 3), so every scenario that curls the daemon
-# directly must either present the token scrim itself printed (the URLs
-# `add`/`list`/`open` print already carry "?t=<token>") or run against a
-# --no-auth daemon.
+# Auth is on by default, so every scenario that curls the daemon directly
+# must either present the token scrim itself printed (the URLs `add`/`list`/
+# `link`/`open` print already carry "?t=<token>") or run against a --no-auth
+# daemon.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -381,8 +381,10 @@ if echo "$NOAUTH_CANVAS_URL" | grep -q '?t='; then
 else
   ok "--no-auth: printed canvas URL carries no token query param"
 fi
-# The canvas has no index.html yet -- write one so the request below 404s
-# only if auth actually blocked it, not because there's nothing to serve.
+# The canvas has no index.html yet -- write one so the 200 asserted below
+# really does prove --no-auth let the request through. Without a file the
+# request would 404 for lack of content (auth blocking is a 401), and the
+# assertion would fail for the wrong reason.
 echo '<html><body>no-auth e2e</body></html>' >"$NOAUTH_CANVAS_DIR/index.html"
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$NOAUTH_CANVAS_URL")
 if [ "$STATUS" = "200" ]; then
