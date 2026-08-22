@@ -1,9 +1,11 @@
 # scrim — Product Requirements Document
 
 > **Status:** as-realized · 2026-08-22 · owner: justin · repo: [jedwards1230/scrim](https://github.com/jedwards1230/scrim)
-> **Supersedes** the pre-build plan `home-orchestration:docs/projects/scrim-prd.md` (2026-07-02),
-> written before this repo existed. Where the two disagree, this document is authoritative;
-> §14 records the divergences deliberately.
+> **Supersedes and replaces** the pre-build plan `home-orchestration:docs/projects/scrim-prd.md`
+> (2026-07-02), written before this repo existed. That document has been **deleted** — everything
+> worth keeping from it, including the 2026-07 alternatives survey (§2.1) and the reasoning that
+> rejected the relay model (§8.1), is absorbed here. §14 records where the built product diverged
+> from that plan.
 >
 > This describes the product **fully realized** — the contract scrim is meant to honor, not a
 > task list. Open work lives in GitHub issues; §11 is a thin index into them.
@@ -31,15 +33,29 @@ then has nowhere to put it. The output lands as a wall of markdown in a terminal
 the human must find and open by hand, re-opening it after every edit. The feedback loop that
 makes visual work worth doing is missing.
 
-The 2026-07 survey found nothing that fit: `dvdsgl/claude-canvas` is tmux/TUI-bound;
-`mcp-html-sync-server` was unproven; MCP Apps render only inside chat-window hosts; Claude
-Desktop Preview is Desktop-only; Artifacts is cloud- and plan-gated. Every option either owned
-the rendering surface, required a host that could render it, or lived somewhere the agent's
-files did not.
-
-scrim's wager is that the primitive is smaller than any of those: **a directory, a URL, and a
-reload event**. The agent already knows how to write files. Everything else is plumbing that
+scrim's wager is that the primitive is smaller than anything on offer: **a directory, a URL, and
+a reload event**. The agent already knows how to write files. Everything else is plumbing that
 should be invisible to it.
+
+### 2.1 Alternatives considered and rejected
+
+A survey in 2026-07, before any code was written, found nothing that fit. Recorded here because
+the gaps it identified are the requirements scrim exists to meet — a future reader asking "why
+not just use X?" should find the answer without archaeology.
+
+| Alternative | Why it did not fit |
+|---|---|
+| `dvdsgl/claude-canvas` | tmux/TUI-bound. Renders in a terminal, so it cannot show a real web page — the exact thing agents are good at producing. |
+| `mcp-html-sync-server` | Unproven (1★, no track record). Wrong risk profile for something in the path of every agent's output. |
+| MCP Apps | Renders only inside chat-window hosts. Requires the human to be looking at the chat client, which defeats the "leave a browser tab open on a second screen" workflow. |
+| Claude Desktop Preview | Desktop-only. Cannot serve a phone, a tablet, a TV, or another machine on the LAN. |
+| Artifacts | Cloud- and plan-gated. Content leaves the machine, and availability depends on a subscription tier rather than on a binary being on `PATH`. |
+
+The common failure runs through all five: each either **owned the rendering surface** (so the
+agent writes into someone else's format), **required a specific host to be watching** (so the
+human must be in a particular app), or **lived somewhere the agent's files were not** (so the
+files must be uploaded rather than simply written). scrim inverts all three — the agent writes
+ordinary files to an ordinary directory, and any browser on any device can watch.
 
 ## 3. Users & core workflows
 
@@ -125,6 +141,7 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | Snapshot/versioning | **Reversed.** `snap`/`snaps`/`revert` shipped as filesystem versioning. |
 | Cross-network sharing | **Reversed.** The hub shipped and is deployed. |
 | A trusted-proxy layer consuming validated forwarded addresses | **Deferred**, not refused. Today CIDR is checked on `RemoteAddr` only (§12). |
+| Canvas archive tier and opt-in TTL | **Deferred by decision** (§13.4). List filtering (`#102`) ships alone; archive and TTL only earn their complexity once the collection is genuinely large. |
 
 ## 6. Locked product decisions
 
@@ -145,6 +162,8 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | Distribution | `go install`, signed release binaries (5 platforms), GHCR multi-arch image | The binary is the source of truth; the plugin is a thin skill wrapper. |
 | Plugin home | The scrim repo hosts its own marketplace (`jedwards1230-scrim`) | Version the skill with the tool it documents, not with an unrelated plugin fleet. |
 | Versioning | Pre-1.0; on-disk layout may change between minors; migrations forward-only | Honest about the surface still settling. |
+| Permission hardening failure | Hard-fail, unless `--allow-weak-permissions` is passed explicitly | Fail closed by default; never silently downgrade to a world-readable directory, but never strand a user with no recourse either. |
+| Write-level sharing | A per-grant `view`/`edit` permission field, gated behind optimistic concurrency landing first | A permission field composes with all four grant kinds; an `edit` kind cannot compose with `link`. Multi-editor without `If-Match` is silent data loss. |
 
 ## 7. Product surface
 
@@ -336,6 +355,41 @@ scrim add report ──(state ~/.scrim/daemon.json: pid, host, port, token, vers
   and `internal/gzipx` back the CLI, the HTTP handlers, and the MCP tools alike, so the three
   protocols cannot drift in semantics.
 
+### 8.1 Why the hub is a store, not a relay
+
+The first design for cross-machine viewing (2026-07) was a **relay**: a central reverse-tunnel
+proxy that would forward browser requests through to whichever local daemon was actually holding
+the canvas. It was rejected in review and replaced with the central-store model that shipped.
+The reasoning is recorded here because "just proxy to the live daemon" is the obvious idea, and
+a future contributor will propose it again.
+
+A relay fails on four counts at once:
+
+1. **URL rewriting is unbounded.** Proxying someone else's document root means rewriting every
+   URL it emits — the SSE reload endpoint, the favicon, the token-strip redirect, and every
+   relative asset link in agent-authored HTML. Agents write arbitrary markup; there is no
+   finite set of URLs to rewrite, so the proxy is wrong in a way that only shows up on real
+   content.
+2. **It needs a token vault.** Each local daemon mints its own capability token. To reach them,
+   the relay must hold every one of them — turning a convenience feature into the highest-value
+   credential store in the system.
+3. **Node identity is spoofable.** Tunnel-based designs need a way for a daemon to claim "I am
+   machine X." That is an authentication problem the tool would have to solve from scratch,
+   with a content-injection payoff for anyone who beats it.
+4. **Durability is not delivered.** The canvas is only viewable while the machine that made it
+   is awake and connected — which is precisely the problem cross-machine viewing was meant to
+   solve.
+
+The central store dissolves all four **by construction, not by mitigation**. The hub serves its
+*own* files from its *own* root at `/c/<id>/`, so every URL it generates is correct with no
+rewriting; it holds one push credential rather than a vault of borrowed ones; there is no node
+identity to spoof because nothing is proxied; and a canvas stays viewable after the machine that
+made it is off. The cost — the hub holds what was *pushed*, so local edits diverge until pushed —
+is real and accepted, mitigated by `--watch` and by surfacing last-pushed time in the gallery.
+
+This is why §5 lists a reverse-tunnel relay as a **firm** non-goal while cross-network sharing
+shipped: the goal was met, the mechanism was not the one originally sketched.
+
 ## 9. Deployment & operations
 
 - **Install:** `go install github.com/jedwards1230/scrim@latest`, or a signed release binary.
@@ -374,6 +428,9 @@ A change is complete when all of the following hold. CI enforces each as a job, 
 | Vulnerabilities | `govulncheck ./...` |
 | Build | `make build` + `./scrim --version` |
 
+The `ci` aggregate job is the **sole required status check** on `main` — it exists to be exactly
+that, so adding a CI job never becomes a two-place change. A red build does not merge.
+
 **Testing doctrine.** Go is the default; shell e2e is only for what needs a real process, a real
 built binary, or real CLI ergonomics — daemon spawn, stale pid, double-start, version-skew
 restart, idle self-exit, SIGTERM, browser-launch opt-in. Everything protocol-level (auth
@@ -405,17 +462,19 @@ Shipped is the large majority. This table lists only where intent and reality di
 |---|---|---|---|
 | Local daemon, SSE reload, auth, mDNS, snapshots | Complete | shipped | — |
 | Hub, push, ownership, grants, user tokens, OIDC, MCP + OAuth | Complete | shipped | — |
-| Write-level sharing (multi-editor) | Grants extend past view-only; per-grantee removal | not started | `jedwards1230/scrim#105` |
+| Write-level sharing (multi-editor) | Per-grant `view`/`edit` permission field; per-grantee removal. **Blocked on `#109` by decision** (§13.2) | not started | `jedwards1230/scrim#105` |
 | Concurrent-write safety | Canvas version + `If-Match` optimistic concurrency | not started | `jedwards1230/scrim#109` |
 | Efficient versioning | Content-addressed blobs; debounced auto-snapshot | not started | `jedwards1230/scrim#106`, `#107`, `#108` |
 | Snapshot retention | `--prune keep=N`, `snap diff` — today snapshots grow unbounded | not started | `jedwards1230/scrim#45` |
-| Canvas lifecycle | Archive tier, opt-in TTL, query/filter/paginate on list | not started | `jedwards1230/scrim#104`, `#103`, `#102` |
+| Canvas discovery | Query/filter/paginate on `list` and `GET /api/canvases` | not started | `jedwards1230/scrim#102` |
+| Archive tier / opt-in TTL | **Deferred by decision** (§13.4) — not part of the end state until the collection is large | deferred | `jedwards1230/scrim#104`, `#103` |
 | Markdown rendering | Every `.md` gets a styled rendered URL (today: `index.md` only) | partial | `jedwards1230/scrim#101` |
 | Diagrams | Native mermaid in the goldmark pipeline | not started | `jedwards1230/scrim#100` |
 | Observability | Opt-in Prometheus `/metrics`, counts/gauges only, separate bind | not started | `jedwards1230/scrim#44` |
 | Test coverage of load-bearing seams | SSE delivery, daemon spawn, MCP grant handlers at 0% today | not started | `jedwards1230/scrim#78`, `#79`, `#80` |
-| Merge protection | `ci` aggregate is advisory — nothing blocks a red merge | **gap** | `jedwards1230/scrim#92` |
-| Windows verification | ACL code type-checks but never executes in CI | **gap** | `jedwards1230/scrim#89`, `#90` |
+| Merge protection | `ci` aggregate required as the sole status check on `main` (§13.3) | **gap** | `jedwards1230/scrim#92` |
+| Windows verification | ACL code actually executes in CI | **gap** | `jedwards1230/scrim#89` |
+| Windows ACL escape hatch | `--allow-weak-permissions` opt-out of the hard-fail (§13.1) | not started | `jedwards1230/scrim#90` |
 | Spawn-lock race | `spawnLockTimeout` (15s) below worst-case hold (~15.4s) | **bug** | `jedwards1230/scrim#8` |
 | e2e tempfile hygiene | Two stderr temp files escape `$WORKDIR` | **bug** | `jedwards1230/scrim#93` |
 | Gateway-neutral naming | ContextForge-era identifiers remain post-de-federation | not started | `jedwards1230/scrim#72` |
@@ -440,6 +499,10 @@ Shipped is the large majority. This table lists only where intent and reality di
 
 **Accepted operational limits.**
 
+- **Permission hardening can refuse to start.** On Windows, `ERROR_ACCESS_DENIED` while applying
+  the owner-only DACL is fatal by design — roaming and redirected profiles can trigger it.
+  `--allow-weak-permissions` is the deliberate opt-out; without it, scrim would rather not start
+  than serve from a directory it could not lock down.
 - **Pre-1.0 layout churn.** On-disk metadata layout may change between minors; downgrade after
   a migration is unsupported. Not every change gets a migration — the v0.1 `.scrim.json` sidecar
   was replaced, not migrated, so upgraded canvases kept content but silently lost title/desc/icon.
@@ -459,42 +522,18 @@ Shipped is the large majority. This table lists only where intent and reality di
 - **No cross-network viewing without a hub.** Tailscale and friends solve this at the
   environment layer, as designed.
 
-## 13. Open decisions
+## 13. Decisions resolved
 
-Forks only the owner can settle. Each changes what this document should say.
+Settled 2026-08-22. No open forks remain in this document; each choice below is binding and is
+reflected in the sections it touches.
 
-1. **Windows ACL failure posture** (`jedwards1230/scrim#90`). Hardening currently hard-fails on
-   `ERROR_ACCESS_DENIED`, which roaming/redirected profiles can trigger.
-   *Options:* (a) keep hard-fail — secure by default, may lock out legitimate corporate profiles;
-   (b) degrade to a loud warning like the no-ACL-filesystem path — always starts, may serve from
-   a world-readable directory; (c) hard-fail unless an explicit `--allow-weak-permissions` flag
-   is passed. **Recommendation: (c)** — preserves the fail-closed default while giving the
-   affected user a documented, deliberate escape hatch.
-
-2. **Write-sharing model** (`jedwards1230/scrim#105`). Extending grants past view-only.
-   *Options:* (a) an `edit` grant kind alongside the existing four; (b) a per-grant permission
-   field (`view`/`edit`) on every kind; (c) defer until optimistic concurrency (`#109`) lands.
-   **Recommendation: (c) then (b)** — multi-editor without `If-Match` is silent data loss, and a
-   permission field generalizes better than a fifth kind that cannot compose with `link`.
-
-3. **Merge protection** (`jedwards1230/scrim#92`). The `ci` aggregate is advisory; a red PR can merge.
-   *Options:* (a) require the `ci` aggregate as the sole status check; (b) require each job
-   individually; (c) leave advisory for a solo-maintainer repo. **Recommendation: (a)** — the
-   aggregate already exists precisely to be the single required check, and (b) makes adding a
-   job a two-place change.
-
-4. **Product scope of the lifecycle trio** (`#102`–`#104`: archive, TTL, list filtering).
-   *Options:* (a) build all three as one coherent lifecycle feature; (b) ship `#102` (list
-   filtering) alone as an ergonomics fix and leave archive/TTL unbuilt; (c) drop archive/TTL and
-   solve growth with snapshot pruning (`#45`) only. **Recommendation: (b) now, (a) later** —
-   list filtering pays off at any canvas count, while archive and TTL only matter once the
-   collection is genuinely large, which it is not yet.
-
-5. **Fate of the pre-build PRD** in home-orchestration. It is now contradicted on several locked
-   decisions by shipped behavior. *Options:* (a) delete it, this document supersedes it;
-   (b) keep it with a superseding banner pointing here; (c) leave as-is.
-   **Recommendation: (b)** — it is the only record of the 2026-07 alternatives survey and of
-   *why* the relay model was rejected, both of which this document cites but does not reproduce.
+| # | Question | Choice | Consequence |
+|---|---|---|---|
+| 1 | Windows ACL failure posture (`jedwards1230/scrim#90`) — hardening hard-fails on `ERROR_ACCESS_DENIED`, which roaming/redirected profiles can trigger | **Hard-fail, unless an explicit `--allow-weak-permissions` flag is passed** | The fail-closed default is preserved; an affected user gets a documented, deliberate escape hatch rather than a silent downgrade. Rejected: keeping the unconditional hard-fail (locks out legitimate corporate profiles with no recourse) and degrading to a warning (may serve from a world-readable directory without the operator ever choosing that). |
+| 2 | Write-sharing model (`#105`) — extending grants past view-only | **Defer until optimistic concurrency (`#109`) lands, then add a per-grant `view`/`edit` permission field** — not a fifth grant kind | Multi-editor without `If-Match` is silent data loss, so ordering is load-bearing, not preference. A permission field composes with all four existing kinds; an `edit` kind cannot compose with `link`. |
+| 3 | Merge protection (`#92`) — the `ci` aggregate is advisory, so a red PR can merge | **Require the `ci` aggregate as the sole required status check** | The aggregate job exists precisely to be the single required check. Requiring each job individually would make adding a CI job a two-place change and drift silently. |
+| 4 | Scope of the lifecycle trio (`#102`–`#104`) | **Ship `#102` (query/filter/paginate) alone; archive and TTL stay unbuilt** | List filtering pays off at any canvas count. Archive and TTL only earn their complexity once the collection is genuinely large, which it is not. Revisit when it is. |
+| 5 | Fate of the pre-build PRD in home-orchestration | **Delete it** | This document is the sole source of truth. Its irreplaceable content — the 2026-07 alternatives survey and the relay rejection — is absorbed into §2.1 and §8.1, so the deletion loses nothing. |
 
 ## 14. Divergences from the 2026-07 plan
 
