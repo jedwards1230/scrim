@@ -50,6 +50,53 @@ scrim hub \
   are **stateless** — see the [threat model](threat-model.md#stateless-non-revocable-oidc-sessions).
 - `--oidc-secure-cookies` (env `SCRIM_OIDC_SECURE_COOKIES`, default `true`) —
   leave on in production; pass `=false` only for a plain-HTTP local test hub.
+- `--oidc-post-logout-redirect-url` (env `SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL`) —
+  optional, **off by default**; see [Logout](#logout) below.
+
+### Logout
+
+Logging out performs **RP-initiated logout** ([OIDC RP-Initiated Logout 1.0][rpl]):
+`POST /auth/logout` clears scrim's own cookies and then redirects the browser to
+the IdP's `end_session_endpoint` so the **IdP session ends too**.
+
+That second half is the whole point. Clearing only scrim's cookie is not a
+logout while the IdP's SSO cookie survives — the next request bounces through
+`/auth/login`, the IdP recognises the still-valid SSO session, and the user is
+silently signed back in. To anyone pressing the button, the app just refreshed
+itself.
+
+The endpoint is **discovered**, never constructed: scrim reads
+`end_session_endpoint` from the issuer's `/.well-known/openid-configuration`,
+so this works against whichever IdP the deployment points at, with no
+provider-specific URL shape in the code. An issuer that advertises none gets a
+local-only logout (scrim's cookies are cleared; the IdP session is untouched),
+which is the honest best it can do.
+
+To let the IdP end the exact session without prompting, scrim retains the login's
+raw ID token in a separate signed, HttpOnly cookie and presents it as
+`id_token_hint`. It is deliberately **not** folded into the session cookie: an ID
+token carrying many group claims can exceed the ~4KB a browser will store, and
+browsers drop an oversized cookie *silently*. Kept apart, a token too large to
+retain costs a smoother logout and nothing else — the login still works, and
+logout still reaches the IdP identifying itself by `client_id` instead.
+
+**`post_logout_redirect_uri` is omitted by default**, and that default is the
+recommended one. IdPs validate the parameter against a per-client registration
+list and answer an unregistered value with an error page — a worse outcome than
+the provider's own "you have been logged out" page, which is what omitting it
+produces. Set `--oidc-post-logout-redirect-url` only *after* registering that
+exact URL with the IdP (in Keycloak, the client's `post.logout.redirect.uris`
+attribute; in Authentik, the provider's allowed redirect URIs). The URL is
+validated at startup, so a value that could never work fails the hub at boot
+rather than at someone's first logout.
+
+Logout is `POST`-only — a `GET` logout is CSRF-able via an `<img>` or a link, so
+the route answers `GET` with `405`. A session-less `POST` (what a forged
+cross-site request produces, since `SameSite=Lax` withholds the cookie) clears
+cookies but does **not** redirect to the IdP, so scrim can't be used as an open
+"end this person's IdP session" redirector.
+
+[rpl]: https://openid.net/specs/openid-connect-rpinitiated-1_0.html
 
 **Authentik gotcha:** Authentik's default scope mapping returns
 `email_verified: false` unless you fix it per-application. scrim does **not**

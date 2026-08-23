@@ -297,7 +297,7 @@ Hub-only additions — the **machine API**, documented as a hand-authored OpenAP
 | tokens | `GET`/`POST /api/tokens`, `DELETE /api/tokens/{id}`, `GET /tokens` (HTML) |
 | principals | `GET /api/principals?q=` (autocomplete; display-only, never an authorization source) |
 | ops | `GET /healthz` (gate-exempt), `GET /api/openapi.yaml` (gate-exempt) |
-| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (present only under OIDC) |
+| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`) — present only under OIDC |
 
 Documented caps: push archive ≤50 MiB uncompressed / ≤1000 entries / regular files and
 directories only; per-file write ≤2 MiB decoded; PATCH body ≤6 MiB; edit conflicts return `409`.

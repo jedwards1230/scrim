@@ -174,3 +174,41 @@ func (s signer) decodeFlow(value string, now time.Time) (flowState, error) {
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }
+
+// idTokenBox is the on-the-wire form of the raw ID token retained after login
+// for use as logout's `id_token_hint`. The token is carried signed but NOT
+// encrypted, exactly like the session payload: it is the IdP's own assertion
+// about the very browser holding it, so it is secret from third parties (which
+// HttpOnly + Secure cover) rather than from that browser.
+type idTokenBox struct {
+	Raw    string `json:"idt"`
+	Expiry int64  `json:"exp"` // unix seconds
+}
+
+// encodeIDToken signs raw valid until expiry. Expiry tracks the SESSION's
+// lifetime, not the ID token's own `exp`: an id_token_hint is explicitly
+// allowed to be an expired token (it identifies which session to end, it does
+// not authorize anything), so tying it to the token's exp would drop the hint
+// well before the session it belongs to ends.
+func (s signer) encodeIDToken(raw string, expiry time.Time) string {
+	payload, _ := json.Marshal(idTokenBox{Raw: raw, Expiry: expiry.Unix()})
+	return s.sign(payload)
+}
+
+// decodeIDToken verifies value's signature and expiry and returns the raw ID
+// token. A wrong signature, wrong domain, malformed payload, empty token, or
+// expired box all map to the single opaque errBadCookie.
+func (s signer) decodeIDToken(value string, now time.Time) (string, error) {
+	payload, err := s.verify(value)
+	if err != nil {
+		return "", err
+	}
+	var box idTokenBox
+	if err := json.Unmarshal(payload, &box); err != nil {
+		return "", errBadCookie
+	}
+	if box.Raw == "" || now.Unix() >= box.Expiry {
+		return "", errBadCookie
+	}
+	return box.Raw, nil
+}

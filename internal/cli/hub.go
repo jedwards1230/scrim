@@ -71,6 +71,7 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 	oidcClientID := fs.String("oidc-client-id", os.Getenv("SCRIM_OIDC_CLIENT_ID"), "OIDC client ID (env SCRIM_OIDC_CLIENT_ID)")
 	oidcClientSecret := fs.String("oidc-client-secret", os.Getenv("SCRIM_OIDC_CLIENT_SECRET"), "OIDC client secret (env SCRIM_OIDC_CLIENT_SECRET)")
 	oidcRedirectURL := fs.String("oidc-redirect-url", os.Getenv("SCRIM_OIDC_REDIRECT_URL"), "full external URL of the /auth/callback endpoint, must match the IdP registration (env SCRIM_OIDC_REDIRECT_URL)")
+	oidcPostLogoutURL := fs.String("oidc-post-logout-redirect-url", os.Getenv("SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL"), "optional URL the IdP returns to after logout; leave unset unless it is registered with the IdP as a valid post-logout redirect, otherwise the IdP shows its own logged-out page (env SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL)")
 	oidcScopes := fs.String("oidc-scopes", envOr("SCRIM_OIDC_SCOPES", "openid,profile,email"), "comma-separated OIDC scopes (env SCRIM_OIDC_SCOPES)")
 	sessionSecret := fs.String("oidc-session-secret", os.Getenv("SCRIM_OIDC_SESSION_SECRET"), "HMAC secret for session cookies; if empty a random one is generated (sessions then reset on restart) (env SCRIM_OIDC_SESSION_SECRET)")
 	sessionTTL := fs.Duration("oidc-session-ttl", envDurationOr("SCRIM_OIDC_SESSION_TTL", oidc.DefaultSessionTTL), "how long an OIDC session cookie stays valid (env SCRIM_OIDC_SESSION_TTL)")
@@ -122,14 +123,18 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 	// partial "OIDC half-configured" state.
 	if *oidcIssuer != "" {
 		opts.OIDC = &oidc.Config{
-			IssuerURL:     *oidcIssuer,
-			ClientID:      *oidcClientID,
-			ClientSecret:  *oidcClientSecret,
-			RedirectURL:   *oidcRedirectURL,
-			Scopes:        splitCSV(*oidcScopes),
-			SessionSecret: []byte(*sessionSecret),
-			SessionTTL:    *sessionTTL,
-			SecureCookies: *secureCookies,
+			IssuerURL:    *oidcIssuer,
+			ClientID:     *oidcClientID,
+			ClientSecret: *oidcClientSecret,
+			RedirectURL:  *oidcRedirectURL,
+			// Optional and off by default: an unregistered post-logout redirect
+			// is rejected by the IdP, so scrim omits the parameter unless an
+			// operator has registered one (see oidc.Config).
+			PostLogoutRedirectURL: *oidcPostLogoutURL,
+			Scopes:                splitCSV(*oidcScopes),
+			SessionSecret:         []byte(*sessionSecret),
+			SessionTTL:            *sessionTTL,
+			SecureCookies:         *secureCookies,
 		}
 	}
 

@@ -16,6 +16,16 @@ import (
 // step, so a returned cookie is always a valid, minted session.
 func (i *IdP) Login(t *testing.T, auth *oidc.Authenticator, returnTo string) *http.Cookie {
 	t.Helper()
+	session, _ := i.LoginCookies(t, auth, returnTo)
+	return session
+}
+
+// LoginCookies is Login, additionally returning EVERY cookie the callback set
+// -- which a logout test needs, since the retained-ID-token cookie is what
+// supplies logout's id_token_hint. The session cookie is returned separately
+// because it is what nearly every caller wants; it also appears in all.
+func (i *IdP) LoginCookies(t *testing.T, auth *oidc.Authenticator, returnTo string) (session *http.Cookie, all []*http.Cookie) {
+	t.Helper()
 
 	// Step 1: initiate login. HandleLogin sets the flow cookie and 302s to the
 	// IdP's authorization endpoint.
@@ -63,11 +73,12 @@ func (i *IdP) Login(t *testing.T, auth *oidc.Authenticator, returnTo string) *ht
 	if cbRec.Code != http.StatusFound {
 		t.Fatalf("HandleCallback status = %d, want 302 (body: %q)", cbRec.Code, cbRec.Body.String())
 	}
-	session := findCookie(cbRec.Result().Cookies(), "scrim_session")
+	all = cbRec.Result().Cookies()
+	session = findCookie(all, "scrim_session")
 	if session == nil || session.Value == "" {
 		t.Fatal("HandleCallback minted no session cookie")
 	}
-	return session
+	return session, all
 }
 
 // CallbackLocation runs steps 1-2 of a login and returns the flow cookie and

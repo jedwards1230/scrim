@@ -47,9 +47,11 @@ connected* peer.
 ## Stateless, non-revocable OIDC sessions
 
 Hub OIDC sessions are **stateless** — there is no server-side session store, so
-a session can't be revoked before it expires. `/auth/logout` only clears the
-cookie in that one browser; a compromised cookie stays valid until its TTL
-lapses.
+a session can't be revoked before it expires. `/auth/logout` ends the IdP
+session too (RP-initiated logout, see [identity.md](identity.md#logout)), but
+the scrim-side half of that is still only a cookie clear **in that one
+browser**: a cookie already copied elsewhere stays valid until its TTL lapses,
+because nothing server-side is consulted to reject it.
 
 - **Mitigation:** keep `--oidc-session-ttl` modest (default `12h`) so the window
   of a leaked cookie is bounded. To invalidate **all** sessions at once in an

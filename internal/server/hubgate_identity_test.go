@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -280,6 +281,42 @@ func TestLogoutIsPostOnly(t *testing.T) {
 	s.routes().ServeHTTP(postRec, postReq)
 	if postRec.Code != http.StatusFound {
 		t.Errorf("POST /auth/logout = %d, want 302", postRec.Code)
+	}
+}
+
+// TestLogoutThroughRoutesReachesIdP proves RP-initiated logout survives the
+// real mux and the hub read gate, not just a direct handler call: the gate
+// exempts /auth/logout by path, so a logged-in POST must come back as a 302 to
+// the IdP's end-session endpoint rather than to "/" (the old local-only
+// behavior, which left the IdP session alive and silently logged the user
+// straight back in).
+func TestLogoutThroughRoutesReachesIdP(t *testing.T) {
+	s, auth, idp := newOIDCHub(t)
+	_, all := idp.LoginCookies(t, auth, "")
+
+	req := httptest.NewRequest(http.MethodPost, oidc.LogoutPath, nil)
+	for _, c := range all {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("POST /auth/logout = %d, want 302", rec.Code)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("Location %q is not a URL: %v", rec.Header().Get("Location"), err)
+	}
+	want, err := url.Parse(idp.EndSessionEndpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.Host != want.Host || loc.Path != want.Path {
+		t.Errorf("logout Location = %q, want the IdP end-session endpoint %q", loc, want)
+	}
+	if loc.Query().Get("id_token_hint") == "" {
+		t.Error("logout Location carries no id_token_hint")
 	}
 }
 
