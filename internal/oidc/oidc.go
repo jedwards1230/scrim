@@ -1,8 +1,9 @@
 // Package oidc implements generic OpenID Connect login for the scrim hub's
 // read access: an authorization-code flow (with state, nonce, and PKCE)
 // against any discovery-compliant IdP, a signed session cookie minted after a
-// verified ID token, and a stateless per-attempt flow cookie binding the
-// callback to the browser that started it.
+// verified ID token, a stateless per-attempt flow cookie binding the callback
+// to the browser that started it, and RP-initiated logout that ends the IdP's
+// session too rather than only scrim's.
 //
 // It is deliberately IdP-agnostic: everything is driven by the issuer's
 // /.well-known/openid-configuration document, with nothing specific to any
@@ -40,12 +41,21 @@ const (
 	// /auth/login and /auth/callback. It is short-lived and cleared the moment
 	// the callback consumes it.
 	flowCookieName = "scrim_oidc_flow"
+	// idTokenCookieName carries the raw ID token from the completed login so
+	// logout can present it to the IdP as `id_token_hint`. It lives in its OWN
+	// cookie rather than inside the session cookie deliberately: an ID token
+	// carrying many group claims can be a kilobyte or more, and browsers
+	// SILENTLY DROP an oversized cookie. Kept separate, an ID token too large
+	// to store costs a smoother logout (see maxIDTokenCookieBytes) and nothing
+	// else; folded into the session cookie it would break login itself.
+	idTokenCookieName = "scrim_oidc_idt" //nolint:gosec // G101: a cookie NAME, not a credential; flagged only for containing "Token"
 
 	// LoginPath initiates the auth-code flow; CallbackPath is the fixed
 	// redirect URI the IdP returns to (it must match the redirect URL
-	// registered with the IdP); LogoutPath clears the session cookie. The hub
-	// read gate exempts exactly these three paths so an unauthenticated
-	// browser can actually reach the login flow.
+	// registered with the IdP); LogoutPath clears the local session and, when
+	// the IdP advertises an end-session endpoint, hands the browser on to it.
+	// The hub read gate exempts exactly these three paths so an
+	// unauthenticated browser can actually reach the login flow.
 	LoginPath    = "/auth/login"
 	CallbackPath = "/auth/callback"
 	LogoutPath   = "/auth/logout"
@@ -54,6 +64,15 @@ const (
 	// enough for a human to complete an IdP login (including MFA), short enough
 	// that a leaked flow cookie is useless soon after.
 	flowTTL = 10 * time.Minute
+
+	// maxIDTokenCookieBytes caps the retained-ID-token cookie's value. RFC 6265
+	// only obliges a user agent to keep 4096 bytes per cookie counting name,
+	// value, and attributes, and a browser over that limit drops the cookie
+	// without telling anyone. The headroom below 4096 covers the name and the
+	// Path/Max-Age/HttpOnly/Secure/SameSite attributes. Over the cap the token
+	// simply isn't retained: logout still reaches the IdP, just without an
+	// id_token_hint (see HandleLogout).
+	maxIDTokenCookieBytes = 3500
 )
 
 // Config is the resolved OIDC configuration for a hub. It is populated from
@@ -73,6 +92,14 @@ type Config struct {
 	// external scheme/host -- and must exactly match what is registered with
 	// the IdP. Required.
 	RedirectURL string
+	// PostLogoutRedirectURL is an OPTIONAL full external URL the IdP sends the
+	// browser back to after RP-initiated logout (OIDC RP-Initiated Logout 1.0
+	// §2). Leave it EMPTY unless the URL is registered with the IdP as a valid
+	// post-logout redirect: providers reject an unregistered value with an
+	// error page, which is a worse logout than the provider's own "you are
+	// logged out" page. Empty (the default) omits the parameter entirely and
+	// needs no IdP-side registration.
+	PostLogoutRedirectURL string
 	// Scopes requested at authorization. "openid" is always included by New
 	// even if absent here. Defaults to {"openid","profile","email"} upstream.
 	Scopes []string
@@ -117,11 +144,24 @@ type Authenticator struct {
 	oauth2   oauth2.Config
 	verifier *coreoidc.IDTokenVerifier
 
+	// endSessionEndpoint is the IdP's RP-initiated-logout endpoint, taken from
+	// the DISCOVERY document (`end_session_endpoint`) -- never assembled from a
+	// provider-specific URL shape, which is what keeps this package portable
+	// across IdPs. Empty when the issuer advertises none, in which case logout
+	// is local-only (see HandleLogout).
+	endSessionEndpoint string
+	// postLogoutRedirectURL mirrors Config.PostLogoutRedirectURL: empty means
+	// the parameter is omitted from the logout request.
+	postLogoutRedirectURL string
+
 	// sessionSigner and flowSigner are keyed from the same secret but carry
 	// distinct domain tags ("session" vs "flow"), so a session cookie can never
 	// verify as a flow cookie or vice versa (domain separation, #38 review).
 	sessionSigner signer
 	flowSigner    signer
+	// idTokenSigner is keyed from the same secret under its own domain tag, so
+	// the retained-ID-token cookie can never verify as a session or flow cookie.
+	idTokenSigner signer
 
 	sessionTTL time.Duration
 	secure     bool
@@ -165,11 +205,52 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		return nil, fmt.Errorf("oidc: redirect URL %q must be absolute with a host (e.g. https://host/auth/callback)", cfg.RedirectURL)
 	}
 
+	// A post-logout redirect, when configured, is handed to the IdP and is what
+	// the browser is sent to afterwards, so it gets the same absolute-URL check
+	// the redirect URL gets -- a relative or host-less value could never work
+	// and is better refused at boot than at the first logout.
+	if cfg.PostLogoutRedirectURL != "" {
+		u, err := url.Parse(cfg.PostLogoutRedirectURL)
+		if err != nil {
+			return nil, fmt.Errorf("oidc: parsing post-logout redirect URL: %w", err)
+		}
+		if !u.IsAbs() || u.Host == "" {
+			return nil, fmt.Errorf("oidc: post-logout redirect URL %q must be absolute with a host (e.g. https://host/)", cfg.PostLogoutRedirectURL)
+		}
+	}
+
 	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	provider, err := coreoidc.NewProvider(discoveryCtx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: discovery against issuer failed: %w", err)
+	}
+
+	// RP-initiated logout is DISCOVERED, never constructed: `end_session_endpoint`
+	// is read straight out of the issuer's discovery document, so this package
+	// stays free of any provider-specific URL shape and works against whichever
+	// IdP the deployment points at.
+	//
+	// An issuer that advertises NO end-session endpoint is fine and expected
+	// (the field is optional in OpenID Provider Metadata) -- logout then clears
+	// the local session only. An issuer that advertises an unusable one is a
+	// broken discovery document, and is refused at boot for the same
+	// fail-closed reason a discovery failure is: an operator should learn about
+	// it at startup, not from a logout that quietly does half its job.
+	var meta struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+	if err := provider.Claims(&meta); err != nil {
+		return nil, fmt.Errorf("oidc: reading issuer metadata: %w", err)
+	}
+	if meta.EndSessionEndpoint != "" {
+		u, err := url.Parse(meta.EndSessionEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("oidc: parsing discovered end_session_endpoint: %w", err)
+		}
+		if !u.IsAbs() || u.Host == "" {
+			return nil, fmt.Errorf("oidc: discovered end_session_endpoint %q is not an absolute URL with a host", meta.EndSessionEndpoint)
+		}
 	}
 
 	// The session secret keys the HMAC over every session and flow cookie. An
@@ -202,14 +283,17 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       withOpenID(cfg.Scopes),
 		},
-		verifier:      provider.Verifier(&coreoidc.Config{ClientID: cfg.ClientID}),
-		sessionSigner: signer{key: secret, domain: "session"},
-		flowSigner:    signer{key: secret, domain: "flow"},
-		sessionTTL:    ttl,
-		secure:        cfg.SecureCookies,
-		logFailure:    cfg.LogAuthFailure,
-		onLogin:       cfg.OnLogin,
-		now:           time.Now,
+		verifier:              provider.Verifier(&coreoidc.Config{ClientID: cfg.ClientID}),
+		endSessionEndpoint:    meta.EndSessionEndpoint,
+		postLogoutRedirectURL: cfg.PostLogoutRedirectURL,
+		sessionSigner:         signer{key: secret, domain: "session"},
+		flowSigner:            signer{key: secret, domain: "flow"},
+		idTokenSigner:         signer{key: secret, domain: "idtoken"},
+		sessionTTL:            ttl,
+		secure:                cfg.SecureCookies,
+		logFailure:            cfg.LogAuthFailure,
+		onLogin:               cfg.OnLogin,
+		now:                   time.Now,
 	}, nil
 }
 
@@ -280,6 +364,10 @@ func (a *Authenticator) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // cookie, and -- only then -- mints the session cookie and redirects to the
 // stored return path. Every failure branch is fail-closed: no session is
 // issued.
+//
+// It also retains the raw ID token in its own signed cookie so logout can
+// present it to the IdP as `id_token_hint`; failing to retain it degrades
+// logout's smoothness, never the login (see setIDTokenCookie).
 func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// Clear the single-use flow cookie unconditionally: whether this callback
 	// succeeds or fails, its state/nonce/verifier must not be replayable.
@@ -364,6 +452,12 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, a.now().Add(a.sessionTTL)), a.sessionTTL)
 
+	// Retain the raw ID token for logout's id_token_hint. Deliberately AFTER
+	// the session cookie and deliberately non-fatal: the user is authenticated
+	// either way, and an unretained token only costs the IdP an extra logout
+	// confirmation prompt.
+	a.setIDTokenCookie(w, rawIDToken)
+
 	// Feed the principal registry (display/autocomplete only; never consulted
 	// by enforcement). Nil-safe and best-effort by contract -- a registry write
 	// must never break a completed login.
@@ -374,14 +468,109 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, sanitizeReturnTo(fs.ReturnTo), http.StatusFound)
 }
 
-// HandleLogout clears the session cookie and redirects to the hub root. It
-// clears only local state -- it does not initiate IdP single-logout. It is
-// registered POST-only (see routes.go): a plain GET logout is CSRF-able (any
-// page could force a logout via an <img> or link), so the route requires POST
-// and the mux answers a GET with 405.
+// HandleLogout performs RP-initiated logout (OIDC RP-Initiated Logout 1.0):
+// it clears scrim's own cookies and then hands the browser to the IdP's
+// discovered end-session endpoint so the IdP session ends too. Clearing only
+// the local session is NOT a logout while the IdP's SSO cookie survives -- the
+// next request is silently re-authenticated, which reads to a user as "the
+// logout button just refreshed me back in".
+//
+// It is registered POST-only (see routes.go): a plain GET logout is CSRF-able
+// (any page could force a logout via an <img> or link), so the route requires
+// POST and the mux answers a GET with 405.
+//
+// Two deliberate conditions on the hop to the IdP:
+//
+//   - No valid session, no hop. SameSite=Lax already withholds the session
+//     cookie from a cross-site POST, so a forged logout arrives session-less;
+//     answering it locally keeps scrim from being usable as an open "end this
+//     person's IdP session" redirector. The local cookie clear still runs, so
+//     a stale or malformed cookie is always cleaned up.
+//   - No discovered endpoint, no hop. An issuer advertising no
+//     end_session_endpoint cannot be logged out of remotely; scrim clears what
+//     it owns rather than guessing a provider-shaped URL.
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	// Read both cookies before clearing, so the hint survives the clear.
+	_, hadSession := a.SessionFromRequest(r)
+	hint := a.idTokenHint(r)
+
 	a.clearCookie(w, SessionCookieName)
-	http.Redirect(w, r, "/", http.StatusFound)
+	a.clearCookie(w, idTokenCookieName)
+
+	if !hadSession || a.endSessionEndpoint == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, a.endSessionURL(hint), http.StatusFound)
+}
+
+// endSessionURL builds the IdP logout URL, preserving any query the discovered
+// endpoint already carries. hint is the raw ID token, or "" when none was
+// retained.
+//
+// post_logout_redirect_uri is sent ONLY when the operator configured one:
+// providers validate it against a per-client registration list and answer an
+// unregistered value with an error page. Omitted, the IdP ends the session and
+// shows its own logged-out page -- a plainer landing, but one that needs no
+// IdP-side registration and cannot fail that way.
+func (a *Authenticator) endSessionURL(hint string) string {
+	// Parsed and rejected at boot (see New), so this cannot fail here; the
+	// guard exists so a future refactor can't turn that into a panic.
+	u, err := url.Parse(a.endSessionEndpoint)
+	if err != nil {
+		return "/"
+	}
+	q := u.Query()
+	if hint != "" {
+		q.Set("id_token_hint", hint)
+	} else {
+		// client_id identifies the RP when no id_token_hint is available (OIDC
+		// RP-Initiated Logout 1.0 §2). Alongside a hint it is redundant and
+		// MUST agree with the token, so it is sent only in the hint-less case.
+		q.Set("client_id", a.oauth2.ClientID)
+	}
+	if a.postLogoutRedirectURL != "" {
+		q.Set("post_logout_redirect_uri", a.postLogoutRedirectURL)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// setIDTokenCookie stores raw for later use as an id_token_hint, signed under
+// the idtoken domain and expiring with the session it belongs to. An empty
+// token, or one whose signed cookie would exceed maxIDTokenCookieBytes, is
+// skipped: browsers drop an oversized cookie silently, so declining to set it
+// is the difference between a logout without a hint (fine -- the IdP prompts
+// instead) and a mystery. The skip is reported through the coarse failure log
+// so it stays diagnosable.
+func (a *Authenticator) setIDTokenCookie(w http.ResponseWriter, raw string) {
+	if raw == "" {
+		return
+	}
+	value := a.idTokenSigner.encodeIDToken(raw, a.now().Add(a.sessionTTL))
+	if len(value) > maxIDTokenCookieBytes {
+		if a.logFailure != nil {
+			a.logFailure("login: id_token too large to retain for logout hint")
+		}
+		return
+	}
+	a.setCookie(w, idTokenCookieName, value, a.sessionTTL)
+}
+
+// idTokenHint returns the retained raw ID token from r, or "" if the cookie is
+// absent, tampered with, signed for another domain, or expired. Every failure
+// is the same empty result: a missing hint is a degraded logout, never a
+// failed one.
+func (a *Authenticator) idTokenHint(r *http.Request) string {
+	cookie, err := r.Cookie(idTokenCookieName)
+	if err != nil {
+		return ""
+	}
+	raw, err := a.idTokenSigner.decodeIDToken(cookie.Value, a.now())
+	if err != nil {
+		return ""
+	}
+	return raw
 }
 
 // fail logs a coarse reason (if a logger is wired) and writes a plain,

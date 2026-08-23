@@ -60,6 +60,13 @@ type IdP struct {
 	// OmitIDToken, when true, makes the token endpoint return no id_token, so
 	// a test can drive the callback's missing-id_token rejection.
 	OmitIDToken bool
+	// OmitEndSessionEndpoint, when true, drops `end_session_endpoint` from the
+	// discovery document, modelling an IdP that does not support RP-initiated
+	// logout -- the path where scrim's logout is local-only.
+	OmitEndSessionEndpoint bool
+	// PadIDTokenClaim, when non-empty, is emitted as an extra `pad` claim, so a
+	// test can inflate an ID token past the retained-cookie size cap.
+	PadIDTokenClaim string
 
 	mu    sync.Mutex
 	codes map[string]codeData
@@ -102,8 +109,14 @@ func (i *IdP) Issuer() string { return i.server.URL }
 func (i *IdP) ClientID() string     { return i.clientID }
 func (i *IdP) ClientSecret() string { return i.clientSecret }
 
+// EndSessionEndpoint is the RP-initiated-logout endpoint this IdP advertises
+// in discovery (unless OmitEndSessionEndpoint is set). It deliberately carries
+// a pre-existing query parameter, so a test proves scrim preserves rather than
+// clobbers whatever the discovered URL already contains.
+func (i *IdP) EndSessionEndpoint() string { return i.server.URL + "/logout?realm=test" }
+
 func (i *IdP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"issuer":                                i.server.URL,
 		"authorization_endpoint":                i.server.URL + "/authorize",
 		"token_endpoint":                        i.server.URL + "/token",
@@ -112,7 +125,11 @@ func (i *IdP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
-	})
+	}
+	if !i.OmitEndSessionEndpoint {
+		doc["end_session_endpoint"] = i.EndSessionEndpoint()
+	}
+	writeJSON(w, doc)
 }
 
 func (i *IdP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
@@ -220,6 +237,9 @@ func (i *IdP) signIDToken(nonce string) string {
 	}
 	if len(i.Groups) > 0 {
 		claims["groups"] = i.Groups
+	}
+	if i.PadIDTokenClaim != "" {
+		claims["pad"] = i.PadIDTokenClaim
 	}
 	hb, _ := json.Marshal(header)
 	cb, _ := json.Marshal(claims)

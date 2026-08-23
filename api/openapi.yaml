@@ -1047,14 +1047,26 @@ paths:
     post:
       tags: [auth]
       operationId: authLogout
-      summary: Clear the browser session (browser-flow, not machine API).
+      summary: End the session, locally and at the IdP (browser-flow, not machine API).
       description: >-
+        RP-initiated logout (OIDC RP-Initiated Logout 1.0). Clears the session cookie and the
+        retained ID-token cookie, then redirects the browser to the issuer's DISCOVERED
+        `end_session_endpoint` so the IdP session ends too — carrying `id_token_hint` when a
+        token was retained, else `client_id`, and `post_logout_redirect_uri` only when the
+        operator configured one. Clearing the local cookie alone would leave the IdP's SSO
+        session alive, silently re-authenticating the user on the next request.
+
+
         POST-only: a plain GET logout is CSRF-able, so the hub registers only POST and answers a
-        GET with 405. Clears the session cookie and redirects to the dashboard.
+        GET with 405. A POST carrying no valid session, or an issuer advertising no
+        `end_session_endpoint`, still clears cookies but redirects to the dashboard instead of
+        the IdP.
       security: []
       responses:
         '302':
-          description: Session cleared; redirect to the dashboard.
+          description: >-
+            Session cleared; redirect to the IdP's end-session endpoint, or to the dashboard when
+            there was no valid session or the issuer advertises no `end_session_endpoint`.
         '405':
           description: Returned for any method other than POST (e.g. a GET), by the mux.
 

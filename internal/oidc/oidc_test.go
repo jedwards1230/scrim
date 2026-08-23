@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/scrim/internal/oidc"
@@ -333,6 +334,339 @@ func TestLogoutClearsSession(t *testing.T) {
 	cleared := findCookie(rec.Result().Cookies(), "scrim_session")
 	if cleared == nil || cleared.MaxAge >= 0 {
 		t.Errorf("HandleLogout did not expire the session cookie (got %+v)", cleared)
+	}
+}
+
+// logout runs HandleLogout with the given cookies attached and returns the
+// recorder plus the parsed Location it redirected to.
+func logout(t *testing.T, auth *oidc.Authenticator, cookies ...*http.Cookie) (*httptest.ResponseRecorder, *url.URL) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, oidc.LogoutPath, nil)
+	for _, c := range cookies {
+		if c != nil {
+			req.AddCookie(c)
+		}
+	}
+	rec := httptest.NewRecorder()
+	auth.HandleLogout(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("HandleLogout status = %d, want 302", rec.Code)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("HandleLogout Location %q is not a URL: %v", rec.Header().Get("Location"), err)
+	}
+	return rec, loc
+}
+
+// TestLogoutRedirectsToEndSessionEndpoint is the regression test for the bug
+// this feature fixes: a logout that only cleared scrim's own cookie left the
+// IdP's SSO session intact, so the very next request was silently
+// re-authenticated and the user saw the logout button "refresh them back in".
+// A logout that redirects to "/" instead of the IdP is exactly that bug, so
+// this test fails on it explicitly rather than only checking a status code.
+func TestLogoutRedirectsToEndSessionEndpoint(t *testing.T) {
+	auth, idp := newAuth(t)
+	session, all := idp.LoginCookies(t, auth, "")
+
+	_, loc := logout(t, auth, all...)
+
+	if loc.Path == "" || loc.Host == "" {
+		t.Fatalf("logout redirected to %q, want the IdP end-session endpoint -- a local-only redirect IS the bug being fixed", loc)
+	}
+	want, err := url.Parse(idp.EndSessionEndpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.Host != want.Host || loc.Path != want.Path {
+		t.Errorf("logout redirected to %s://%s%s, want %s://%s%s", loc.Scheme, loc.Host, loc.Path, want.Scheme, want.Host, want.Path)
+	}
+	// The discovered endpoint already carried ?realm=test; scrim must add its
+	// parameters to that query, not replace it.
+	if got := loc.Query().Get("realm"); got != "test" {
+		t.Errorf("logout URL realm = %q, want %q -- the discovered endpoint's own query was clobbered", got, "test")
+	}
+	// The hint must be the real ID token from the login, so the IdP can end
+	// that exact session without prompting.
+	hint := loc.Query().Get("id_token_hint")
+	if hint == "" {
+		t.Fatal("logout URL has no id_token_hint, want the retained ID token")
+	}
+	if strings.Count(hint, ".") != 2 {
+		t.Errorf("id_token_hint = %q, want a three-part JWT", hint)
+	}
+	// With a hint present, client_id is redundant and must not be sent.
+	if got := loc.Query().Get("client_id"); got != "" {
+		t.Errorf("logout URL client_id = %q, want it omitted when id_token_hint is present", got)
+	}
+	// Not configured by default -- sending an unregistered one is what IdPs
+	// reject, so the default must omit it.
+	if got := loc.Query().Get("post_logout_redirect_uri"); got != "" {
+		t.Errorf("logout URL post_logout_redirect_uri = %q, want it omitted when unconfigured", got)
+	}
+	_ = session
+}
+
+// TestLogoutClearsBothCookies pins that the local session AND the retained ID
+// token are expired, so nothing usable survives a logout locally either.
+func TestLogoutClearsBothCookies(t *testing.T) {
+	auth, idp := newAuth(t)
+	_, all := idp.LoginCookies(t, auth, "")
+
+	rec, _ := logout(t, auth, all...)
+
+	for _, name := range []string{"scrim_session", "scrim_oidc_idt"} {
+		cleared := findCookie(rec.Result().Cookies(), name)
+		if cleared == nil {
+			t.Errorf("logout did not clear cookie %s at all", name)
+			continue
+		}
+		if cleared.MaxAge >= 0 || cleared.Value != "" {
+			t.Errorf("logout left cookie %s alive (%+v), want it expired", name, cleared)
+		}
+	}
+}
+
+// TestLogoutWithoutSessionStaysLocal pins the open-redirector guard: a
+// session-less logout (what a cross-site forged POST produces, since
+// SameSite=Lax withholds the cookie) must not drive the browser to the IdP's
+// end-session endpoint. It still clears cookies.
+func TestLogoutWithoutSessionStaysLocal(t *testing.T) {
+	auth, _ := newAuth(t)
+
+	rec, loc := logout(t, auth)
+
+	if loc.String() != "/" {
+		t.Errorf("session-less logout redirected to %q, want %q -- scrim must not be an open IdP-logout redirector", loc, "/")
+	}
+	if cleared := findCookie(rec.Result().Cookies(), "scrim_session"); cleared == nil || cleared.MaxAge >= 0 {
+		t.Error("session-less logout did not still clear the session cookie")
+	}
+}
+
+// TestLogoutWithForgedSessionStaysLocal is the same guard against a cookie
+// that is present but not signed by this hub.
+func TestLogoutWithForgedSessionStaysLocal(t *testing.T) {
+	auth, _ := newAuth(t)
+	forged := &http.Cookie{Name: "scrim_session", Value: "not.a.valid.signature"}
+
+	_, loc := logout(t, auth, forged)
+
+	if loc.String() != "/" {
+		t.Errorf("logout with a forged session redirected to %q, want %q", loc, "/")
+	}
+}
+
+// TestLogoutWithoutEndSessionEndpointStaysLocal covers an IdP that advertises
+// no RP-initiated logout: scrim clears what it owns and goes home rather than
+// guessing a provider-shaped URL.
+func TestLogoutWithoutEndSessionEndpointStaysLocal(t *testing.T) {
+	idp := oidctest.New(t)
+	idp.OmitEndSessionEndpoint = true
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+	_, all := idp.LoginCookies(t, auth, "")
+
+	rec, loc := logout(t, auth, all...)
+
+	if loc.String() != "/" {
+		t.Errorf("logout against an IdP with no end_session_endpoint redirected to %q, want %q", loc, "/")
+	}
+	if cleared := findCookie(rec.Result().Cookies(), "scrim_session"); cleared == nil || cleared.MaxAge >= 0 {
+		t.Error("logout did not clear the session cookie on the local-only path")
+	}
+}
+
+// TestLogoutSendsClientIDWithoutHint covers the degraded path: the session is
+// valid but no ID token was retained (cookie dropped, expired, or too large).
+// Logout must still reach the IdP, identifying the RP by client_id instead --
+// per OIDC RP-Initiated Logout 1.0 §2, client_id is the substitute when
+// id_token_hint is absent.
+func TestLogoutSendsClientIDWithoutHint(t *testing.T) {
+	auth, idp := newAuth(t)
+	session, _ := idp.LoginCookies(t, auth, "")
+
+	// Deliberately withhold the ID-token cookie.
+	_, loc := logout(t, auth, session)
+
+	if loc.Host == "" {
+		t.Fatalf("logout without a retained ID token redirected to %q, want the IdP end-session endpoint", loc)
+	}
+	if got := loc.Query().Get("id_token_hint"); got != "" {
+		t.Errorf("id_token_hint = %q, want empty when no token was retained", got)
+	}
+	if got := loc.Query().Get("client_id"); got != idp.ClientID() {
+		t.Errorf("client_id = %q, want %q", got, idp.ClientID())
+	}
+}
+
+// TestLogoutIgnoresTamperedIDTokenCookie pins that a forged retained-token
+// cookie is treated as absent, not trusted through to the IdP.
+func TestLogoutIgnoresTamperedIDTokenCookie(t *testing.T) {
+	auth, idp := newAuth(t)
+	session, all := idp.LoginCookies(t, auth, "")
+	idt := findCookie(all, "scrim_oidc_idt")
+	if idt == nil {
+		t.Fatal("login retained no ID-token cookie")
+	}
+	tampered := &http.Cookie{Name: idt.Name, Value: idt.Value + "x"}
+
+	_, loc := logout(t, auth, session, tampered)
+
+	if got := loc.Query().Get("id_token_hint"); got != "" {
+		t.Errorf("id_token_hint = %q, want empty for a tampered cookie", got)
+	}
+	if got := loc.Query().Get("client_id"); got != idp.ClientID() {
+		t.Errorf("client_id = %q, want the hint-less fallback %q", got, idp.ClientID())
+	}
+}
+
+// TestIDTokenCookieIsDomainSeparated pins that the retained-token cookie and
+// the session cookie cannot be swapped for one another, even though both are
+// HMAC'd with the same secret.
+func TestIDTokenCookieIsDomainSeparated(t *testing.T) {
+	auth, idp := newAuth(t)
+	session, all := idp.LoginCookies(t, auth, "")
+	idt := findCookie(all, "scrim_oidc_idt")
+	if idt == nil {
+		t.Fatal("login retained no ID-token cookie")
+	}
+
+	// A session cookie presented as the ID-token cookie must not decode.
+	swapped := &http.Cookie{Name: "scrim_oidc_idt", Value: session.Value}
+	_, loc := logout(t, auth, session, swapped)
+	if got := loc.Query().Get("id_token_hint"); got != "" {
+		t.Errorf("a session cookie verified as an ID-token cookie (hint = %q), want domain separation to reject it", got)
+	}
+
+	// And the reverse: an ID-token cookie presented as the session cookie must
+	// not authenticate.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "scrim_session", Value: idt.Value})
+	if _, ok := auth.SessionFromRequest(req); ok {
+		t.Error("an ID-token cookie verified as a session cookie, want domain separation to reject it")
+	}
+}
+
+// TestIDTokenCookieAttributes pins the retained-token cookie to the same
+// hardening the session cookie gets -- it carries an IdP assertion about the
+// user, so script access or a plaintext hop would both be leaks.
+func TestIDTokenCookieAttributes(t *testing.T) {
+	idp := oidctest.New(t)
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		SecureCookies: true,
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+	_, all := idp.LoginCookies(t, auth, "")
+	idt := findCookie(all, "scrim_oidc_idt")
+	if idt == nil {
+		t.Fatal("login retained no ID-token cookie")
+	}
+	if !idt.HttpOnly {
+		t.Error("ID-token cookie is not HttpOnly")
+	}
+	if !idt.Secure {
+		t.Error("ID-token cookie is not Secure under SecureCookies")
+	}
+	if idt.SameSite != http.SameSiteLaxMode {
+		t.Errorf("ID-token cookie SameSite = %v, want Lax", idt.SameSite)
+	}
+	if idt.Path != "/" {
+		t.Errorf("ID-token cookie Path = %q, want %q", idt.Path, "/")
+	}
+}
+
+// TestOversizedIDTokenDoesNotBreakLogin is the reason the retained token lives
+// in its OWN cookie: an ID token too large to store must cost only the logout
+// hint. The login still succeeds and logout still reaches the IdP.
+func TestOversizedIDTokenDoesNotBreakLogin(t *testing.T) {
+	idp := oidctest.New(t)
+	idp.PadIDTokenClaim = strings.Repeat("x", 8000)
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	session, all := idp.LoginCookies(t, auth, "")
+	if session.Value == "" {
+		t.Fatal("an oversized ID token broke the login itself")
+	}
+	if idt := findCookie(all, "scrim_oidc_idt"); idt != nil && idt.Value != "" {
+		t.Errorf("an oversized ID token was retained anyway (%d bytes), want it skipped", len(idt.Value))
+	}
+
+	_, loc := logout(t, auth, all...)
+	if loc.Host == "" {
+		t.Fatalf("logout redirected to %q, want the IdP end-session endpoint even without a hint", loc)
+	}
+	if got := loc.Query().Get("client_id"); got != idp.ClientID() {
+		t.Errorf("client_id = %q, want the hint-less fallback %q", got, idp.ClientID())
+	}
+}
+
+// TestLogoutSendsPostLogoutRedirectWhenConfigured covers the opt-in nicer
+// landing: configured, the parameter is sent; unconfigured (the default) it is
+// omitted, which is asserted in TestLogoutRedirectsToEndSessionEndpoint.
+func TestLogoutSendsPostLogoutRedirectWhenConfigured(t *testing.T) {
+	idp := oidctest.New(t)
+	const postLogout = "https://hub.test/"
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:             idp.Issuer(),
+		ClientID:              idp.ClientID(),
+		ClientSecret:          idp.ClientSecret(),
+		RedirectURL:           testRedirectURL,
+		PostLogoutRedirectURL: postLogout,
+		SessionSecret:         []byte("deterministic-test-session-secret"),
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+	_, all := idp.LoginCookies(t, auth, "")
+
+	_, loc := logout(t, auth, all...)
+
+	if got := loc.Query().Get("post_logout_redirect_uri"); got != postLogout {
+		t.Errorf("post_logout_redirect_uri = %q, want %q", got, postLogout)
+	}
+}
+
+// TestNewRejectsBadPostLogoutRedirectURL pins the boot-time validation: a
+// value that could never work is refused at startup, not at the first logout.
+func TestNewRejectsBadPostLogoutRedirectURL(t *testing.T) {
+	idp := oidctest.New(t)
+	base := oidc.Config{
+		IssuerURL:    idp.Issuer(),
+		ClientID:     idp.ClientID(),
+		ClientSecret: idp.ClientSecret(),
+		RedirectURL:  testRedirectURL,
+	}
+	for _, bad := range []string{"/", "not a url", "https:///"} {
+		c := base
+		c.PostLogoutRedirectURL = bad
+		if _, err := oidc.New(context.Background(), c); err == nil {
+			t.Errorf("New with post-logout redirect %q error = nil, want an error", bad)
+		}
 	}
 }
 
