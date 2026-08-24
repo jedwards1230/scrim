@@ -34,6 +34,18 @@ linters:
         - G704
         - G705
   exclusions:
+    paths:
+      # Git worktrees are conventionally parked in ./worktrees/, which is
+      # gitignored but still on disk — so a local run walks into them and lints
+      # whatever branch each one has checked out, reporting findings that belong
+      # to another branch (often one already merged). CI never sees this: a
+      # fresh checkout has no such directory. Excluding it keeps a local run
+      # scoped to the branch actually in hand.
+      #
+      # This is a PATH exclusion, not a rule-ID one — unlike the `excludes`
+      # list above it introduces no cross-version schema risk on the pinned
+      # golangci-lint used in CI.
+      - worktrees/
     rules:
       # gosec's own default is -tests=false; golangci-lint runs it over test
       # files too. Test fixtures legitimately use loose file modes and read
