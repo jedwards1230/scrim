@@ -61,13 +61,39 @@ the README and any affected docs in the same PR.
 
 - Open the PR against `main`.
 - Every PR runs CI. Resolve **all** review threads before the PR is merged.
+- **Every PR needs exactly one `semver:*` label** — see [Releases](#releases). The
+  `Semver label` check enforces it and re-runs when you add the label, so there's
+  no need to push another commit.
 - A PR can be merged once CI is green and all review threads are resolved.
 
 ## Releases
 
-Releases are opt-in. Before merging, add one of `semver:patch`, `semver:minor`,
-or `semver:major` to the PR to cut a release on merge; with no label, merging
-does not release. A release publishes a single immutable `vX.Y.Z` tag.
+Every PR must declare what it does to the version, using exactly one label:
+
+| Label | Effect on merge |
+|---|---|
+| `semver:major` | Cut `vX.0.0` |
+| `semver:minor` | Cut `v0.Y.0` |
+| `semver:patch` | Cut `v0.0.Z` |
+| `semver:none` | **No release** — docs, chore, CI-only |
+
+A release publishes a single immutable `vX.Y.Z` tag, cross-built binaries, a
+multi-arch image, and the Helm chart at
+`oci://ghcr.io/jedwards1230/charts/scrim`.
+
+`semver:none` is a real answer, not a way to opt out of the question. It exists
+because the alternative — inferring "no release" from a *missing* label — is
+indistinguishable from forgetting, and `release.yml` skips every job while still
+reporting **success**. A green run that published nothing looks exactly like one
+that published everything; that failure mode silently swallowed three releases
+before the check existed.
+
+If a release is missed anyway, recover it with a manual dispatch rather than a
+second merge:
+
+```bash
+gh workflow run release.yml -f bump_type=minor
+```
 
 ## Plugin version convention
 

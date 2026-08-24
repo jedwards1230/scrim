@@ -101,9 +101,15 @@ jobs:
               TYPE="minor"; RELEASE="true"
             elif echo "$LABELS" | grep -q 'semver:patch'; then
               TYPE="patch"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:none'; then
+              # An explicit "no release" is a different fact from a missing
+              # label, even though both skip. Distinguishing them means a
+              # skipped run's log says whether that was intended.
+              TYPE="none"; RELEASE="false"
+              echo "::notice::semver:none on the merged PR — no release, as declared"
             else
               TYPE="none"; RELEASE="false"
-              echo "::notice::no semver:* label on the merged PR — skipping release"
+              echo "::warning::no semver:* label on the merged PR — skipping release. The semver-label PR check should have prevented this; if it did not run, the branch ruleset may not require it."
             fi
           fi
           # Defensive: make sure a future label-parsing bug can't silently
