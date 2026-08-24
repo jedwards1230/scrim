@@ -1,0 +1,187 @@
+# scrim - one chart, two workloads.
+#
+#   hub : STATEFUL. Owns the canvases (PVC) and serves the browser UI. An OIDC
+#         *relying party* - it initiates login (client secret, redirect URL,
+#         session cookie).
+#   mcp : STATELESS. Holds no canvas data. Runs the same image with the `mcp`
+#         verb and drives the hub's machine API with the push token. An OAuth
+#         *resource server* - it validates a bearer JWT someone else minted
+#         (audience + JWKS) and never logs anyone in.
+#
+# They are separate workloads on purpose: `mcp` is the internet-reachable one,
+# so it carries no user data, no PVC, and a read-only root filesystem. Merging
+# them would mount the canvas volume into the process that terminates untrusted
+# traffic.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/jedwards1230/scrim
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Applied to every pod. Used here for Stakater Reloader, so a rotated secret
+# restarts the pods that consume it.
+podAnnotations:
+  reloader.stakater.com/auto: "true"
+
+# ---------------------------------------------------------------------------
+# hub - the canvas server
+# ---------------------------------------------------------------------------
+hub:
+  enabled: true
+  replicaCount: 1
+
+  # CIDRs allowed through the browser gate. Ignored once OIDC is configured -
+  # the two gates are exclusive, not layered.
+  allowCidrs: "192.168.8.0/24,10.42.0.0/16,10.43.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128"
+  dataDir: /data/hub
+
+  # Leave issuer empty to run the hub on the CIDR browser gate instead.
+  oidc:
+    issuer: ""
+    clientId: scrim-hub
+    redirectUrl: ""
+    # Optional RP-initiated logout return target. The value MUST be registered
+    # on the IdP client first (Keycloak: post.logout.redirect.uris) - sending an
+    # unregistered URI yields an error page, not a redirect.
+    postLogoutRedirectUrl: ""
+
+  extraEnv: {}
+
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    accessMode: ReadWriteOnce
+    size: 5Gi
+    existingClaim: ""
+
+  service:
+    type: ClusterIP
+    port: 7788
+
+  ingress:
+    enabled: false
+    className: traefik
+    host: ""
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------
+# mcp - the MCP server (a client of the hub)
+# ---------------------------------------------------------------------------
+mcp:
+  enabled: true
+  replicaCount: 1
+
+  # Public base used ONLY for the canvas URLs handed back to callers. Without
+  # it an in-cluster --hub yields links that resolve nowhere outside the
+  # cluster. It never changes where a request goes.
+  hubPublicUrl: ""
+
+  # Setting the issuer turns OAuth ON: every /mcp request must then carry a
+  # bearer JWT validating against this issuer's JWKS with aud == audience.
+  #
+  # `audience` is a stable contract value, not an implementation detail - it
+  # stays constant across an IdP migration. Only the issuer moves.
+  oauth:
+    issuer: ""
+    audience: scrim-mcp
+
+  extraEnv: {}
+
+  service:
+    type: ClusterIP
+    port: 7799
+
+  ingress:
+    enabled: false
+    className: traefik
+    host: ""
+    path: /mcp
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------
+# secrets
+# ---------------------------------------------------------------------------
+# Portable path: reference Secrets that already exist, by name. Both workloads
+# read the push token from `tokensSecret`; the hub additionally reads the OIDC
+# client secret from `oidcSecret`.
+secrets:
+  tokensSecret: scrim-hub-tokens
+  oidcSecret: scrim-hub-oidc
+  keys:
+    pushToken: SCRIM_PUSH_TOKEN
+    sessionSecret: SCRIM_OIDC_SESSION_SECRET
+    oidcClientSecret: SCRIM_OIDC_CLIENT_SECRET
+
+# Homelab-specific: render OnePasswordItem CRDs that materialize the Secrets
+# above. Off by default so the chart does not depend on the 1Password operator.
+onePassword:
+  enabled: false
+  vault: homelab
+  tokensItem: k8s-scrim-scrim-hub-tokens
+  oidcItem: k8s-scrim-scrim-hub-oidc
+
+# ---------------------------------------------------------------------------
+# network policy
+# ---------------------------------------------------------------------------
+# Default-deny ingress for the namespace plus explicit allows. `mcp` is the
+# internet-reachable workload, so its sources are named rather than inherited.
+networkPolicy:
+  enabled: false
+  hubFrom:
+    - namespace: kube-system
+      podLabels:
+        app.kubernetes.io/name: traefik
+  mcpFrom:
+    - namespace: kube-system
+      podLabels:
+        app.kubernetes.io/name: traefik
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

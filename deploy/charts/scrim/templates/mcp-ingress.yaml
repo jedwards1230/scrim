@@ -1,0 +1,38 @@
+{{- if and .Values.mcp.enabled .Values.mcp.ingress.enabled }}
+{{- if not .Values.mcp.ingress.host }}
+{{- fail "mcp.ingress.enabled is true but mcp.ingress.host is empty" }}
+{{- end }}
+{{- if not .Values.mcp.oauth.issuer }}
+{{- fail "refusing to expose /mcp via Ingress while mcp.oauth.issuer is empty - that would publish an unauthenticated MCP endpoint" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "scrim.mcpFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 4 }}
+  {{- with .Values.mcp.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.mcp.ingress.className }}
+  {{- if .Values.mcp.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.mcp.ingress.host | quote }}
+      secretName: {{ .Values.mcp.ingress.tls.secretName | default (printf "%s-tls" (include "scrim.mcpFullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.mcp.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.mcp.ingress.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "scrim.mcpFullname" . }}
+                port:
+                  number: {{ .Values.mcp.service.port }}
+{{- end }}

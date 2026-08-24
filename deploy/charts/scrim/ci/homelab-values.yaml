@@ -1,0 +1,35 @@
+# Reproduces the homelab deployment this chart replaces. Used by `helm template`
+# in CI to prove the chart still renders that configuration.
+hub:
+  oidc:
+    issuer: https://sso.lilbro.cloud/realms/homelab
+    clientId: scrim-hub
+    redirectUrl: https://scrim.lilbro.cloud/auth/callback
+  ingress:
+    enabled: true
+    host: scrim.lilbro.cloud
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+      traefik.ingress.kubernetes.io/router.middlewares: kube-system-redirect-lan@kubernetescrd
+      gethomepage.dev/enabled: "true"
+      gethomepage.dev/name: Scrim
+      gethomepage.dev/description: Live canvas surface for coding agents
+      gethomepage.dev/group: AI & Agents
+      gethomepage.dev/icon: mdi-projector-screen
+    tls:
+      secretName: scrim-hub-tls
+
+mcp:
+  hubPublicUrl: https://scrim.lilbro.cloud
+  oauth:
+    # Today this is the facade host. Phase 4 repoints it at the Keycloak realm
+    # and deletes the facade.
+    issuer: https://scrim-mcp.lilbro.cloud/application/o/scrim-mcp/
+    audience: scrim-mcp
+
+onePassword:
+  enabled: true
+
+networkPolicy:
+  enabled: true

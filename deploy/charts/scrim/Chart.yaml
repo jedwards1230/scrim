@@ -1,0 +1,16 @@
+apiVersion: v2
+name: scrim
+description: >-
+  scrim - a projection surface for coding agents. Deploys the canvas hub (stateful,
+  browser-facing) and the MCP server (stateless, agent-facing) as two workloads from
+  one chart and one values surface.
+type: application
+version: 0.1.0
+appVersion: "0.10.0"
+home: https://github.com/jedwards1230/scrim
+sources:
+  - https://github.com/jedwards1230/scrim
+keywords: [scrim, mcp, agents]
+maintainers:
+  - name: jedwards1230
+    url: https://github.com/jedwards1230

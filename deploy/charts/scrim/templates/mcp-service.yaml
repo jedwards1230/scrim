@@ -1,0 +1,18 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scrim.mcpFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 4 }}
+spec:
+  type: {{ .Values.mcp.service.type }}
+  selector:
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 4 }}
+  ports:
+    - name: mcp
+      port: {{ .Values.mcp.service.port }}
+      targetPort: mcp
+      protocol: TCP
+{{- end }}

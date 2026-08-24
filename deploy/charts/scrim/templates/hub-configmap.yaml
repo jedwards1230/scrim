@@ -1,0 +1,25 @@
+{{- if .Values.hub.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scrim.hubFullname" . }}-config
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+data:
+  SCRIM_HUB_ALLOW: {{ .Values.hub.allowCidrs | quote }}
+  SCRIM_HUB_DATA: {{ .Values.hub.dataDir | quote }}
+  {{- with .Values.hub.oidc.issuer }}
+  SCRIM_OIDC_ISSUER: {{ . | quote }}
+  SCRIM_OIDC_CLIENT_ID: {{ $.Values.hub.oidc.clientId | quote }}
+  {{- end }}
+  {{- with .Values.hub.oidc.redirectUrl }}
+  SCRIM_OIDC_REDIRECT_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.hub.oidc.postLogoutRedirectUrl }}
+  SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL: {{ . | quote }}
+  {{- end }}
+  {{- range $k, $v := .Values.hub.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}

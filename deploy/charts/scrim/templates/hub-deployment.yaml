@@ -1,0 +1,107 @@
+{{- if .Values.hub.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scrim.hubFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+spec:
+  replicas: {{ .Values.hub.replicaCount }}
+  # Single writer on a ReadWriteOnce volume - never roll a second pod alongside.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scrim.labels" . | nindent 8 }}
+        {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: hub
+          image: {{ include "scrim.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "scrim.hubFullname" . }}-config
+          env:
+            - name: {{ .Values.secrets.keys.pushToken }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tokensSecret }}
+                  key: {{ .Values.secrets.keys.pushToken }}
+            - name: {{ .Values.secrets.keys.sessionSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tokensSecret }}
+                  key: {{ .Values.secrets.keys.sessionSecret }}
+            {{- if .Values.hub.oidc.issuer }}
+            - name: {{ .Values.secrets.keys.oidcClientSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.oidcSecret }}
+                  key: {{ .Values.secrets.keys.oidcClientSecret }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 7788
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.hub.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.hub.dataDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          {{- if .Values.hub.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.hub.persistence.existingClaim | default (printf "%s-data" (include "scrim.hubFullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.hub.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

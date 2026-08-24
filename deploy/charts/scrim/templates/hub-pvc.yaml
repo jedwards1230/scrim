@@ -1,0 +1,18 @@
+{{- if and .Values.hub.enabled .Values.hub.persistence.enabled (not .Values.hub.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "scrim.hubFullname" . }}-data
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.hub.persistence.accessMode }}
+  {{- with .Values.hub.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.hub.persistence.size }}
+{{- end }}
