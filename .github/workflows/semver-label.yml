@@ -1,0 +1,94 @@
+# Requires every PR to state its release intent as a label, so that intent is a
+# deliberate choice rather than something inferred from an omission.
+#
+# WHY THIS EXISTS: release.yml's `detect` job reads the merged PR's semver label
+# and, finding none, skips every downstream job -- while the workflow run itself
+# still reports SUCCESS. A green check that means "I published nothing" is
+# indistinguishable from one that means "I published everything", and that has
+# silently swallowed three releases (0.9.1 was tagged but never deployed, 0.10.0
+# needed a manual workflow_dispatch to recover, and the Helm chart PR merged
+# publishing nothing at all).
+#
+# The fix is to make the omission impossible rather than to make the skip
+# louder: a PR cannot merge without saying what it wants. `semver:none` is a
+# first-class answer -- docs, chore, and CI-only changes should use it.
+name: Semver label
+
+on:
+  pull_request:
+    # `labeled`/`unlabeled` matter as much as the code events: adding the label
+    # is usually what FIXES a failing run, so the check has to re-evaluate on a
+    # label change or it stays red with nothing to push.
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semver-label-${{ github.event.pull_request.number }}
+  # Labelling a PR right after opening it supersedes the first (label-less,
+  # certain-to-fail) run. Expect to see that CANCELLED run linger next to the
+  # passing one: GitHub evaluates the most recent run per check name, so merges
+  # are unaffected, but aggregators that count cancelled as failed (ci-watch
+  # among them) will report a phantom failure. `gh pr checks <pr>` shows the
+  # authoritative per-check state.
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Release intent declared
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exactly one semver:* label
+        env:
+          # Rendered from the event payload rather than fetched, so the check
+          # reflects the labels that triggered this run. Passed through env to
+          # keep PR-controlled text out of the shell's parse step.
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          echo "Labels on this PR: ${LABELS:-<none>}"
+
+          matched=""
+          for want in major minor patch none; do
+            # Comma-delimit both sides so `semver:none` cannot substring-match
+            # inside some future `semver:none-really` label.
+            case ",${LABELS}," in
+              *",semver:${want},"*) matched="${matched} semver:${want}" ;;
+            esac
+          done
+          matched="${matched# }"
+          count=$(printf '%s' "$matched" | wc -w | tr -d ' ')
+
+          if [ "$count" -eq 1 ]; then
+            echo "::notice::release intent: ${matched}"
+            exit 0
+          fi
+
+          if [ "$count" -gt 1 ]; then
+            echo "::error::conflicting release intent: ${matched}"
+            echo ""
+            echo "This PR carries more than one semver:* label. release.yml resolves"
+            echo "them in priority order (major > minor > patch), so an accidental"
+            echo "extra label would silently outrank the one you meant -- including"
+            echo "overriding semver:none into a real release. Leave exactly one."
+            exit 1
+          fi
+
+          echo "::error::no semver:* label on this PR"
+          echo ""
+          echo "Every PR must declare what it does to the version. Without a label,"
+          echo "release.yml skips all of its jobs AND reports success, so a missing"
+          echo "release looks identical to a successful one."
+          echo ""
+          echo "Add exactly one of:"
+          echo "  semver:major  breaking change      -> vX.0.0"
+          echo "  semver:minor  new functionality    -> v0.Y.0"
+          echo "  semver:patch  fix, no new surface  -> v0.0.Z"
+          echo "  semver:none   docs / chore / CI    -> no release (a real answer,"
+          echo "                                       not a way to opt out)"
+          echo ""
+          echo "This check re-runs automatically when you add the label -- there is"
+          echo "no need to push another commit."
+          exit 1
