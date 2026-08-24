@@ -1,0 +1,18 @@
+{{- if .Values.hub.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scrim.hubFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+spec:
+  type: {{ .Values.hub.service.type }}
+  selector:
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.hub.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

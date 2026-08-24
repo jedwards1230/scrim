@@ -1,0 +1,78 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "scrim.fullname" . }}-default-deny-ingress
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+{{- if .Values.hub.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "scrim.hubFullname" . }}-allow
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      {{- range .Values.networkPolicy.hubFrom }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          {{- with .podLabels }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      {{- end }}
+      {{- if .Values.mcp.enabled }}
+        # The MCP workload drives the hub's machine API.
+        - podSelector:
+            matchLabels:
+              {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 14 }}
+      {{- end }}
+      ports:
+        - port: 7788
+          protocol: TCP
+{{- end }}
+{{- if .Values.mcp.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "scrim.mcpFullname" . }}-allow
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      {{- range .Values.networkPolicy.mcpFrom }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          {{- with .podLabels }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      {{- end }}
+      ports:
+        - port: 7799
+          protocol: TCP
+{{- end }}
+{{- end }}

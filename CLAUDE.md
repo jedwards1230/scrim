@@ -18,6 +18,11 @@ the trusted-gateway forwarded-identity plane, Authentik feeder),
 [`docs/stability.md`](docs/stability.md) (pre-1.0 policy). The hub machine-API
 contract is the OpenAPI spec at [`api/openapi.yaml`](api/openapi.yaml).
 
+Kubernetes deployment is the Helm chart at
+[`deploy/charts/scrim`](deploy/charts/scrim/README.md) — one chart, two
+workloads (`hub` stateful + browser-facing, `mcp` stateless + agent-facing).
+Its README covers why they stay separate and the auth surface each one carries.
+
 ## Architecture
 
 `scrim` is a single Go binary with no external services — the CLI and the

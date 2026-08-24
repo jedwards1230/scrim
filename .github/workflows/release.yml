@@ -274,6 +274,64 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  chart:
+    name: Package & push Helm chart
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Same scoping rationale as the image job: the default GITHUB_TOKEN is
+      # read-only, so pushing the OCI chart to GHCR needs packages:write here.
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+
+      - name: Stamp chart version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The git tag is the single source of truth (same rule the binaries and
+          # image follow): stamp both chart version and appVersion from it rather
+          # than hand-editing Chart.yaml on main. Nothing is pushed back.
+          sed -i -E "s/^version: .*/version: ${VERSION}/" deploy/charts/scrim/Chart.yaml
+          sed -i -E "s/^appVersion: .*/appVersion: \"${VERSION}\"/" deploy/charts/scrim/Chart.yaml
+          grep -E '^(version|appVersion):' deploy/charts/scrim/Chart.yaml
+
+      - name: Lint and render
+        run: |
+          set -euo pipefail
+          helm lint deploy/charts/scrim
+          # Render both the defaults and the real-world values file. A chart that
+          # lints but cannot render its own documented configuration is not green.
+          helm template scrim deploy/charts/scrim --namespace scrim >/dev/null
+          helm template scrim deploy/charts/scrim --namespace scrim \
+            -f deploy/charts/scrim/ci/homelab-values.yaml >/dev/null
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+      - name: Package & push
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm package deploy/charts/scrim --destination dist
+          helm push "dist/scrim-${VERSION}.tgz" oci://ghcr.io/${{ github.repository_owner }}/charts
+          echo "::notice::pushed oci://ghcr.io/${{ github.repository_owner }}/charts/scrim:${VERSION}"
+
   release:
     name: Create GitHub Release
     needs: [detect, prepare, build]

@@ -1,0 +1,35 @@
+{{- if and .Values.hub.enabled .Values.hub.ingress.enabled }}
+{{- if not .Values.hub.ingress.host }}
+{{- fail "hub.ingress.enabled is true but hub.ingress.host is empty" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "scrim.hubFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "hub") | nindent 4 }}
+  {{- with .Values.hub.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.hub.ingress.className }}
+  {{- if .Values.hub.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.hub.ingress.host | quote }}
+      secretName: {{ .Values.hub.ingress.tls.secretName | default (printf "%s-tls" (include "scrim.hubFullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.hub.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "scrim.hubFullname" . }}
+                port:
+                  number: {{ .Values.hub.service.port }}
+{{- end }}

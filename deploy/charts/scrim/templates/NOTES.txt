@@ -1,0 +1,15 @@
+scrim {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}".
+
+  hub  {{ if .Values.hub.enabled }}-> {{ include "scrim.hubFullname" . }}:{{ .Values.hub.service.port }}{{ else }}DISABLED{{ end }}
+  mcp  {{ if .Values.mcp.enabled }}-> {{ include "scrim.mcpFullname" . }}:{{ .Values.mcp.service.port }}{{ else }}DISABLED{{ end }}
+
+{{ if and .Values.hub.enabled (not .Values.hub.oidc.issuer) -}}
+NOTE: hub.oidc.issuer is unset, so the hub runs on its CIDR browser gate rather
+than OIDC. Anyone inside hub.allowCidrs can read every canvas.
+
+{{ end -}}
+{{- if and .Values.mcp.enabled (not .Values.mcp.oauth.issuer) -}}
+NOTE: mcp.oauth.issuer is unset, so /mcp is NOT authenticated. Reachability is
+then the only boundary - keep networkPolicy.enabled true and do not expose it.
+
+{{ end -}}

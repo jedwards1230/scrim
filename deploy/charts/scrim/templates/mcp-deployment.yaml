@@ -1,0 +1,114 @@
+{{- if .Values.mcp.enabled }}
+{{- if not .Values.hub.enabled }}
+{{- fail "mcp.enabled requires hub.enabled - the MCP server is a client of the hub's machine API, not a standalone service" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scrim.mcpFullname" . }}
+  labels:
+    {{- include "scrim.labels" . | nindent 4 }}
+    {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scrim.labels" . | nindent 8 }}
+        {{- include "scrim.selectorLabels" (dict "ctx" $ "component" "mcp") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # No fsGroup: this workload mounts no persistent volume.
+      securityContext:
+        {{- toYaml (omit .Values.securityContext "fsGroup") | nindent 8 }}
+      containers:
+        - name: mcp
+          image: {{ include "scrim.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image ENTRYPOINT pins the `hub` verb, so the whole command is
+          # overridden for `mcp`. --allow-lan opts into the non-loopback bind
+          # the in-cluster Service requires; with OAuth on, the JWT - not
+          # reachability - is the real boundary.
+          command:
+            - /usr/local/bin/scrim
+            - mcp
+            - --hub
+            - http://{{ include "scrim.hubFullname" . }}:{{ .Values.hub.service.port }}
+            {{- with .Values.mcp.hubPublicUrl }}
+            - --hub-public-url
+            - {{ . | quote }}
+            {{- end }}
+            - --http
+            - 0.0.0.0:7799
+            - --allow-lan
+          env:
+            - name: {{ .Values.secrets.keys.pushToken }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tokensSecret }}
+                  key: {{ .Values.secrets.keys.pushToken }}
+            # Hub mode serves no local canvases, but the local-dir plumbing
+            # still needs somewhere writable under a read-only root.
+            - name: SCRIM_DIR
+              value: /tmp/scrim
+            {{- with .Values.mcp.oauth.issuer }}
+            - name: SCRIM_MCP_OAUTH_ISSUER
+              value: {{ . | quote }}
+            - name: SCRIM_MCP_OAUTH_AUDIENCE
+              value: {{ $.Values.mcp.oauth.audience | quote }}
+            {{- end }}
+            {{- range $k, $v := .Values.mcp.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - name: mcp
+              containerPort: 7799
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.mcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
