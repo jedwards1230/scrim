@@ -48,6 +48,15 @@ Set `onePassword.enabled=true` to additionally render `OnePasswordItem` CRDs tha
 materialize those Secrets. Off by default so the chart doesn't depend on the
 1Password operator.
 
+## Storage
+
+`hub.persistence.storageClass` is **empty by default**, which omits the field from
+the PVC entirely so the cluster's default StorageClass provisions it. Set a name
+only to pin a specific class (the homelab pins `longhorn`).
+
+Empty here is not the same as a literal `storageClassName: ""` on a PVC — that
+would disable dynamic provisioning. The template omits the key instead.
+
 ## Safety rails
 
 The chart refuses to render rather than ship an open door:

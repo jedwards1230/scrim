@@ -1,6 +1,9 @@
 # Reproduces the homelab deployment this chart replaces. Used by `helm template`
 # in CI to prove the chart still renders that configuration.
 hub:
+  persistence:
+    # Homelab-specific: the chart default is empty (cluster default class).
+    storageClass: longhorn
   oidc:
     issuer: https://sso.lilbro.cloud/realms/homelab
     clientId: scrim-hub

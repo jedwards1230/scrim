@@ -55,9 +55,15 @@ hub:
 
   persistence:
     enabled: true
-    storageClass: longhorn
+    # Empty means the field is omitted from the PVC entirely, so the cluster's
+    # default StorageClass provisions it. Set a name only to pin a specific
+    # class. (Note this is NOT the same as a literal `storageClassName: ""` on a
+    # PVC, which disables dynamic provisioning - the template omits the key.)
+    storageClass: ""
     accessMode: ReadWriteOnce
     size: 5Gi
+    # Bind a PVC that already exists instead of provisioning one. Required when
+    # adopting a volume whose name does not match <release>-hub-data.
     existingClaim: ""
 
   service:
