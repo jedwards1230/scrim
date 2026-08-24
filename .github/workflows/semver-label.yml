@@ -26,6 +26,12 @@ permissions:
 
 concurrency:
   group: semver-label-${{ github.event.pull_request.number }}
+  # Labelling a PR right after opening it supersedes the first (label-less,
+  # certain-to-fail) run. Expect to see that CANCELLED run linger next to the
+  # passing one: GitHub evaluates the most recent run per check name, so merges
+  # are unaffected, but aggregators that count cancelled as failed (ci-watch
+  # among them) will report a phantom failure. `gh pr checks <pr>` shows the
+  # authoritative per-check state.
   cancel-in-progress: true
 
 jobs:
