@@ -57,6 +57,35 @@ only to pin a specific class (the homelab pins `longhorn`).
 Empty here is not the same as a literal `storageClassName: ""` on a PVC — that
 would disable dynamic provisioning. The template omits the key instead.
 
+### `dataDir` vs `persistence.mountPath`
+
+These are two different things and collapsing them breaks the hub:
+
+| Value | Meaning |
+|---|---|
+| `hub.dataDir` | Where the hub keeps canvases (`SCRIM_HUB_DATA`) |
+| `hub.persistence.mountPath` | Where the volume is **mounted**. Empty ⇒ mount at `dataDir` |
+
+The simple case is to leave `mountPath` empty: the volume root *is* the data dir.
+
+Set `mountPath` when `dataDir` must be a **subdirectory** of the volume. That is
+required whenever the volume root is root-owned — which is typical for
+dynamically-provisioned storage. scrim hardens its data dir to `0700` at startup
+(`config.HardenPermissions`, **fatal** on failure) and `chmod` only succeeds on a
+directory the process owns. `fsGroup` fixes the group, not the owner, so a hub
+running as a non-root user cannot chmod the volume root and will not boot.
+Mounting at `/data` with `dataDir: /data/hub` sidesteps it — the subdirectory is
+created by the process, so it owns it.
+
+> ⚠️ **Changing this on an existing install moves where the hub looks for
+> canvases.** If they live at `<volume>/hub`, then `mountPath: /data` +
+> `dataDir: /data/hub` finds them. Mounting at `/data/hub` instead makes the hub
+> look for `<volume>/hub/hub` — the canvases are still on disk but appear to have
+> vanished.
+
+The chart refuses to render if `dataDir` is not under `mountPath`, since that
+would silently put the canvases directory outside the volume.
+
 ## Safety rails
 
 The chart refuses to render rather than ship an open door:

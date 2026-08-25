@@ -1,7 +1,14 @@
 # Reproduces the homelab deployment this chart replaces. Used by `helm template`
 # in CI to prove the chart still renders that configuration.
 hub:
+  # The volume mounts at /data but canvases live in the /data/hub SUBDIRECTORY.
+  # The Longhorn volume root is root-owned, and the hub chmods its data dir to
+  # 0700 at startup — which it can only do to a directory it owns. Mounting at
+  # the root would fail that chmod, and would also look for canvases one level
+  # too deep. These two values must not be collapsed.
+  dataDir: /data/hub
   persistence:
+    mountPath: /data
     # Homelab-specific: the chart default is empty (cluster default class).
     storageClass: longhorn
   oidc:

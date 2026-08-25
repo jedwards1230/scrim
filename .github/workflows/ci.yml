@@ -223,6 +223,38 @@ jobs:
           helm template scrim deploy/charts/scrim --namespace scrim \
             -f deploy/charts/scrim/ci/homelab-values.yaml
 
+      - name: Reject a dataDir outside the mounted volume
+        # dataDir and persistence.mountPath are separate on purpose. Collapsing
+        # or mismatching them puts the canvases directory off the volume, which
+        # loses every canvas on restart — silently, since the pod still starts.
+        run: |
+          set +e
+          out=$(helm template scrim deploy/charts/scrim --namespace scrim \
+            --set hub.persistence.mountPath=/data \
+            --set hub.dataDir=/elsewhere/hub 2>&1)
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: chart rendered a dataDir outside the mounted volume"
+            exit 1
+          fi
+          echo "$out" | grep -q "must live under" || {
+            echo "FAIL: render failed, but not on the dataDir guard:"; echo "$out"; exit 1; }
+          echo "guard fired as expected"
+
+      - name: Verify mountPath defaults to dataDir
+        # Back-compat: with mountPath unset the volume must still mount AT
+        # dataDir, which is how every pre-existing install is configured.
+        run: |
+          set -euo pipefail
+          got=$(helm template scrim deploy/charts/scrim --namespace scrim \
+            | grep -E '^\s+mountPath:' | head -1 | awk '{print $2}')
+          if [ "$got" != "/data/hub" ]; then
+            echo "FAIL: expected mountPath to default to dataDir (/data/hub), got '$got'"
+            exit 1
+          fi
+          echo "mountPath defaults to dataDir"
+
       - name: Reject an unauthenticated public MCP endpoint
         # The chart must FAIL to render when /mcp is exposed without an OAuth
         # issuer. Asserting the guard fires keeps it from silently regressing

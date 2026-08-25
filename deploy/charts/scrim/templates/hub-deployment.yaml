@@ -1,4 +1,9 @@
 {{- if .Values.hub.enabled }}
+{{- if and .Values.hub.persistence.enabled .Values.hub.persistence.mountPath }}
+{{- if not (hasPrefix .Values.hub.persistence.mountPath .Values.hub.dataDir) }}
+{{- fail (printf "hub.dataDir (%s) must live under hub.persistence.mountPath (%s) — otherwise the canvases directory is not on the volume and every canvas is lost on restart" .Values.hub.dataDir .Values.hub.persistence.mountPath) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -79,7 +84,11 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
             - name: data
-              mountPath: {{ .Values.hub.dataDir }}
+              # Defaults to dataDir (volume root IS the data dir). Set
+              # persistence.mountPath to keep dataDir as a subdirectory of the
+              # volume — required when the volume root is root-owned, since the
+              # hub chmods its data dir to 0700 at startup and would fail.
+              mountPath: {{ .Values.hub.persistence.mountPath | default .Values.hub.dataDir }}
             - name: tmp
               mountPath: /tmp
       volumes:
