@@ -39,6 +39,9 @@ hub:
   # CIDRs allowed through the browser gate. Ignored once OIDC is configured -
   # the two gates are exclusive, not layered.
   allowCidrs: "192.168.8.0/24,10.42.0.0/16,10.43.0.0/16,100.64.0.0/10,127.0.0.0/8,::1/128"
+
+  # Where the hub keeps canvases (SCRIM_HUB_DATA). This is NOT necessarily the
+  # volume's mount point — see persistence.mountPath below.
   dataDir: /data/hub
 
   # Leave issuer empty to run the hub on the CIDR browser gate instead.
@@ -55,6 +58,23 @@ hub:
 
   persistence:
     enabled: true
+    # Where the volume is MOUNTED. Empty means "mount at hub.dataDir", which is
+    # the simple case and the previous behaviour.
+    #
+    # Set this when dataDir must be a SUBDIRECTORY of the volume rather than its
+    # root. That is not cosmetic: scrim hardens its data dir to 0700 at startup
+    # (config.HardenPermissions, fatal on failure), and chmod only succeeds on a
+    # directory the process owns. A dynamically-provisioned volume's root is
+    # typically root-owned — fsGroup fixes the GROUP, not the owner — so a hub
+    # running as a non-root user cannot chmod the volume root and fails to boot.
+    # Mounting at /data and keeping dataDir at /data/hub sidesteps that: the
+    # subdirectory is created by the process, so it owns it.
+    #
+    # ⚠️ Changing this on an EXISTING install moves where the hub looks for
+    # canvases. If they live at <volume>/hub, then mountPath /data + dataDir
+    # /data/hub finds them; mounting at /data/hub instead would look for
+    # <volume>/hub/hub and the canvases would appear to have vanished.
+    mountPath: ""
     # Empty means the field is omitted from the PVC entirely, so the cluster's
     # default StorageClass provisions it. Set a name only to pin a specific
     # class. (Note this is NOT the same as a literal `storageClassName: ""` on a
