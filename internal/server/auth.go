@@ -52,7 +52,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checkToken(w, r, next, s.token)
+		// secure=false: the default daemon serves plain HTTP on localhost (or
+		// the LAN) and never terminates TLS, so a Secure cookie would simply
+		// never be sent back -- auth would break outright rather than harden.
+		// The hub's caller passes true (see hubgate.go); that asymmetry is the
+		// whole reason this is a parameter and not a constant.
+		checkToken(w, r, next, s.token, false)
 	})
 }
 
@@ -66,7 +71,16 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 // directly; anything else is a 401. It's factored out purely so both
 // callers reuse this exact battle-tested logic against a different expected
 // token, not because the two auth models are otherwise related.
-func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expectedToken string) {
+//
+// secure sets the cookie's Secure attribute, and is a parameter rather than a
+// constant because the two callers sit behind genuinely different transports:
+// the local daemon (withAuth) serves plain HTTP, where a Secure cookie is
+// never sent back at all, while the hub (withHubGate) is fronted by an HTTPS
+// reverse proxy and must have it. Deciding it here from r.TLS would be exactly
+// backwards -- the proxy terminates TLS, so r.TLS is nil on precisely the
+// requests that need Secure set. It is an operator flag instead
+// (--oidc-secure-cookies, the same one governing the OIDC cookies).
+func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expectedToken string, secure bool) {
 	if queryToken := r.URL.Query().Get(tokenQueryParam); queryToken != "" {
 		// A present-but-wrong "?t=" is a hard 401, even if the request also
 		// carries a valid session cookie from an earlier hit: an explicit
@@ -76,18 +90,21 @@ func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expec
 			http.Error(w, "unauthorized: invalid token", http.StatusUnauthorized)
 			return
 		}
+		//nolint:gosec // G124 false positive: HttpOnly/SameSite are set and Secure is the runtime `secure` parameter, which gosec can't evaluate -- it only accepts a literal true, which is precisely what the local daemon must not have.
 		http.SetCookie(w, &http.Cookie{
 			Name:     authCookieName,
 			Value:    expectedToken,
 			Path:     "/",
 			MaxAge:   int(authCookieMaxAge.Seconds()),
 			HttpOnly: true,
+			Secure:   secure,
 			SameSite: http.SameSiteLaxMode,
 		})
 		if strings.HasPrefix(r.URL.Path, apiRoutePrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}
+		//nolint:gosec // G710 false positive: urlWithoutToken returns u.EscapedPath() plus query -- a path only, no scheme or host, so it can't leave this origin.
 		http.Redirect(w, r, urlWithoutToken(r.URL), http.StatusFound)
 		return
 	}

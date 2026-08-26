@@ -31,6 +31,17 @@ type HubOptions struct {
 	// ReadToken, if non-empty, is additionally required (after the CIDR
 	// check passes) on every read request.
 	ReadToken string
+	// SecureCookies sets the Secure attribute on the cookie withHubGate mints
+	// from a valid ReadToken -- that cookie's value IS the read token, so on a
+	// hub reached over HTTPS it must never be sent in the clear. It governs
+	// only that cookie; the OIDC cookies carry their own (see
+	// oidc.Config.SecureCookies), and the CLI feeds both from the single
+	// --oidc-secure-cookies flag so the two can't drift. Leave it true except
+	// for a plain-HTTP local test hub, where a Secure cookie would never come
+	// back at all. Note the hub is normally fronted by a TLS-terminating proxy,
+	// so this cannot be inferred from the request (r.TLS is nil there) -- it is
+	// operator configuration by necessity.
+	SecureCookies bool
 	// AllowCIDRs is the read allowlist, as a slice of CIDR strings (e.g.
 	// "127.0.0.0/8"). Every entry must parse; a malformed one is a hard
 	// startup error. When OIDC is configured, it is not consulted for reads --
@@ -71,9 +82,10 @@ type HubOptions struct {
 // through unchanged, AllowCIDRs parsed into *net.IPNet for withHubGate's
 // per-request checks.
 type hubConfig struct {
-	pushToken   string
-	readToken   string
-	allowedNets []*net.IPNet
+	pushToken     string
+	readToken     string
+	secureCookies bool
+	allowedNets   []*net.IPNet
 	// pushLocks serializes concurrent pushes to the same canvas id (see
 	// handlePush's swap sequence); different ids never contend.
 	pushLocks keyedMutex
@@ -146,9 +158,10 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 
 	s := New(cfg)
 	s.hubCfg = &hubConfig{
-		pushToken:   opts.PushToken,
-		readToken:   opts.ReadToken,
-		allowedNets: nets,
+		pushToken:     opts.PushToken,
+		readToken:     opts.ReadToken,
+		secureCookies: opts.SecureCookies,
+		allowedNets:   nets,
 	}
 	// Cap concurrent SSE (live-reload) connections in hub mode only: a hub
 	// binds beyond loopback, so an allowed client could otherwise open

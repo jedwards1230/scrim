@@ -50,6 +50,11 @@ scrim hub \
   are **stateless** — see the [threat model](threat-model.md#stateless-non-revocable-oidc-sessions).
 - `--oidc-secure-cookies` (env `SCRIM_OIDC_SECURE_COOKIES`, default `true`) —
   leave on in production; pass `=false` only for a plain-HTTP local test hub.
+  Despite the `oidc-` prefix it governs **every** cookie the hub sets: the OIDC
+  cookies *and* the `--read-token` capability cookie, so the two can't drift.
+  It has to be operator configuration rather than something derived from the
+  request — a hub is normally behind a TLS-terminating proxy, so `r.TLS` is nil
+  on exactly the requests that need `Secure` set.
 - `--oidc-post-logout-redirect-url` (env `SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL`) —
   optional, **off by default**; see [Logout](#logout) below.
 
