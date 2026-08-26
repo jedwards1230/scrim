@@ -353,3 +353,64 @@ func TestHubReadGateNoReadTokenConfigured(t *testing.T) {
 		t.Errorf("GET / with CIDR allowed and no read token configured status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestHubReadTokenCookieSecureAttribute pins the Secure attribute on the
+// cookie withHubGate mints from a valid read token to HubOptions.SecureCookies.
+// That cookie's value IS the read token, so on the HTTPS-fronted hub it must
+// never be sent in the clear -- and it cannot be decided from the request,
+// since the TLS-terminating proxy leaves r.TLS nil (see checkToken).
+func TestHubReadTokenCookieSecureAttribute(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secure     bool
+		wantSecure bool
+	}{
+		{name: "secure cookies on", secure: true, wantSecure: true},
+		{name: "plain-HTTP test hub", secure: false, wantSecure: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{
+				Dir: t.TempDir(), Host: "127.0.0.1", Port: 0,
+				IdleTimeout: time.Hour, NoAuth: true,
+			}
+			s, err := NewHub(cfg, HubOptions{
+				PushToken:     "test-push-token",
+				ReadToken:     "hub-read-token",
+				AllowCIDRs:    []string{"127.0.0.0/8", "::1/128"},
+				SecureCookies: tc.secure,
+			})
+			if err != nil {
+				t.Fatalf("NewHub() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/?t=hub-read-token", nil)
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+			s.routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusFound {
+				t.Fatalf("GET /?t=<valid read token> status = %d, want 302", rec.Code)
+			}
+			var got *http.Cookie
+			for _, c := range rec.Result().Cookies() {
+				if c.Name == authCookieName {
+					got = c
+				}
+			}
+			if got == nil {
+				t.Fatalf("no %s cookie set on a valid read-token hit", authCookieName)
+			}
+			if got.Secure != tc.wantSecure {
+				t.Errorf("read-token cookie Secure = %v, want %v", got.Secure, tc.wantSecure)
+			}
+			// HttpOnly and SameSite are unconditional and must not regress
+			// alongside the configurable Secure attribute.
+			if !got.HttpOnly {
+				t.Error("read-token cookie HttpOnly = false, want true")
+			}
+			if got.SameSite != http.SameSiteLaxMode {
+				t.Errorf("read-token cookie SameSite = %v, want Lax", got.SameSite)
+			}
+		})
+	}
+}

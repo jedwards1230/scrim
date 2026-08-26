@@ -146,7 +146,7 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		checkToken(w, r, next, s.hubCfg.readToken)
+		checkToken(w, r, next, s.hubCfg.readToken, s.hubCfg.secureCookies)
 	})
 }
 

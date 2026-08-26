@@ -587,6 +587,7 @@ func (a *Authenticator) fail(w http.ResponseWriter, _ *http.Request, status int,
 // SameSite=Lax (so it survives the top-level GET redirect back from the IdP
 // yet is withheld from cross-site subrequests), with Secure per configuration.
 func (a *Authenticator) setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) {
+	//nolint:gosec // G124 false positive: HttpOnly/SameSite are set and Secure is a.secure, a runtime field gosec can't evaluate.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -601,6 +602,7 @@ func (a *Authenticator) setCookie(w http.ResponseWriter, name, value string, max
 // clearCookie expires a cookie by name (MaxAge < 0), matching the attributes
 // used to set it so the browser reliably removes it.
 func (a *Authenticator) clearCookie(w http.ResponseWriter, name string) {
+	//nolint:gosec // G124 false positive: same attributes as setCookie -- Secure is a.secure, a runtime field gosec can't evaluate.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",

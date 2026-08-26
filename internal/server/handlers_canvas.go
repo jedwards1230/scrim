@@ -23,6 +23,7 @@ func (s *Server) handleCanvasRedirect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	//nolint:gosec // G710 false positive: the target is the relative "/c/<id>/", and ValidateID has already 404'd anything that isn't a plain canvas id.
 	http.Redirect(w, r, "/c/"+id+"/", http.StatusMovedPermanently)
 }
 

@@ -75,7 +75,7 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 	oidcScopes := fs.String("oidc-scopes", envOr("SCRIM_OIDC_SCOPES", "openid,profile,email"), "comma-separated OIDC scopes (env SCRIM_OIDC_SCOPES)")
 	sessionSecret := fs.String("oidc-session-secret", os.Getenv("SCRIM_OIDC_SESSION_SECRET"), "HMAC secret for session cookies; if empty a random one is generated (sessions then reset on restart) (env SCRIM_OIDC_SESSION_SECRET)")
 	sessionTTL := fs.Duration("oidc-session-ttl", envDurationOr("SCRIM_OIDC_SESSION_TTL", oidc.DefaultSessionTTL), "how long an OIDC session cookie stays valid (env SCRIM_OIDC_SESSION_TTL)")
-	secureCookies := fs.Bool("oidc-secure-cookies", envBoolOr("SCRIM_OIDC_SECURE_COOKIES", true), "set the Secure attribute on OIDC cookies; leave true in production, pass =false only for a plain-HTTP local test hub (env SCRIM_OIDC_SECURE_COOKIES)")
+	secureCookies := fs.Bool("oidc-secure-cookies", envBoolOr("SCRIM_OIDC_SECURE_COOKIES", true), "set the Secure attribute on every cookie the hub sets (the OIDC cookies and the read-token cookie alike); leave true in production, pass =false only for a plain-HTTP local test hub (env SCRIM_OIDC_SECURE_COOKIES)")
 
 	// Authentik directory feeder (all optional): setting BOTH --authentik-url
 	// and --authentik-token turns on a read-only pull of users/groups that
@@ -115,6 +115,11 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 		PushToken:  *pushToken,
 		ReadToken:  *readToken,
 		AllowCIDRs: splitCSV(*allow),
+		// One flag governs every cookie the hub sets -- the read-token cookie
+		// here and the OIDC cookies below both read *secureCookies -- so the
+		// two can never drift into a state where one credential rides HTTPS-only
+		// and the other doesn't.
+		SecureCookies: *secureCookies,
 	}
 	// Only build an OIDC config when an issuer is set -- that single flag is
 	// what opts the hub into OIDC login. The remaining required fields
