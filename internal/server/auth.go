@@ -104,7 +104,7 @@ func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expec
 			next.ServeHTTP(w, r)
 			return
 		}
-		//nolint:gosec // G710 false positive: urlWithoutToken returns u.EscapedPath() plus query -- a path only, no scheme or host, so it can't leave this origin.
+		//nolint:gosec // G710: urlWithoutToken normalizes its result to a single leading slash, so the target is always a same-origin absolute path -- never protocol-relative, never absolute. See its doc comment for the "//evil.com" case this defends.
 		http.Redirect(w, r, urlWithoutToken(r.URL), http.StatusFound)
 		return
 	}
@@ -121,10 +121,30 @@ func checkToken(w http.ResponseWriter, r *http.Request, next http.Handler, expec
 // with the "t" capability-token query parameter removed -- the redirect
 // target for a request that just proved it holds a valid token via the
 // query string.
+//
+// The returned target is always a SAME-ORIGIN absolute path: exactly one
+// leading slash, never a scheme and never an authority. That normalization is
+// load-bearing, not cosmetic. A request target is attacker-chosen, and
+// url.ParseRequestURI keeps a leading "//" in the path rather than reading it
+// as an authority (it only parses one for an absolute-form URI). So
+// "GET //evil.com/?t=<token>" yields EscapedPath() == "//evil.com/", and
+// http.Redirect re-parses that string WITHOUT viaRequest, where "//evil.com/"
+// does resolve to Host="evil.com" -- so it skips its relative-path cleanup and
+// emits a protocol-relative Location the browser follows off-site. Collapsing
+// the leading slashes here closes that: "//evil.com/" becomes "/evil.com/",
+// which stays on this origin.
+//
+// Reaching this code already requires a valid capability token, which bounds
+// the severity -- but "the gate upstream makes it unreachable" is not a
+// property this function should depend on, and the hub's read token is shared
+// among readers, so a holder could hand another user a link that looks like a
+// legitimate scrim URL and lands them elsewhere.
 func urlWithoutToken(u *url.URL) string {
 	q := u.Query()
 	q.Del(tokenQueryParam)
-	target := u.EscapedPath()
+	// "/" + TrimLeft is a no-op for every legitimate path (they already have
+	// exactly one leading slash) and neutralizes "//host" / "///host" forms.
+	target := "/" + strings.TrimLeft(u.EscapedPath(), "/")
 	if encoded := q.Encode(); encoded != "" {
 		target += "?" + encoded
 	}

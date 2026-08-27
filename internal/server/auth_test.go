@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,5 +283,80 @@ func TestWithAuthNoAuthBypassesGating(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("GET %s with --no-auth status = %d, want 200 (auth should be fully bypassed)", route, resp.StatusCode)
 		}
+	}
+}
+
+// TestUrlWithoutTokenAlwaysSameOrigin pins the open-redirect defense in
+// urlWithoutToken. The request target is attacker-chosen, and
+// url.ParseRequestURI leaves a leading "//" in the PATH rather than reading it
+// as an authority -- but http.Redirect re-parses the returned string without
+// viaRequest, where "//evil.com/" DOES resolve to a host, producing a
+// protocol-relative Location that leaves the origin. Every case here must come
+// back with exactly one leading slash.
+func TestUrlWithoutTokenAlwaysSameOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"ordinary path", "/c/report/?t=" + testToken, "/c/report/"},
+		{"root", "/?t=" + testToken, "/"},
+		{"other query params survive", "/c/report/?t=" + testToken + "&page=2", "/c/report/?page=2"},
+		{"protocol-relative", "//evil.com/?t=" + testToken, "/evil.com/"},
+		{"triple slash", "///evil.com/?t=" + testToken, "/evil.com/"},
+		{"protocol-relative with path", "//evil.com/phish?t=" + testToken, "/evil.com/phish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.ParseRequestURI(tc.target)
+			if err != nil {
+				t.Fatalf("ParseRequestURI(%q) error = %v", tc.target, err)
+			}
+			got := urlWithoutToken(u)
+			if got != tc.want {
+				t.Errorf("urlWithoutToken(%q) = %q, want %q", tc.target, got, tc.want)
+			}
+			// The property that actually matters: whatever http.Redirect
+			// finally writes must not carry a host or a scheme.
+			parsed, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error = %v", got, err)
+			}
+			if parsed.Host != "" || parsed.Scheme != "" {
+				t.Errorf("redirect target %q resolves off-origin (scheme=%q host=%q)", got, parsed.Scheme, parsed.Host)
+			}
+		})
+	}
+}
+
+// TestWithAuthRejectsProtocolRelativeRedirect is the end-to-end form: a valid
+// token on a "//evil.com/" target must not yield an off-site Location header.
+func TestWithAuthRejectsProtocolRelativeRedirect(t *testing.T) {
+	s, _ := newAuthTestServer(t)
+	h := s.withAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	u, err := url.ParseRequestURI("//evil.com/?t=" + testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.URL = u
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if strings.HasPrefix(loc, "//") {
+		t.Fatalf("Location = %q -- protocol-relative, browser would leave the origin", loc)
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v", loc, err)
+	}
+	if parsed.Host != "" {
+		t.Errorf("Location = %q resolves to host %q, want same-origin", loc, parsed.Host)
 	}
 }
