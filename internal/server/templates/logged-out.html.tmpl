@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scrim &mdash; signed out</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --fg: #1a1a1a;
+    --muted: #666;
+    --card-bg: #ffffff;
+    --border: #e2e2e2;
+    --accent: #2f6f5e;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a;
+    --fg: #e8e8e8;
+    --muted: #9a9a9a;
+    --card-bg: #212226;
+    --border: #33343a;
+    --accent: #4fbf9f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --card-bg: #212226;
+      --border: #33343a;
+      --accent: #4fbf9f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    padding: 2rem;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2rem 2.25rem;
+    max-width: 26rem;
+    text-align: center;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem; letter-spacing: -.01em; }
+  p { color: var(--muted); font-size: .9rem; line-height: 1.55; margin: 0 0 1.5rem; }
+  a.login {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--card-bg);
+    text-decoration: none;
+    font-size: .9rem;
+    font-weight: 600;
+    padding: .55rem 1.1rem;
+    border-radius: 4px;
+  }
+  a.login:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  .ver { margin-top: 1.5rem; font-size: .7rem; color: var(--muted); }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>You&rsquo;re signed out</h1>
+    <p>Your session has ended, both here and at the identity provider.</p>
+    <a class="login" href="{{ .LoginPath }}">Sign back in</a>
+    <div class="ver">scrim {{ .Version }}</div>
+  </main>
+</body>
+</html>

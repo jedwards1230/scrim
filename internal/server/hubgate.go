@@ -96,6 +96,19 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 			return
 		}
 
+		// The post-logout landing page must be reachable by someone whose
+		// session was just destroyed -- that is the only state it is ever seen
+		// in. Gating it would bounce them into the login flow, which is exactly
+		// the "logout appears not to have worked" outcome the page exists to
+		// avoid. It renders no identity and reads no session, so serving it
+		// anonymously discloses nothing. Exact match, and guarded on oidcAuth
+		// so it is inert on a hub with no OIDC (where the route is not
+		// registered at all).
+		if s.oidcAuth != nil && r.URL.Path == loggedOutPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Resolve the request's identity ONCE and stash it (plus the resolving
 		// user token, if any) in the context so every downstream handler
 		// (gallery/list filtering, owner attribution, auto-share) reads the same

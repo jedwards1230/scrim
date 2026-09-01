@@ -125,6 +125,15 @@ func (s *Server) routes() http.Handler {
 			// with 405. isAuthPath still exempts the path (it matches by path,
 			// method-agnostic), so the POST reaches the handler.
 			mux.HandleFunc("POST "+oidc.LogoutPath, s.oidcAuth.HandleLogout)
+
+			// The post-logout landing page. Registered only alongside the OIDC
+			// routes because it exists to be the IdP's post_logout_redirect_uri
+			// -- on a non-OIDC hub there is no logout round-trip to land from,
+			// so the path simply 404s and its gate exemption stays inert.
+			// Gate-exempt in withHubGate (exact match): a visitor arriving here
+			// has just had their session destroyed, so gating it would redirect
+			// them back into the login flow and defeat the purpose.
+			mux.HandleFunc("GET "+loggedOutPath, s.handleLoggedOut)
 		}
 	}
 
