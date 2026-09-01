@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/config"
+	"github.com/jedwards1230/scrim/internal/oidc"
 )
 
 // The whole point of /logged-out is that someone with no session can read it --
@@ -62,8 +63,17 @@ func TestLoggedOutExemptionIsExactNotPrefix(t *testing.T) {
 		rec := httptest.NewRecorder()
 		s.routes().ServeHTTP(rec, req)
 
-		if rec.Code == http.StatusOK {
-			t.Errorf("GET %s = 200, want the gate to intercept a near-miss path", path)
+		// Assert the gate INTERCEPTED it, not merely that it wasn't a 200. A
+		// bare "not 200" would also pass on a 404 -- which is what you get when
+		// the request slips PAST the gate and the mux finds no route, i.e. the
+		// exact failure this test exists to catch. Mirrors
+		// TestHubOIDCOnlyExactAuthPathsAreExempt.
+		if rec.Code != http.StatusFound {
+			t.Errorf("GET %s status = %d, want 302 (gated, not exempt)", path, rec.Code)
+			continue
+		}
+		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, oidc.LoginPath) {
+			t.Errorf("GET %s redirect Location = %q, want the login flow (gated)", path, loc)
 		}
 	}
 }
