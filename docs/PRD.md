@@ -163,7 +163,7 @@ Their loop mirrors the agent's, and is also three steps:
 open the link → look → say something back
 ```
 
-Only the first two work today. **(Not built:** the third.)
+Only the first two work today. **(Not built: the third.)**
 
 Three things this role needs that the 2026-08 design did not provide:
 
@@ -428,8 +428,8 @@ they would take hub mode to 18 and leave local mode at 17.
 | `share_canvas` | write | Grant `user`/`group`/`everyone`/`link`; link returns a one-time secret |
 | `list_grants` | read | Owner + current grants, no secrets |
 | `push` | write | Pack from the MCP process's own disk and push once to a hub |
-| `list_comments` | read | Open threads on a canvas, each with the version it was written against. **(Not built** — hub only, `#129`) |
-| `resolve_comment` | write | Mark one comment resolved. **(Not built** — hub only, `#129`) |
+| `list_comments` | read | Open threads on a canvas, each with the version it was written against. **(Not built)** — hub only, `#129` |
+| `resolve_comment` | write | Mark one comment resolved. **(Not built)** — hub only, `#129` |
 
 Transports: stdio by default; `--http ADDR` for streamable HTTP at `/mcp` (health at `/healthz`).
 HTTP binds loopback unless `--allow-lan` or OAuth is configured — it fails closed rather than
@@ -926,7 +926,7 @@ measure before assuming it holds.
 
 ## 13. Decisions resolved
 
-Decisions 1–5 were settled 2026-08-22; decisions 6–11 on 2026-09-05, when §3 gained the
+Decisions 1–5 were settled 2026-08-22; decisions 6–12 on 2026-09-05, when §3 gained the
 collaborator role. No open forks remain in this document; each choice below is binding and is
 reflected in the sections it touches.
 
