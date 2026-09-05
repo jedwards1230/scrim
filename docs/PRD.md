@@ -19,7 +19,7 @@
 > that writes and a human that looks — and treated identity as plumbing for attribution. That
 > under-served a third role the hub already creates the moment anything is shared: a
 > **collaborator** who did not author the canvas, arrives from a link, and needs to respond. §3
-> now names that role, §7.9 specifies the surface it needs, and §13.6–§13.12 record the seven
+> now names that role, §7.9 specifies the surface it needs, and §13.6–§13.13 record the eight
 > decisions taken to close the gap. Almost all of it is **(not built)** — the amendment fixes the
 > contract, not the binary.
 
@@ -529,7 +529,8 @@ What the hub owes a canvas over time, independent of the archive/TTL features de
 Everything in this section is intent. None of it exists in the binary today, and §11 carries the
 tracking issues. It is specified here because the pieces only make sense together: a comment needs
 somewhere to live, which needs a page that is not the agent's HTML, which needs a way in for
-someone who is not signed in.
+someone who is not signed in — and all of it needs the recipient to be looking at a version the
+owner chose rather than whatever the agent pushed a second ago.
 
 **The problem in one line.** A collaborator's entire contact with scrim is a canvas URL that
 serves agent-authored HTML and nothing else. There is no page that says what this is, no way to
@@ -581,6 +582,65 @@ This is a UI over machinery that already ships — `snap`/`snaps`/`revert` exist
 machine API, and MCP — so it is not blocked on the storage work in `#106`–`#108`. Those improve
 how snapshots are *stored*; this is about a human being able to see one. The two are independent,
 and the ordering between them is a scheduling question, not a dependency.
+
+**History is browsing, not sharing.** The panel changes what *the person looking at it* sees, and
+nothing else: opening a past version is a private act with no effect on any other viewer, and
+`revert` remains the only control that moves the canvas itself. Deciding what a *recipient* sees
+is the separate control specified next. The two read the same version list and must agree on how
+it is numbered and labelled, but they are not the same affordance and neither implies the other.
+
+#### Shared-version pinning
+
+A share is bound to a **version**, not only to a canvas. The share panel carries a **Shared
+version** control: its default is `Latest`, and its alternatives are the canvas's own numbered
+versions, each shown with the canvas title as of that version and a relative age — *Version 5 ·
+HTPC Stream Postmortem · 17m ago*. Every grant kind of §7.6 is bound the same way; the pin is a
+property of the canvas's sharing, not of any one grantee.
+
+**Why this exists.** §7.8 guarantees that a push replaces content, never identity — the URL is
+stable and what it serves is whatever the agent pushed most recently. That is exactly right for
+the watcher, who wants the newest thing the moment it lands, and exactly wrong for the
+collaborator, who opens the link whenever they get to it and can therefore land mid-edit,
+mid-refactor, or mid-breakage. Today the owner's only defence is to stop the agent before sharing,
+which is a workflow instruction rather than a feature. Pinning is what lets an owner hand over a
+stable artifact while the agent keeps working on the same canvas.
+
+**`Latest` is a tracking mode, not a version number.** This is the part most likely to be built
+wrong, so it is stated as a requirement rather than left to the implementation: `Latest` must not
+be resolved to the newest version at share time and stored as that number. It re-resolves on every
+read, so each push changes what a recipient's next load shows, with no act by the owner — that is
+what the tooltip means by *everyone with access sees new versions as soon as you publish them*. A
+numbered pin is the opposite: frozen through any number of pushes until the owner moves it. The
+control has two states, tracking and pinned; it is not one state with a distinguished value.
+
+**Moving the pin is an explicit act, and it is the owner's.** Nobody else can move it, nothing
+moves it implicitly, and a `revert` — which changes the canvas rather than the share — does not
+silently repoint a pinned share. A recipient sees which version they are on; they cannot change it.
+Consistently with §13.10, moving the pin notifies nobody.
+
+**This depends on `jedwards1230/scrim#108`.** Scrim's snapshots are manual only: `snap` is a
+deliberate act and a push creates nothing. So on today's storage there is usually nothing to pin
+to. `jedwards1230/scrim#108` (*versioning 2/3: auto-snapshot on write, debounced*) is what makes a
+push produce a version, and without it this control would list the handful of moments someone
+happened to run `snap` — a sparse, arbitrary list that is worse than no list, because it looks
+authoritative. Shipping the pin ahead of `#108` is therefore not a smaller first step; it is the
+feature with its content removed. This is the one part of §7.9 that *is* gated on the versioning
+epic — the history panel above is not.
+
+**It also shifts what a version is, and §7.8 should be read accordingly.** §7.8 says snapshots are
+the user's, not the system's. Auto-snapshot on write makes that only half true: after `#108` the
+version list is mostly system-created, with deliberate `snap` entries mixed in. The retention half
+of that guarantee is unchanged and still binding — nothing prunes automatically, and any future
+retention is opt-in per canvas, because silently discarding a snapshot someone took deliberately
+remains the one unacceptable outcome. What changes is authorship, not durability, and the PRD
+records the shift rather than leaving §7.8 quietly contradicted.
+
+**Sequential numbering is a display concern that does not exist today.** Snapshots are directories
+named by timestamp (`versions/<id>/<timestamp>[-label]/`, §7.6), so *Version 5* is a rank derived
+from that ordering at render time, not an identity stored on disk. Numbers must therefore be
+treated as unstable labels — a stored pin references the snapshot, never its ordinal — and the
+title shown beside a version is the canvas title as of that version, which means the per-canvas
+metadata of §7.6 has to be captured into the snapshot rather than read live.
 
 #### Comments
 
@@ -815,6 +875,7 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
 | Landing page | An identity-free page an unauthenticated visitor can read, instead of an immediate IdP bounce. Today `/logged-out` is the *only* page they can reach | not started | `jedwards1230/scrim#125` |
 | Canvas shell | `/c/<id>/` becomes a scrim-owned wrapper with the canvas in a sandboxed iframe. **Structural dependency** for comments, history, and a legible access level | not started | `jedwards1230/scrim#126` |
 | Version history UI | A read-only URL per snapshot, browsable from the shell. `snap`/`snaps`/`revert` ship on CLI, API, and MCP with **zero web UI**; independent of `#106`–`#108` | not started | `jedwards1230/scrim#127` |
+| Shared-version pinning | A share is bound to a version, `Latest` (a tracking mode) by default; the owner may freeze it to a numbered one (§13.13). **Depends on `jedwards1230/scrim#108`** — pushes create no snapshots today, so there is nothing to pin to | not started | `jedwards1230/scrim#134` |
 | Comments | Canvas-threaded, stamped with the version written against, rendered as text | not started | `jedwards1230/scrim#128` |
 | Comments over MCP | `list_comments` + `resolve_comment`, so the human's reply reaches the agent that made the canvas | not started | `jedwards1230/scrim#129` |
 | Roles | `admin`/`member`/`guest` from an IdP claim. Today ownership + a shared admin *token* is an ACL, not a user model | not started | `jedwards1230/scrim#130` |
@@ -926,7 +987,7 @@ measure before assuming it holds.
 
 ## 13. Decisions resolved
 
-Decisions 1–5 were settled 2026-08-22; decisions 6–12 on 2026-09-05, when §3 gained the
+Decisions 1–5 were settled 2026-08-22; decisions 6–13 on 2026-09-05, when §3 gained the
 collaborator role. No open forks remain in this document; each choice below is binding and is
 reflected in the sections it touches.
 
@@ -944,6 +1005,7 @@ reflected in the sections it touches.
 | 10 | Is a grantee notified when a canvas is shared? (§5) | **No, for now** | Sharing stays silent and the sharer sends the link. SMTP is an outbound dependency and a new failure mode in a seven-dependency binary, and an in-app inbox is visible only to someone who already logs in — which is the person who least needs telling. Revisit when the collaborator flow is real enough to generate the complaint. |
 | 11 | Fate of the Authentik grantee directory (`#132`) | **Replace it with an IdP-neutral source; keep it display-only** | It names the IdP scrim migrated off and is dead config — the deployed hub sets none of its three variables and there is no Authentik left to pull from (§7.2). Rebuilding it against Keycloak by name would repeat the mistake the "never special-case an IdP" decision in §6 already names. Rejected: deleting the feeder outright (makes the first share to a new person a typing exercise, at exactly the moment the flow should be smoothest). |
 | 12 | What is a comment anchored to, and who can read it? (`#128`, `#129`) | **One thread per canvas, each comment stamped with the version it was written against; agents read and resolve them over MCP** | The version stamp keeps "this looks wrong" interpretable after the next push. Pinning to a DOM node breaks the moment an agent rewrites the page, which is the normal case rather than the exception — an anchor that survives that is a research project. Agent-readability is the half that makes this scrim's own loop: comments a machine cannot see push the round trip back out to a chat window, which is the failure §2 describes. Rejected: DOM-pinned comments, and a human-only thread. |
+| 13 | What version does a recipient see? (`#134`) | **A share is pinned to a version, defaulting to `Latest` — a tracking mode that re-resolves on every read, not a stored pointer to the newest snapshot.** Gated on `jedwards1230/scrim#108` | §7.8 makes a push replace content under a stable URL, so a shared link shows whatever the agent pushed most recently and a recipient can open a canvas mid-edit; the pin is how an owner hands over a stable artifact while the agent keeps working. `Latest` must stay a mode rather than a resolved number, or the default silently becomes a freeze. It is gated because auto-snapshot on write (`#108`) is what makes a push produce a version at all — without it the list shows only the moments someone ran `snap`, which is arbitrary rather than useful. Auto-created versions mean §7.8's "snapshots are the user's" now covers a mostly system-created list; its retention guarantee is untouched. Rejected: latest-only with history as a view-only panel (leaves the owner no way to stabilise what a recipient sees, which is the actual complaint) and a publish/draft model where pushes land on a draft the owner promotes (turns every push into a two-step for the agent-only case that is the overwhelming majority, and gives the watcher of §3 a stale canvas by default). |
 
 ## 14. Divergences from the 2026-07 plan
 
