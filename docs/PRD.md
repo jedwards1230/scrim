@@ -1,6 +1,6 @@
 # scrim — Product Requirements Document
 
-> **Status:** as-realized · 2026-08-22 · owner: justin · repo: [jedwards1230/scrim](https://github.com/jedwards1230/scrim)
+> **Status:** as-realized, plus collaboration intent · 2026-09-05 · owner: justin · repo: [jedwards1230/scrim](https://github.com/jedwards1230/scrim)
 > **Supersedes and replaces** the pre-build plan `home-orchestration:docs/projects/scrim-prd.md`
 > (2026-07-02), written before this repo existed. That document has been **deleted** — everything
 > worth keeping from it, including the 2026-07 alternatives survey (§2.1) and the reasoning that
@@ -14,6 +14,14 @@
 > state. Where intent and reality differ the text says so inline and §11 carries the tracking
 > issue; anything marked **(not built)** does not exist in the binary today. A sentence with no
 > such marker describes shipped behavior.
+>
+> **Amended 2026-09-05.** The 2026-08-22 document described a product with two users — an agent
+> that writes and a human that looks — and treated identity as plumbing for attribution. That
+> under-served a third role the hub already creates the moment anything is shared: a
+> **collaborator** who did not author the canvas, arrives from a link, and needs to respond. §3
+> now names that role, §7.9 specifies the surface it needs, and §13.6–§13.13 record the eight
+> decisions taken to close the gap. Almost all of it is **(not built)** — the amendment fixes the
+> contract, not the binary.
 
 ### Where this sits among scrim's docs
 
@@ -44,6 +52,11 @@ network-reachable store that canvases are *pushed* to, so work survives the mach
 it and can be shared with other people. A localhost-only user never touches the hub and sees no
 trace of it.
 
+The hub is also where scrim stops being a single-player tool. Once a canvas can be handed to
+someone else, the person receiving it needs more than bytes over HTTP — they need to know what
+they are looking at, how it got there, and how to say something back. That surface is specified
+in §7.9 and is largely **(not built)**.
+
 Lineage: scrim distills OpenClaw's canvas plugin (static serve + file-watch + reload-over-socket)
 into a standalone tool, dropping the gateway/paired-node machinery it was entangled with.
 
@@ -57,6 +70,13 @@ makes visual work worth doing is missing.
 scrim's wager is that the primitive is smaller than anything on offer: **a directory, a URL, and
 a reload event**. The agent already knows how to write files. Everything else is plumbing that
 should be invisible to it.
+
+That solves the outbound half. The inbound half is still missing: a person looking at the canvas
+has nowhere to put a reaction. "The third chart is wrong" travels back through whatever chat
+window the link arrived in, gets retyped by hand, and reaches the agent stripped of the context
+that made it obvious — the same out-of-band shuffling the outbound half exists to remove. A
+projection surface that only projects leaves the human a spectator. The loop closes when the
+response travels the same path as the artifact (§7.9).
 
 ### 2.1 Alternatives considered and rejected
 
@@ -85,7 +105,7 @@ ordinary files to an ordinary directory, and any browser on any device can watch
 
 ## 3. Users & core workflows
 
-Two user classes, both first-class. The product succeeds only if it serves both at once.
+Three user classes, all first-class. The product succeeds only if it serves them at once.
 
 ### The coding agent (writer)
 
@@ -126,6 +146,38 @@ identity attached. They can share one canvas with a person, a group, everyone, o
 unguessable link; claim canvases the machine plane created on their behalf; and mint scoped
 tokens so an agent's output is attributed to them rather than to a shared admin credential.
 
+The moment they use any of that they create the third role below — and every capability in this
+paragraph is reached from the *gallery*, which is exactly the page a person arriving from a
+shared link has never seen.
+
+### The collaborator (recipient)
+
+The role this document under-served until 2026-09-05, and the one every grant creates. A
+collaborator did not author the canvas and may not know what scrim is. They arrive from a link
+someone sent them, so **that one URL is the entire product to them**: they will not run the CLI,
+will not see the gallery first, and will not read this document.
+
+Their loop mirrors the agent's, and is also three steps:
+
+```
+open the link → look → say something back
+```
+
+Only the first two work today. **(Not built: the third.)**
+
+Three things this role needs that the 2026-08 design did not provide:
+
+- **Proof of what they are looking at.** A canvas renders as bare agent-authored HTML with a
+  reload script and nothing else — no title, no owner, no age, no indication it is a scrim canvas
+  at all. It is indistinguishable from a stray file someone emailed.
+- **A way in when they are not signed in.** A grant is silent, so their first contact is often a
+  URL that bounces them to an IdP login form with no explanation of what they were reaching for.
+- **A way to respond in place.** See §7.9. Without it the round trip leaves the product.
+
+A fourth need is a *property* rather than a feature: **their lower privilege must be legible.**
+Grants are view-only, but nothing says so — today a grantee discovers it by finding that nothing
+they try to change persists.
+
 ### The operator (hub only)
 
 Someone has to run the hub. That person deploys one container against one volume, sets a push
@@ -148,6 +200,10 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 6. **Agent-native, not agent-adapted.** The MCP surface is a first-class transport for the same
    operations, not a wrapper bolted onto a CLI.
 7. **Small and cross-compilable.** Seven direct dependencies, no CGO, five release platforms.
+8. **The human's reply is as cheap as the agent's push. (Not built.)** A person who opens a shared
+   canvas can respond to it — in place, on the page, in a form the agent that made it can read —
+   without leaving the canvas or opening another tool. A feedback surface the human must exit the
+   canvas to reach has already lost the round trip goal 1 protects on the writing side.
 
 ## 5. Non-goals
 
@@ -157,7 +213,9 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | A declarative UI / A2UI layer | **Firm.** Agents write HTML; that is the point. |
 | Rendering verification (screenshot/DOM assert) | **Firm.** The agent's own tooling (Playwright MCP, `curl`) does this. scrim serves; it does not inspect. |
 | A reverse-tunnel relay to live local daemons | **Firm — and reaffirmed by construction.** The hub is a *central store* clients push to, not a proxy. This dissolved the URL-rewriting, token-vault, and node-spoofing problems a relay carried. |
-| Public-internet exposure by default | **Firm.** LAN/Tailscale + IdP. Anything wider is the environment's job. |
+| Public-internet exposure by default | **Firm, reaffirmed 2026-09-05** (§13.8). LAN/Tailscale + IdP. Anything wider is the environment's job. |
+| An anonymous `public` grant kind | **Firm** (§13.8). `everyone` means every *authenticated* principal; `link` is the widest anonymous reach and stays a bearer secret rather than an open door. A canvas readable with no credential at all makes the hub a publishing platform, which is a different product with a different threat model. |
+| Outbound notification (email/SMTP/webhook) when a canvas is shared | **Deferred by decision** (§13.10). Sharing stays silent and the sharer sends the link. A new outbound dependency in a seven-dependency binary needs a stronger case than the one that exists today; revisit once the collaborator flow is real enough to have a complaint. |
 | Deployment manifests (K8s, ingress, Traefik) in this repo | **Firm.** The hub must stay usable standalone. |
 | Generated OpenAPI / client codegen | **Firm.** The spec is hand-authored and CI-linted. |
 | Browser-driven tests of the reload script | **Firm.** Four statements of JS, already exercised end-to-end (`scripts/e2e.sh` scenarios 3 and 15 assert a real `event: reload` reaches a real client; 17 and the hub scenario assert the injection itself); a real browser would be the flakiest thing in the repo. |
@@ -190,6 +248,11 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | Versioning | Pre-1.0; on-disk layout may change between minors; migrations forward-only | Honest about the surface still settling. |
 | Permission hardening failure | Hard-fail, unless `--allow-weak-permissions` is passed explicitly | Fail closed by default; never silently downgrade to a world-readable directory, but never strand a user with no recourse either. |
 | Write-level sharing | A per-grant `view`/`edit` permission field, gated behind optimistic concurrency landing first | A permission field composes with all four grant kinds; an `edit` kind cannot compose with `link`. Multi-editor without `If-Match` is silent data loss. |
+| Canvas chrome **(not built)** | A scrim-owned wrapper page at `/c/<id>/` holding the canvas in a sandboxed iframe; the unwrapped content keeps its own sub-path | Share, history, and comment controls must not run inside agent-authored JS. §12.1 commits to never protecting the viewer from the canvas, so chrome injected into the document would be readable, tamperable, and hideable by the very content it describes. |
+| Roles **(not built)** | Three principal roles — `admin`, `member`, `guest` — derived from an IdP claim, never a user list scrim stores itself | Ownership plus a shared admin *token* is an ACL, not a user model: no principal can see everything, reassign an orphaned canvas, or be de-privileged. Deriving from a claim preserves "any user the IdP authenticates is accepted, no list to pre-seed". |
+| Public sharing | No anonymous `public` grant; `link` is the widest anonymous reach | See §5 and §13.8. Reversing it would put canvas bytes on the open internet, which the threat model does not cover and the deployment cannot currently serve (§12). |
+| Comments **(not built)** | One thread per canvas, each comment stamped with the canvas version it was written against; readable and resolvable by agents over MCP | The version stamp keeps "this looks wrong" meaningful after the next push. Pinning to a DOM node breaks the moment an agent rewrites the page, which is the normal case, not the exception. Agent-readable is what makes this scrim's loop rather than a comment widget. |
+| Grantee directory **(not built)** | IdP-neutral and display-only; no provider-specific client | The Authentik feeder was written against the IdP scrim no longer uses and is dead config (§7.2). Rebuilding it against the *next* provider by name would repeat the mistake the "never special-case an IdP" decision above already names. |
 
 ### 6.1 What 1.0 means
 
@@ -259,8 +322,20 @@ Common to every local verb:
 (`0.0.0.0`), `--port`/`SCRIM_PORT` (`7788`), `--push-token`/`SCRIM_PUSH_TOKEN` (**required**),
 `--read-token`/`SCRIM_READ_TOKEN`, `--allow`/`SCRIM_HUB_ALLOW` (`127.0.0.0/8,::1/128`),
 `--idle-timeout` (disabled), `--no-mdns` (on), the `--oidc-*` family (`issuer`, `client-id`,
-`client-secret`, `redirect-url`, `scopes`, `session-secret`, `session-ttl`, `secure-cookies`),
-and `--authentik-{url,token,cache-ttl}` for the optional directory feeder.
+`client-secret`, `redirect-url`, `post-logout-redirect-url`, `scopes`, `session-secret`,
+`session-ttl`, `secure-cookies`), and `--authentik-{url,token,cache-ttl}` for the optional
+directory feeder.
+
+`--oidc-post-logout-redirect-url` is optional and off by default. Set it only to a URL the IdP
+has registered as a valid post-logout redirect — an unregistered value is rejected by the
+provider — and with it unset the IdP simply shows its own signed-out page. The deployed hub
+points it at scrim's own `/logged-out` (§7.3).
+
+**The `--authentik-*` feeder is dead config.** It names the IdP scrim migrated off. The deployed
+hub sets none of the three, and there is no Authentik left in the cluster to pull from, so
+grantee autocomplete runs on the observed-principal registry alone: you get people the hub has
+already seen, and type a full email address for anyone else. Replacing it with an IdP-neutral
+source is §13.11.
 
 `scrim mcp` adds `--http ADDR`, `--allow-lan`, `--hub URL`, `--hub-public-url` (`SCRIM_HUB_PUBLIC_URL`),
 `--hub-token-file` (falls back to `SCRIM_PUSH_TOKEN`), and `--oauth-{issuer,audience,resource}`
@@ -297,10 +372,23 @@ Hub-only additions — the **machine API**, documented as a hand-authored OpenAP
 | tokens | `GET`/`POST /api/tokens`, `DELETE /api/tokens/{id}`, `GET /tokens` (HTML) |
 | principals | `GET /api/principals?q=` (autocomplete; display-only, never an authorization source) |
 | ops | `GET /healthz` (gate-exempt), `GET /api/openapi.yaml` (gate-exempt) |
-| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`) — present only under OIDC |
+| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`), `GET /logged-out` — present only under OIDC. `/logged-out` is gate-exempt by exact match and renders no identity, and it is currently the **only** page an anonymous visitor can reach at all, which is exactly §13.9's problem statement. |
 
 Documented caps: push archive ≤50 MiB uncompressed / ≤1000 entries / regular files and
 directories only; per-file write ≤2 MiB decoded; PATCH body ≤6 MiB; edit conflicts return `409`.
+
+**Intended and (not built)** — the collaboration surface of §7.9. The path *shapes* below are
+illustrative; what is decided is that each capability needs an addressable route, not the spelling:
+
+| Group | Routes |
+|---|---|
+| landing | `GET /` for an unauthenticated visitor — gate-exempt, identity-free, the same disclosure posture as `/logged-out` |
+| canvas shell | `GET /c/{id}/` becomes the wrapper page; the unwrapped canvas keeps a sub-path of its own |
+| history | A read-only URL per snapshot, so an old version is viewable without reverting to it |
+| comments | `GET`/`POST /api/canvases/{id}/comments`, `POST .../comments/{commentID}/resolve`, `DELETE .../comments/{commentID}` |
+
+Roles add no route: a role is a claim on the session, surfaced as a field on `GET /api/principals`
+and on the gallery's own render context.
 
 ### 7.4 SSE contract
 
@@ -316,9 +404,12 @@ directories only; per-file write ≤2 MiB decoded; PATCH body ≤6 MiB; edit con
 
 ### 7.5 MCP tools
 
-17 tools; `path` is local-mode only, so a hub-mode server exposes 16. Every tool carries
+17 tools today; `path` is local-mode only, so a hub-mode server exposes 16. Every tool carries
 annotations, with `ReadOnlyHint` derived from the same scope map that enforces OAuth, so the two
 cannot drift.
+
+Two comment tools are intended and **(not built)**. They are hub-only, like the grant tools, so
+they would take hub mode to 18 and leave local mode at 17.
 
 | Tool | Scope | Purpose |
 |---|---|---|
@@ -337,6 +428,8 @@ cannot drift.
 | `share_canvas` | write | Grant `user`/`group`/`everyone`/`link`; link returns a one-time secret |
 | `list_grants` | read | Owner + current grants, no secrets |
 | `push` | write | Pack from the MCP process's own disk and push once to a hub |
+| `list_comments` | read | Open threads on a canvas, each with the version it was written against. **(Not built)** — hub only, `#129` |
+| `resolve_comment` | write | Mark one comment resolved. **(Not built)** — hub only, `#129` |
 
 Transports: stdio by default; `--http ADDR` for streamable HTTP at `/mcp` (health at `/healthz`).
 HTTP binds loopback unless `--allow-lan` or OAuth is configured — it fails closed rather than
@@ -365,18 +458,37 @@ CIDR gate replacing the local capability token.
   `X-Forwarded-User-*` headers that `scrim mcp` verifies and re-emits as `X-Scrim-Actor-*`. The
   hub trusts those re-emitted headers only when they ride a valid admin push token. An
   OAuth-validated JWT actor is authoritative and takes precedence over the HMAC plane.
+- **Roles (not built).** Three roles — `admin`, `member`, `guest` — derived from an IdP claim on
+  each request, never stored as a scrim-side user list (§6). `member` is today's behavior and the
+  default for anyone the IdP authenticates. `admin` is a *principal* who can see every canvas,
+  reassign an orphaned one, and revoke another principal's tokens — the capability the shared
+  admin push token has today with nobody's name on it. `guest` may view what is shared with it and
+  nothing else: no canvas creation, no token minting, no sharing onward. The role bounds what a
+  principal may do; ownership and grants still decide which canvas it may do it to, so this adds a
+  ceiling rather than a second ACL.
 - **Storage layout** under the data dir: `canvases/<id>/`, `meta/<id>.json`, `meta/tokens.json`
-  (0600), `meta/principals.json`, `versions/<id>/<timestamp>[-label]/`, `push-staging/`.
+  (0600), `meta/principals.json`, `versions/<id>/<timestamp>[-label]/`, `push-staging/`. Comments
+  would add `meta/comments/<id>.json` (§7.9).
 
 **Collaboration end state.** Sharing is finished when a canvas can be handed to another person
-without the owner thinking about mechanism. Two properties already hold and must keep holding:
-`group` membership is resolved from the presented claims at check time (`identity.CanView`), never
-cached into an authorization decision — the Authentik feeder is display-only autocomplete and must
-stay that way; and an `everyone` grant requires a genuinely authenticated principal, so a link
-secret never escalates into one. What is still missing: grants carrying a `view`/`edit` permission
-(§6, gated on `#109`, tracked by `#105`), and **(not built)** any handling of a principal's
-departure from the IdP — today an owner who no longer exists leaves a canvas writable by nobody
-but `admin`, and nothing detects or reassigns it.
+without the owner thinking about mechanism, *and the person receiving it can act on it*. The
+second clause is the 2026-09-05 amendment: the 2026-08 text treated delivery as the whole problem,
+so it called sharing nearly done while the recipient still had no way to respond.
+
+Two properties already hold and must keep holding: `group` membership is resolved from the
+presented claims at check time (`identity.CanView`), never cached into an authorization decision —
+any grantee directory is display-only autocomplete and must stay that way; and an `everyone` grant
+requires a genuinely authenticated principal, so a link secret never escalates into one.
+
+What is still missing, all **(not built)** and indexed in §11:
+
+- Grants carrying a `view`/`edit` permission (§6, gated on `#109`, tracked by `#105`).
+- The entire collaborator-facing surface of §7.9 — landing page, canvas shell, history, comments.
+- Roles, and with them a principal who can act on the canvases of others.
+- Any handling of a principal's departure from the IdP. Today an owner who no longer exists leaves
+  a canvas writable by nobody but `admin`, and nothing detects or reassigns it. **Roles are the
+  prerequisite** — reassignment needs a named principal entitled to perform it, which is precisely
+  what the shared admin token is not.
 
 ### 7.7 Error contract
 
@@ -411,6 +523,147 @@ What the hub owes a canvas over time, independent of the archive/TTL features de
   silently discarding a snapshot someone took deliberately is the one unacceptable outcome.
 - **The hub is not a backup.** It holds what was pushed. Durability of the *source* is the
   authoring machine's problem, and `/data` is the operator's to back up (§9).
+
+### 7.9 The collaboration surface (not built)
+
+Everything in this section is intent. None of it exists in the binary today, and §11 carries the
+tracking issues. It is specified here because the pieces only make sense together: a comment needs
+somewhere to live, which needs a page that is not the agent's HTML, which needs a way in for
+someone who is not signed in — and all of it needs the recipient to be looking at a version the
+owner chose rather than whatever the agent pushed a second ago.
+
+**The problem in one line.** A collaborator's entire contact with scrim is a canvas URL that
+serves agent-authored HTML and nothing else. There is no page that says what this is, no way to
+see how it got here, and no way to reply.
+
+#### Landing page
+
+An unauthenticated visitor gets an identity-free page at `/` explaining what scrim is, why they
+are seeing it, and offering a Log in control — instead of today's immediate redirect into the IdP.
+A denied canvas read does the same rather than bouncing: *this canvas was shared with you; sign in
+to view it.*
+
+The precedent already exists. `/logged-out` (§7.3) is gate-exempt by exact match, renders no
+identity, and reads no session, and its own implementation note states the problem plainly: scrim
+has no other page an anonymous visitor can reach. The landing page generalizes that route's
+posture rather than inventing one.
+
+**Disclosure rule:** the landing page and any denied-read explainer reveal nothing about whether a
+given canvas exists, who owns it, or who it was shared with. "Sign in to continue" is the whole
+message. §7.7's deliberate `404`-over-`403` behavior for reads the caller may not see is not
+weakened by a friendlier page.
+
+#### Canvas shell
+
+`/c/<id>/` becomes a scrim-owned wrapper page carrying the canvas in a **sandboxed iframe**, with
+the unwrapped content still reachable at its own sub-path. The shell holds the title, owner, last
+push time, the viewer's own access level, and the entry points to sharing, history, and comments.
+
+The iframe is the security argument, not a layout preference. §12.1 commits to never protecting
+the viewer from the canvas, so any chrome injected into the agent's document would be readable and
+tamperable by that document — a canvas could hide the comment button, misreport its owner, or read
+a comment draft. A separate browsing context is what makes the chrome's claims trustworthy.
+
+Three constraints this must satisfy:
+
+- **Live reload keeps working inside the frame.** The SSE contract of §7.4 is unchanged; the frame
+  reloads itself. The shell is not in the reload path.
+- **The raw content stays addressable.** An agent verifying its own output, a `curl`, and any
+  deep link into a sub-page must still reach the bytes without the shell.
+- **The local daemon gains nothing.** Hub-additivity (§4 goal 5, §10) binds here like everywhere:
+  the shell is hub-only, and `internal/server/hub_test.go` must keep passing unchanged.
+
+#### Version history
+
+A history panel lists the canvas's snapshots, and each is viewable **read-only at its own URL**
+without reverting to it. Restore stays the existing `revert` primitive, reached from the panel.
+
+This is a UI over machinery that already ships — `snap`/`snaps`/`revert` exist on the CLI, the
+machine API, and MCP — so it is not blocked on the storage work in `#106`–`#108`. Those improve
+how snapshots are *stored*; this is about a human being able to see one. The two are independent,
+and the ordering between them is a scheduling question, not a dependency.
+
+**History is browsing, not sharing.** The panel changes what *the person looking at it* sees, and
+nothing else: opening a past version is a private act with no effect on any other viewer, and
+`revert` remains the only control that moves the canvas itself. Deciding what a *recipient* sees
+is the separate control specified next. The two read the same version list and must agree on how
+it is numbered and labelled, but they are not the same affordance and neither implies the other.
+
+#### Shared-version pinning
+
+A share is bound to a **version**, not only to a canvas. The share panel carries a **Shared
+version** control: its default is `Latest`, and its alternatives are the canvas's own numbered
+versions, each shown with the canvas title as of that version and a relative age — *Version 5 ·
+HTPC Stream Postmortem · 17m ago*. Every grant kind of §7.6 is bound the same way; the pin is a
+property of the canvas's sharing, not of any one grantee.
+
+**Why this exists.** §7.8 guarantees that a push replaces content, never identity — the URL is
+stable and what it serves is whatever the agent pushed most recently. That is exactly right for
+the watcher, who wants the newest thing the moment it lands, and exactly wrong for the
+collaborator, who opens the link whenever they get to it and can therefore land mid-edit,
+mid-refactor, or mid-breakage. Today the owner's only defence is to stop the agent before sharing,
+which is a workflow instruction rather than a feature. Pinning is what lets an owner hand over a
+stable artifact while the agent keeps working on the same canvas.
+
+**`Latest` is a tracking mode, not a version number.** This is the part most likely to be built
+wrong, so it is stated as a requirement rather than left to the implementation: `Latest` must not
+be resolved to the newest version at share time and stored as that number. It re-resolves on every
+read, so each push changes what a recipient's next load shows, with no act by the owner — that is
+what the tooltip means by *everyone with access sees new versions as soon as you publish them*. A
+numbered pin is the opposite: frozen through any number of pushes until the owner moves it. The
+control has two states, tracking and pinned; it is not one state with a distinguished value.
+
+**Moving the pin is an explicit act, and it is the owner's.** Nobody else can move it, nothing
+moves it implicitly, and a `revert` — which changes the canvas rather than the share — does not
+silently repoint a pinned share. A recipient sees which version they are on; they cannot change it.
+Consistently with §13.10, moving the pin notifies nobody.
+
+**This depends on `jedwards1230/scrim#108`.** Scrim's snapshots are manual only: `snap` is a
+deliberate act and a push creates nothing. So on today's storage there is usually nothing to pin
+to. `jedwards1230/scrim#108` (*versioning 2/3: auto-snapshot on write, debounced*) is what makes a
+push produce a version, and without it this control would list the handful of moments someone
+happened to run `snap` — a sparse, arbitrary list that is worse than no list, because it looks
+authoritative. Shipping the pin ahead of `#108` is therefore not a smaller first step; it is the
+feature with its content removed. This is the one part of §7.9 that *is* gated on the versioning
+epic — the history panel above is not.
+
+**It also shifts what a version is, and §7.8 should be read accordingly.** §7.8 says snapshots are
+the user's, not the system's. Auto-snapshot on write makes that only half true: after `#108` the
+version list is mostly system-created, with deliberate `snap` entries mixed in. The retention half
+of that guarantee is unchanged and still binding — nothing prunes automatically, and any future
+retention is opt-in per canvas, because silently discarding a snapshot someone took deliberately
+remains the one unacceptable outcome. What changes is authorship, not durability, and the PRD
+records the shift rather than leaving §7.8 quietly contradicted.
+
+**Sequential numbering is a display concern that does not exist today.** Snapshots are directories
+named by timestamp (`versions/<id>/<timestamp>[-label]/`, §7.6), so *Version 5* is a rank derived
+from that ordering at render time, not an identity stored on disk. Numbers must therefore be
+treated as unstable labels — a stored pin references the snapshot, never its ordinal — and the
+title shown beside a version is the canvas title as of that version, which means the per-canvas
+metadata of §7.6 has to be captured into the snapshot rather than read live.
+
+#### Comments
+
+One thread per canvas. Each comment records its author, its body, and **the canvas version it was
+written against**, so "the third chart is wrong" stays interpretable after the agent pushes again;
+a comment whose version is no longer current is shown as such rather than silently re-pointed at
+new content. Comments are not pinned to DOM nodes: agents rewrite whole pages as the normal case,
+and an anchor that survives that is a research project, not a feature.
+
+Storage is `meta/comments/<id>.json`, deleted with the canvas like grants and snapshots (§7.8).
+
+**Agents read and resolve them.** `list_comments` and `resolve_comment` (§7.5) are what make this
+scrim's own loop rather than a comment widget: the human comments on the canvas, the agent reads
+the thread on its next turn, fixes the thing, pushes, and resolves. Comments a machine cannot see
+would push the round trip back out to a chat window, which is the failure §2 describes.
+
+**Visibility follows the canvas.** Anyone who can view a canvas can read its comments; anyone who
+can view it can add one, including a `link`-grant viewer, whose comments are attributed to the
+anonymous link rather than to a principal. Resolving is owner, admin, or the comment's author.
+
+**Trust boundary.** Comment bodies are user-authored text and are rendered as text, never as
+markup — the same rule the existing share dialog already follows for grant targets and owner
+labels. A comment is not a second way to inject script into a page.
 
 ## 8. Architecture
 
@@ -589,7 +842,12 @@ nil on the default path; the push route only ever registers under `NewHub`; `wit
 
 ## 11. End state vs today
 
-Shipped is the large majority. This table lists only where intent and reality differ.
+This table lists only where intent and reality differ.
+
+The **agent-facing** product is shipped nearly whole. The **collaborator-facing** product added in
+the 2026-09-05 amendment (§7.9) is almost entirely unbuilt, and the rows for it are grouped at the
+bottom under `#124`. Read the two halves separately: "shipped is the large majority" was true of
+the product as scoped on 2026-08-22 and is not true of the product as scoped now.
 
 | Capability | End-state intent | Status | Tracking |
 |---|---|---|---|
@@ -613,6 +871,16 @@ Shipped is the large majority. This table lists only where intent and reality di
 | e2e tempfile hygiene | Two stderr temp files escape `$WORKDIR` | **bug** | `jedwards1230/scrim#93` |
 | Gateway-neutral naming | ContextForge-era identifiers remain post-de-federation | not started | `jedwards1230/scrim#72` |
 | MCP spec currency | Adopt MCP `2026-07-28` | not started | `jedwards1230/scrim#71` |
+| **Collaboration surface** (umbrella) | The recipient half of the product: a collaborator can tell what they are looking at, get in, see how it got here, and respond (§7.9) | not started | `jedwards1230/scrim#124` |
+| Landing page | An identity-free page an unauthenticated visitor can read, instead of an immediate IdP bounce. Today `/logged-out` is the *only* page they can reach | not started | `jedwards1230/scrim#125` |
+| Canvas shell | `/c/<id>/` becomes a scrim-owned wrapper with the canvas in a sandboxed iframe. **Structural dependency** for comments, history, and a legible access level | not started | `jedwards1230/scrim#126` |
+| Version history UI | A read-only URL per snapshot, browsable from the shell. `snap`/`snaps`/`revert` ship on CLI, API, and MCP with **zero web UI**; independent of `#106`–`#108` | not started | `jedwards1230/scrim#127` |
+| Shared-version pinning | A share is bound to a version, `Latest` (a tracking mode) by default; the owner may freeze it to a numbered one (§13.13). **Depends on `jedwards1230/scrim#108`** — pushes create no snapshots today, so there is nothing to pin to | not started | `jedwards1230/scrim#134` |
+| Comments | Canvas-threaded, stamped with the version written against, rendered as text | not started | `jedwards1230/scrim#128` |
+| Comments over MCP | `list_comments` + `resolve_comment`, so the human's reply reaches the agent that made the canvas | not started | `jedwards1230/scrim#129` |
+| Roles | `admin`/`member`/`guest` from an IdP claim. Today ownership + a shared admin *token* is an ACL, not a user model | not started | `jedwards1230/scrim#130` |
+| Owner departure | Detect and reassign canvases whose owner left the IdP. **Blocked on `#130`** — reassignment needs a named principal entitled to do it | not started | `jedwards1230/scrim#131` |
+| Grantee directory | IdP-neutral replacement for the `--authentik-*` feeder, which is **dead config** (§7.2) | not started | `jedwards1230/scrim#132` |
 
 ## 12. Risks & accepted limits
 
@@ -660,6 +928,14 @@ Shipped is the large majority. This table lists only where intent and reality di
   `--hub-public-url` is set — an in-cluster URL is dead to a human.
 - **No cross-network viewing without a hub.** Tailscale and friends solve this at the
   environment layer, as designed.
+- **A publicly reachable canvas cannot be logged into.** The MCP door is Cloudflare-proxied and
+  reachable from the internet, but the IdP it points at is LAN-only, so an OIDC login can only be
+  completed from the LAN or Tailscale. Anyone off-network reaching a shared canvas gets a login
+  they cannot finish. A `link` grant is the only sharing path that works for them today, and this
+  is the concrete reason §13.8 declines an anonymous `public` grant: widening the *grant* without
+  widening the *login* would produce a canvas people can be pointed at but not admitted to.
+- **A grant is silent.** Nothing tells the grantee they were given access (§13.10). The sharer
+  sends the link out of band, and if they forget, the grant exists and is never used.
 
 ### 12.1 Trust boundaries
 
@@ -675,11 +951,19 @@ implementation detail.
 | Hub writes | Admin push token, user token, or browser session | Everything else | `withHubGate`, fail-closed |
 | Forwarded identity | A gateway holding the admin push token *and* the HMAC secret | Any header not carrying both | HMAC-signed `X-Forwarded-User-*`, re-emitted as `X-Scrim-Actor-*`; an OAuth JWT actor outranks it |
 | The push token | The operator | Every canvas's bytes | Nothing — it is read-and-write admin by design (§12) |
+| Canvas chrome **(not built)** | scrim's own wrapper page | The canvas it wraps | A sandboxed iframe (§7.9) — the shell's claims about owner and access level must not be forgeable by the document they describe |
 
 The load-bearing asymmetry: **scrim protects the canvas from the network, and the network from
 the daemon — it never protects the viewer from the canvas.** A canvas can contain any script its
 author wrote, so sharing one is a decision to run someone's code in your browser. Grants widen
 visibility on that understanding, and per-canvas isolation is path-based, not origin-based.
+
+That asymmetry is exactly why the collaboration surface of §7.9 cannot be injected into the
+canvas. Every control it adds — who owns this, what may I do here, what did I just comment —
+makes a claim the viewer is being asked to believe. A claim rendered inside untrusted content is
+a claim the content can rewrite. The iframe does not protect the viewer from the canvas, which
+remains a non-goal; it protects **scrim's own statements** from it, which is a different and
+narrower promise the product can actually keep.
 
 ### 12.2 Scale envelope
 
@@ -703,7 +987,8 @@ measure before assuming it holds.
 
 ## 13. Decisions resolved
 
-Settled 2026-08-22. No open forks remain in this document; each choice below is binding and is
+Decisions 1–5 were settled 2026-08-22; decisions 6–13 on 2026-09-05, when §3 gained the
+collaborator role. No open forks remain in this document; each choice below is binding and is
 reflected in the sections it touches.
 
 | # | Question | Choice | Consequence |
@@ -713,6 +998,14 @@ reflected in the sections it touches.
 | 3 | Merge protection (`#92`) — the `ci` aggregate is advisory, so a red PR can merge | **Require the `ci` aggregate as the sole required status check** | The aggregate job exists precisely to be the single required check. Requiring each job individually would make adding a CI job a two-place change and drift silently. |
 | 4 | Scope of the lifecycle trio (`#102`–`#104`) | **Ship `#102` (query/filter/paginate) alone; archive and TTL stay unbuilt** | List filtering pays off at any canvas count. Archive and TTL only earn their complexity once the collection is genuinely large, which it is not. Revisit when it is. |
 | 5 | Fate of the pre-build PRD in home-orchestration | **Delete it** | This document supersedes it as the product contract — the top of scrim's doc tree, above the six reference docs mapped in the header, not a replacement for them. Its irreplaceable content — the 2026-07 alternatives survey and the relay rejection — is absorbed into §2.1 and §8.1, so the deletion loses nothing. |
+| 6 | Does the hub need a role model? (`#130`) | **Yes — `admin`/`member`/`guest`, derived from an IdP claim, never a scrim-side user list** | Ownership plus a shared admin *token* is an ACL, not a user model: nobody can see everything, reassign an orphan, or be de-privileged. Claim-derived keeps "no user list to pre-seed" and keeps the IdP the source of truth. Rejected: an admin role alone (leaves no lesser tier for a recipient who should not create canvases) and keeping ownership-only (leaves `#131` unbuildable, since reassignment needs a named principal entitled to do it). |
+| 7 | Where does human-facing chrome live? (`#126`) | **A scrim-owned wrapper page at `/c/<id>/` with the canvas in a sandboxed iframe** | §12.1 commits to never protecting the viewer from the canvas, so chrome injected into the agent's document would be readable, tamperable, and hideable by that document — a canvas could misreport its own owner. The iframe protects *scrim's statements*, not the viewer. Rejected: injecting a toolbar like the reload script (untrustworthy for exactly that reason) and gallery-only controls (invisible to a recipient arriving from a link, who has never seen the gallery). |
+| 8 | Should there be an anonymous `public` grant? (§5) | **No — `link` is the widest anonymous reach** | A canvas readable with no credential makes the hub a publishing platform, with a threat model scrim has not written. It is also unbuildable today: the deployment's IdP is LAN-only, so widening the grant without widening the login yields a canvas people can be pointed at but not admitted to (§12). The §5 non-goal is reaffirmed rather than reversed. |
+| 9 | What does an unauthenticated visitor see? (`#125`) | **A hub landing page — identity-free, with a Log in control** | Today every human-facing route bounces an anonymous browser into the IdP, so a silently-granted recipient meets a login form with no idea what they were reaching for. `/logged-out` already proves the pattern is safe: gate-exempt by exact match, no session read, nothing disclosed. Rejected: keeping the bare redirect (the recipient's first impression is an unexplained login) and an explainer only on a denied canvas (leaves `/` still unreachable). |
+| 10 | Is a grantee notified when a canvas is shared? (§5) | **No, for now** | Sharing stays silent and the sharer sends the link. SMTP is an outbound dependency and a new failure mode in a seven-dependency binary, and an in-app inbox is visible only to someone who already logs in — which is the person who least needs telling. Revisit when the collaborator flow is real enough to generate the complaint. |
+| 11 | Fate of the Authentik grantee directory (`#132`) | **Replace it with an IdP-neutral source; keep it display-only** | It names the IdP scrim migrated off and is dead config — the deployed hub sets none of its three variables and there is no Authentik left to pull from (§7.2). Rebuilding it against Keycloak by name would repeat the mistake the "never special-case an IdP" decision in §6 already names. Rejected: deleting the feeder outright (makes the first share to a new person a typing exercise, at exactly the moment the flow should be smoothest). |
+| 12 | What is a comment anchored to, and who can read it? (`#128`, `#129`) | **One thread per canvas, each comment stamped with the version it was written against; agents read and resolve them over MCP** | The version stamp keeps "this looks wrong" interpretable after the next push. Pinning to a DOM node breaks the moment an agent rewrites the page, which is the normal case rather than the exception — an anchor that survives that is a research project. Agent-readability is the half that makes this scrim's own loop: comments a machine cannot see push the round trip back out to a chat window, which is the failure §2 describes. Rejected: DOM-pinned comments, and a human-only thread. |
+| 13 | What version does a recipient see? (`#134`) | **A share is pinned to a version, defaulting to `Latest` — a tracking mode that re-resolves on every read, not a stored pointer to the newest snapshot.** Gated on `jedwards1230/scrim#108` | §7.8 makes a push replace content under a stable URL, so a shared link shows whatever the agent pushed most recently and a recipient can open a canvas mid-edit; the pin is how an owner hands over a stable artifact while the agent keeps working. `Latest` must stay a mode rather than a resolved number, or the default silently becomes a freeze. It is gated because auto-snapshot on write (`#108`) is what makes a push produce a version at all — without it the list shows only the moments someone ran `snap`, which is arbitrary rather than useful. Auto-created versions mean §7.8's "snapshots are the user's" now covers a mostly system-created list; its retention guarantee is untouched. Rejected: latest-only with history as a view-only panel (leaves the owner no way to stabilise what a recipient sees, which is the actual complaint) and a publish/draft model where pushes land on a draft the owner promotes (turns every push into a two-step for the agent-only case that is the overwhelming majority, and gives the watcher of §3 a stale canvas by default). |
 
 ## 14. Divergences from the 2026-07 plan
 

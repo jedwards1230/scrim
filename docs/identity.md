@@ -182,7 +182,16 @@ construction. A network policy pinning the hub's ingress to scrim-mcp is the
 second half of the defense — see the
 [threat model](threat-model.md#cidr-checked-on-remoteaddr).
 
-## Authentik directory (optional)
+## Authentik directory (optional, and dead in practice)
+
+> **This feeder names an IdP scrim no longer uses.** As of 2026-09-05 the
+> deployed hub sets none of the three variables below, and there is no Authentik
+> instance left to pull from, so grantee autocomplete runs on the observed-principal
+> registry alone: you get people the hub has already seen, and type a full email
+> address for anyone else. The flags still work if you point them at an Authentik
+> that exists — nothing was removed — but nothing here is exercised today.
+> Replacing it with an IdP-neutral source is
+> [#132](https://github.com/jedwards1230/scrim/issues/132); the reasoning is PRD §13.11.
 
 Setting **both** `--authentik-url` and `--authentik-token` turns on a read-only
 pull of Authentik users/groups that enriches `GET /api/principals` with display
