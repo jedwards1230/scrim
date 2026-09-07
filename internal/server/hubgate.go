@@ -45,8 +45,8 @@ const bearerPrefix = "Bearer "
 // one carries varies: claim is open to ANY authenticated caller (session, user
 // token, or forwarded actor) and skips the ownership check, which the claim
 // handler enforces itself; /api/tokens* is session-only (a user token or the
-// machine plane gets 403); grant mutation and canvas duplication both need a
-// session that OWNS the canvas;
+// machine plane gets 403); grant mutation, canvas duplication, and
+// whole-canvas deletion each need a session that OWNS the canvas;
 // and every other write needs a bearer, bounded by userTokenMayWrite.
 //
 // OIDC vs CIDR is deliberately exclusive, not layered: when OIDC is on it is
@@ -269,7 +269,8 @@ func (s *Server) observeCFActor(c identity.Claims) {
 // serveWrite authorizes a write (a non-GET/HEAD request) for a non-admin caller
 // (admin is served earlier). The token-management endpoints are open to any
 // session (a logged-in principal mints/revokes its own tokens); a session that
-// OWNS a canvas may additionally mutate its grants and duplicate it; every
+// OWNS a canvas may additionally mutate its grants, duplicate it, and delete
+// it; every
 // other write requires a user bearer token whose owner may write the target
 // canvas.
 func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims, tok *usertoken.Token) {
@@ -355,11 +356,17 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 
-	// Canvas duplication by a browser session (#126). Modelled exactly on the
-	// grant-mutation branch above, and CSRF-safe for the same reason: the
-	// session cookie is HttpOnly + SameSite=Lax, so no cross-site POST can
-	// carry it. A session that may WRITE the SOURCE canvas may copy it -- the
-	// shell's Duplicate menu item is the only caller.
+	// Canvas duplication (#126) and deletion (#137) by a browser session.
+	// Modelled exactly on the grant-mutation branch above, and CSRF-safe for
+	// the same reason: the session cookie is HttpOnly + SameSite=Lax, so no
+	// cross-site POST/DELETE can carry it. A session that may WRITE the canvas
+	// named in the path may copy it or delete it -- the shell's Duplicate and
+	// Delete menu items are the only callers.
+	//
+	// Delete is the destructive one, and it is bounded by exactly the same
+	// CanWrite check: a view-only grantee gets 403, an anonymous caller 401,
+	// and the shell renders the item only for a viewer the same decision
+	// admits (shellData.CanDelete), so the control and the gate agree.
 	//
 	// This checks the SOURCE (the id in the path) and nothing else. The copy's
 	// TARGET comes from the JSON body and is authorized by neither auth plane
@@ -367,7 +374,8 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// the path as well), tracked in jedwards1230/scrim#135. This branch does
 	// not widen it: any logged-in principal can already mint a user token and
 	// take the existing path, and the shell never sends "overwrite".
-	if isCopyPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
+	if (isCopyPath(r.Method, r.URL.Path) || isCanvasDeletePath(r.Method, r.URL.Path)) &&
+		c.Email != "" && tok == nil && !machineActor {
 		id, ok := writeTargetCanvasID(r.URL.Path)
 		if !ok {
 			http.Error(w, "bad request: invalid canvas id", http.StatusBadRequest)
@@ -497,6 +505,22 @@ func isCopyPath(method, path string) bool {
 		return false
 	}
 	return rest[slash+1:] == "copy"
+}
+
+// isCanvasDeletePath reports whether method+path addresses whole-canvas
+// deletion (DELETE /api/canvases/{id}) -- the discriminator serveWrite uses to
+// let a session that owns a canvas delete it. Only the EXACT canvas path
+// qualifies: DELETE /api/canvases/{id}/grants/{ref} is a grant mutation
+// (handled by its own branch) and anything deeper is a machine-plane write.
+func isCanvasDeletePath(method, path string) bool {
+	if method != http.MethodDelete {
+		return false
+	}
+	rest, ok := strings.CutPrefix(path, "/api/canvases/")
+	if !ok {
+		return false
+	}
+	return rest != "" && !strings.Contains(rest, "/")
 }
 
 // writeTargetCanvasID extracts the canvas id a write path mutates, covering the

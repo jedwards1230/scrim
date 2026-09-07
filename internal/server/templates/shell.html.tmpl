@@ -55,32 +55,17 @@
     border-radius: 0.5rem; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem;
   }
   :focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
-  .menu-wrap { position: relative; }
-  .menu {
-    position: absolute; right: 0; top: calc(100% + 0.35rem); z-index: 10;
-    min-width: 15rem; padding: 0.35rem;
-    border: 1px solid var(--border); border-radius: 0.6rem;
-    background: var(--card-bg);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  }
-  .menu[hidden] { display: none; }
-  .menu-owner { padding: 0.4rem 0.55rem 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; }
-  .menu-owner .who { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .menu-owner .when { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
-  .menu-item {
-    display: block; width: 100%; text-align: left;
-    border: 0; background: none; color: var(--fg);
-    border-radius: 0.4rem; padding: 0.4rem 0.55rem;
-    font: inherit; font-size: 0.85rem; cursor: pointer; text-decoration: none;
-  }
-  .menu-item:hover:not([disabled]) { background: var(--bg); }
-  .menu-item[disabled] { color: var(--muted); cursor: not-allowed; }
-  .menu-sep { height: 1px; background: var(--border); margin: 0.3rem 0; }
-  .versions { padding: 0.1rem 0.55rem 0.4rem; }
+  /* The popover chrome (.menu*, the account button) is shared with the gallery. */
+{{template "menu-css" .}}  .versions { padding: 0.1rem 0.55rem 0.4rem; }
   .versions ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
-  .versions li { font-size: 0.78rem; color: var(--muted); display: flex; justify-content: space-between; gap: 0.5rem; }
+  /* Version entries are text, not controls: no hover state and no pointer
+     cursor, because nothing serves a snapshot's content yet. */
+  .versions li { font-size: 0.78rem; color: var(--muted); display: flex; justify-content: space-between; gap: 0.5rem; cursor: default; }
   .versions li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .versions li .when { flex: 0 0 auto; }
   .menu-error { padding: 0.1rem 0.55rem 0.4rem; font-size: 0.78rem; color: #dc2626; }
+  .menu-note { padding: 0.1rem 0.55rem 0.4rem; font-size: 0.78rem; color: var(--muted); }
+  .menu-note a { color: inherit; }
   .frame { flex: 1 1 auto; width: 100%; border: 0; background: var(--card-bg); }
 {{if .OIDC}}{{template "share-css" .}}{{end}}
   @media (prefers-reduced-motion: reduce) {
@@ -95,26 +80,28 @@
     <h1 title="{{.Title}}">{{.Title}}</h1>
   </div>
   <div class="bar-actions">
-    {{if .OIDC}}{{if .Principal}}<span class="chip" title="{{.Principal}}">{{.Principal}}</span>{{end}}{{end}}
+    {{if .OIDC}}{{if .Account.Principal}}{{template "account-menu" .Account}}{{end}}{{end}}
     <button id="theme-toggle" class="btn" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
     <div class="menu-wrap">
-      <button id="menu-btn" class="btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="canvas-menu" aria-label="Canvas menu">&#8942;</button>
-      <div id="canvas-menu" class="menu" role="menu" aria-labelledby="menu-btn" hidden>
+      <button id="menu-btn" class="btn" type="button" data-menu aria-expanded="false" aria-controls="canvas-menu" aria-label="Canvas menu">&#8942;</button>
+      <div id="canvas-menu" class="menu" aria-labelledby="menu-btn" hidden>
         {{if .OIDC}}
-        <div class="menu-owner">
+        <div class="menu-head">
           <div class="who">{{if .Owned}}Artifact by you{{else}}Artifact by {{.OwnerLabel}}{{end}}</div>
           <div class="when">Updated {{.UpdatedAgo}}</div>
         </div>
         {{end}}
-        <button class="menu-item" type="button" role="menuitem" disabled aria-disabled="true" title="Not yet supported">Rename</button>
-        {{if .CanDuplicate}}<button id="menu-duplicate" class="menu-item" type="button" role="menuitem" data-duplicate="{{.ID}}">Duplicate</button>{{end}}
-        {{if .CanShare}}<button class="menu-item" type="button" role="menuitem" data-share="{{.ID}}" data-title="{{.Title}}">Share</button>{{end}}
-        <button id="menu-versions" class="menu-item" type="button" role="menuitem" aria-expanded="false" aria-controls="version-list">Version history</button>
+        <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Rename</button>
+        {{if .CanDuplicate}}<button id="menu-duplicate" class="menu-item" type="button" data-duplicate="{{.ID}}">Duplicate</button>{{end}}
+        {{if .CanShare}}<button class="menu-item" type="button" data-share="{{.ID}}" data-title="{{.Title}}">Share</button>{{end}}
+        <button id="menu-versions" class="menu-item" type="button" aria-expanded="false" aria-controls="version-list">Version history</button>
         <div id="version-list" class="versions" hidden></div>
-        <button id="menu-refresh" class="menu-item" type="button" role="menuitem">Refresh</button>
-        <button class="menu-item" type="button" role="menuitem" disabled aria-disabled="true" title="Not yet supported">Pin</button>
+        <button id="menu-refresh" class="menu-item" type="button">Refresh</button>
+        <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Pin</button>
         <div class="menu-sep"></div>
-        <a class="menu-item" role="menuitem" href="/">All artifacts</a>
+        <a class="menu-item" href="/">All artifacts</a>
+        {{if .CanDelete}}<button id="menu-delete" class="menu-item menu-item-danger" type="button" data-delete="{{.ID}}" data-title="{{.Title}}">Delete&hellip;</button>{{end}}
+        <div id="menu-note" class="menu-note" hidden></div>
         <div id="menu-error" class="menu-error" hidden></div>
       </div>
     </div>
@@ -124,10 +111,11 @@
 {{if .OIDC}}{{template "share-dialog" .}}{{end}}
 <script>
 {{template "theme-js" .}}
+{{template "menu-js" .}}
 (function () {
-  // The canvas menu (#126). A real <button> toggling a real element -- no
-  // div-with-onclick -- so it is keyboard-reachable, announces its state via
-  // aria-expanded, and closes on Escape or an outside click.
+  // The canvas menu (#126). Its open/close/Escape/outside-click behavior is
+  // the shared "menu-js" popover above, which the account menu uses too; this
+  // block is only the menu's own items.
   //
   // NOTE: this page deliberately carries NO live-reload EventSource. The
   // canvas itself is served in the iframe below by the ordinary canvas path,
@@ -135,48 +123,37 @@
   // double every viewer's SSE connections (inflating the gallery's viewer
   // count and the hub's per-canvas caps) and would blow away open menu state
   // on every agent write.
-  var btn = document.getElementById("menu-btn");
   var menu = document.getElementById("canvas-menu");
   var frame = document.getElementById("canvas-frame");
   var errEl = document.getElementById("menu-error");
+  var noteEl = document.getElementById("menu-note");
 
   function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
   function clearError() { errEl.textContent = ""; errEl.hidden = true; }
-
-  function setOpen(open) {
-    menu.hidden = !open;
-    btn.setAttribute("aria-expanded", open ? "true" : "false");
-  }
-  setOpen(false);
-
-  btn.addEventListener("click", function (e) {
-    e.stopPropagation();
-    setOpen(menu.hidden);
-  });
-  menu.addEventListener("click", function (e) { e.stopPropagation(); });
-  document.addEventListener("click", function () { setOpen(false); });
-  document.addEventListener("keydown", function (e) {
-    if (e.key !== "Escape" || menu.hidden) return;
-    setOpen(false);
-    btn.focus();
-  });
+  function clearNote() { noteEl.replaceChildren(); noteEl.hidden = true; }
+  function closeMenu() { if (menu.scrimClose) menu.scrimClose(); }
 
   // Refresh is purely client-side: re-load the iframe, no server round trip.
   document.getElementById("menu-refresh").addEventListener("click", function () {
     clearError();
+    clearNote();
     try {
       frame.contentWindow.location.reload();
     } catch (err) {
       // Defensive: re-assigning src reloads it too.
       frame.setAttribute("src", frame.getAttribute("src"));
     }
-    setOpen(false);
+    closeMenu();
   });
 
-  // Version history: names + relative timestamps only. Entries are NOT
-  // clickable -- nothing serves a snapshot's content yet, so a link would go
-  // nowhere. The listing endpoint is hub-only, hence the explicit
-  // "unavailable" branch for the local daemon.
+  // Version history: an ordinal ("Version 3"), the snapshot's label when it
+  // has one, and a relative age with the absolute timestamp on the entry's
+  // title (two snapshots taken the same afternoon both read "2h ago", so the
+  // hover is what tells them apart). Entries are NOT clickable and carry no
+  // hover/pointer affordance -- nothing serves a snapshot's content yet
+  // (jedwards1230/scrim#127), so anything that looked like a control would be
+  // a lie. The listing endpoint is hub-only, hence the explicit "unavailable"
+  // branch for the local daemon.
   var versionsBtn = document.getElementById("menu-versions");
   var versionsBox = document.getElementById("version-list");
   var versionsLoaded = false;
@@ -194,6 +171,14 @@
     return Math.round(hours / 24) + "d ago";
   }
 
+  function absolute(iso) {
+    var then = new Date(iso);
+    if (isNaN(then.getTime())) return "";
+    // Locale-formatted, in the viewer's own timezone: the point is telling two
+    // same-day versions apart, which needs a real date and clock time.
+    return then.toLocaleString();
+  }
+
   function renderVersions(entries) {
     versionsBox.replaceChildren();
     var list = document.createElement("ul");
@@ -202,14 +187,28 @@
       none.textContent = "No versions yet";
       list.appendChild(none);
     } else {
-      entries.forEach(function (e) {
+      entries.forEach(function (e, i) {
+        // The API returns newest-first, so the newest gets the highest
+        // ordinal: index 0 of N entries is "Version N".
+        var ordinal = "Version " + (entries.length - i);
         var li = document.createElement("li");
         var name = document.createElement("span");
         name.className = "name";
         // textContent, never innerHTML: a snapshot label is agent-supplied.
-        name.textContent = e.label ? e.label : e.name;
+        // The snapshot's on-disk directory name is deliberately never shown:
+        // it is a timestamped internal identifier, not something for a human.
+        name.textContent = e.label ? ordinal + " — " + e.label : ordinal;
+        var age = relative(e.timestamp);
         var when = document.createElement("span");
-        when.textContent = relative(e.timestamp);
+        when.className = "when";
+        when.textContent = age;
+        // The whole entry is one accessible string, so a screen reader
+        // announces the ordinal, the label and the age together rather than
+        // two unrelated fragments -- the old markup announced an empty list
+        // item.
+        var exact = absolute(e.timestamp);
+        li.setAttribute("aria-label", name.textContent + ", " + age + (exact ? " (" + exact + ")" : ""));
+        if (exact) li.title = exact;
         li.appendChild(name);
         li.appendChild(when);
         list.appendChild(li);
@@ -247,10 +246,15 @@
   // for a canvas it owns. "overwrite" is deliberately never sent -- a name
   // collision must come back as a 409 the viewer can react to, never a silent
   // clobber of somebody's canvas.
+  //
+  // On success the shell does NOT navigate: the viewer asked to copy this
+  // canvas, not to leave it. It names the copy and offers a link, so the id
+  // that was just created is visible either way.
   var dupBtn = document.getElementById("menu-duplicate");
   if (dupBtn) {
     dupBtn.addEventListener("click", function () {
       clearError();
+      clearNote();
       var suggested = CANVAS_ID + "-copy";
       var target = window.prompt("Duplicate as:", suggested);
       if (target === null) return;
@@ -265,7 +269,8 @@
       })
         .then(function (resp) {
           if (resp.ok) {
-            window.location.assign("/c/" + encodeURIComponent(target) + "/");
+            dupBtn.disabled = false;
+            showCopyMade(target);
             return;
           }
           if (resp.status === 409) throw new Error("A canvas named “" + target + "” already exists.");
@@ -274,6 +279,57 @@
         .catch(function (e) {
           dupBtn.disabled = false;
           showError(e.message || "Couldn't duplicate this canvas.");
+        });
+    });
+  }
+
+  // The duplicate confirmation: the new canvas's id as text plus a real link
+  // to it. Built with createElement/textContent -- the id is user-supplied, so
+  // it is never spliced into markup.
+  function showCopyMade(target) {
+    noteEl.replaceChildren();
+    noteEl.appendChild(document.createTextNode("Created "));
+    var link = document.createElement("a");
+    link.href = "/c/" + encodeURIComponent(target) + "/";
+    link.textContent = target;
+    noteEl.appendChild(link);
+    noteEl.appendChild(document.createTextNode(". "));
+    var open = document.createElement("a");
+    open.href = link.href;
+    open.textContent = "Open it";
+    noteEl.appendChild(open);
+    noteEl.appendChild(document.createTextNode("."));
+    noteEl.hidden = false;
+  }
+
+  // Delete: the one destructive item in the menu. It is rendered only for a
+  // viewer who may WRITE the canvas (the same gate as Duplicate -- see
+  // shellData.CanDelete), and it always confirms first, naming the canvas, so
+  // it can be hit neither by accident nor blind. On success there is nothing
+  // left to show here, so the shell leaves for the gallery.
+  var delBtn = document.getElementById("menu-delete");
+  if (delBtn) {
+    delBtn.addEventListener("click", function () {
+      clearError();
+      clearNote();
+      var name = delBtn.getAttribute("data-title") || CANVAS_ID;
+      if (!window.confirm("Delete “" + name + "”? This removes the canvas and its files for everyone. This can't be undone.")) return;
+      delBtn.disabled = true;
+      fetch("/api/canvases/" + encodeURIComponent(CANVAS_ID), {
+        method: "DELETE",
+        credentials: "same-origin"
+      })
+        .then(function (resp) {
+          if (resp.ok) {
+            window.location.assign("/");
+            return;
+          }
+          if (resp.status === 403) throw new Error("You don't have permission to delete this canvas.");
+          throw new Error("Couldn't delete this canvas (HTTP " + resp.status + ").");
+        })
+        .catch(function (e) {
+          delBtn.disabled = false;
+          showError(e.message || "Couldn't delete this canvas.");
         });
     });
   }

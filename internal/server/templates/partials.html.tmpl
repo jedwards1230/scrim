@@ -1,9 +1,11 @@
 {{- /*
 Shared page partials for the server-rendered HTML pages (index, tokens,
-canvas shell). Every define here is deliberately ACTION-FREE -- plain CSS,
-markup, or JS with no {{...}} in it -- so html/template's contextual escaper
-splices the same text into a <style>, a <script>, or the page body without
-anything to escape.
+canvas shell). Every define here is ACTION-FREE -- plain CSS, markup, or JS
+with no {{...}} in it -- so html/template's contextual escaper splices the same
+text into a <style>, a <script>, or the page body without anything to escape.
+The ONE exception is "account-menu", which interpolates the viewer's identity.
+It is invoked from page-body context only, on every page that uses it, and is
+passed its own accountData sub-context rather than the page's data.
 
 Wiring: each page template is parsed on top of a CLONE of this one (see
 templates.go), so a page picks a partial up simply by invoking it, and the
@@ -56,6 +58,100 @@ needs per-page data stays in the page template.
     else next = prefersDark ? "light" : "dark";
     root.setAttribute("data-theme", next);
     localStorage.setItem("scrim-theme", next);
+  });
+})();
+{{end}}
+
+{{define "menu-css"}}  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute; right: 0; top: calc(100% + 0.35rem); z-index: 10;
+    min-width: 15rem; padding: 0.35rem;
+    border: 1px solid var(--border); border-radius: 0.6rem;
+    background: var(--card-bg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+  .menu[hidden] { display: none; }
+  .menu-head { padding: 0.4rem 0.55rem 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; }
+  .menu-head .who { font-size: 0.85rem; overflow-wrap: anywhere; }
+  .menu-head .when { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; overflow-wrap: anywhere; }
+  .menu-item {
+    display: block; width: 100%; text-align: left;
+    border: 0; background: none; color: var(--fg);
+    border-radius: 0.4rem; padding: 0.4rem 0.55rem;
+    font: inherit; font-size: 0.85rem; cursor: pointer; text-decoration: none;
+  }
+  .menu-item:hover:not([disabled]) { background: var(--bg); }
+  .menu-item[disabled] { color: var(--muted); cursor: not-allowed; }
+  .menu-item-danger { color: #dc2626; }
+  .menu-sep { height: 1px; background: var(--border); margin: 0.3rem 0; }
+  .menu-form { margin: 0; }
+  /* The account menu's trigger is a real <button> wearing the chip's styling,
+     so it inherits the page font instead of the UA's button font. */
+  button.chip { font: inherit; font-size: 0.85rem; color: var(--fg); cursor: pointer; }
+  button.chip:hover { border-color: var(--muted); }
+{{end}}
+
+{{define "account-menu"}}<div class="menu-wrap">
+  <button id="account-btn" class="chip" type="button" data-menu aria-expanded="false" aria-controls="account-menu" title="{{.Principal}}">{{.Principal}}</button>
+  <div id="account-menu" class="menu" aria-labelledby="account-btn" hidden>
+    <div class="menu-head">
+      {{if .Name}}<div class="who">{{.Name}}</div>{{end}}
+      {{if .Email}}<div class="{{if .Name}}when{{else}}who{{end}}">{{.Email}}</div>{{end}}
+    </div>
+    <a class="menu-item" href="/tokens">Tokens</a>
+    <form class="menu-form" method="POST" action="/auth/logout"><button class="menu-item" type="submit">Log out</button></form>
+  </div>
+</div>
+{{end}}
+
+{{define "menu-js"}}(function () {
+  // Shared popover behavior for the header menus: the canvas shell's canvas
+  // menu and the account menu on every page. One implementation, so the two
+  // behave identically -- click toggles, an outside click closes, Escape
+  // closes and returns focus to the trigger.
+  //
+  // Deliberately NOT an ARIA menu: there is no role="menu"/"menuitem" here.
+  // That pattern promises Up/Down/Home/End roving-tabindex navigation, and
+  // announcing it without implementing it tells assistive tech one thing while
+  // behaving as another. These are plain popovers of buttons and links, which
+  // Tab already traverses correctly, so the markup says exactly that: a button
+  // with aria-expanded/aria-controls over ordinary controls.
+  var wired = [];
+
+  function closeAll() {
+    wired.forEach(function (m) { m.close(); });
+  }
+
+  document.querySelectorAll("[data-menu]").forEach(function (btn) {
+    var menu = document.getElementById(btn.getAttribute("aria-controls"));
+    if (!menu) return;
+    function setOpen(open) {
+      menu.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+    var entry = { btn: btn, menu: menu, close: function () { setOpen(false); } };
+    setOpen(false);
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var opening = menu.hidden;
+      closeAll();
+      setOpen(opening);
+    });
+    menu.addEventListener("click", function (e) { e.stopPropagation(); });
+    // Let a page close its own menu after acting on an item without
+    // re-deriving any of this.
+    menu.scrimClose = entry.close;
+    wired.push(entry);
+  });
+
+  document.addEventListener("click", closeAll);
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    wired.forEach(function (m) {
+      if (m.menu.hidden) return;
+      m.close();
+      m.btn.focus();
+    });
   });
 })();
 {{end}}

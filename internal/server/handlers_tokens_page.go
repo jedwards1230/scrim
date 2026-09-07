@@ -16,8 +16,10 @@ var tokensTemplate = mustPageTemplate("tokens", tokensTemplateSrc)
 // is fetched client-side (GET /api/tokens) so mint/revoke update in place
 // without a full reload -- the same fetch-driven pattern the gallery uses.
 type tokensPageData struct {
-	Version   string
-	Principal string // the viewer's display name (falls back to email), for the chip
+	Version string
+	// Account carries the header account menu (identity + Tokens / Log out),
+	// the same control the gallery and the canvas shell render.
+	Account accountData
 }
 
 // handleTokensPage serves GET /tokens (hub only): the server-rendered my-tokens
@@ -27,12 +29,7 @@ type tokensPageData struct {
 // endpoints (list/mint/revoke), showing a freshly minted raw secret exactly
 // once.
 func (s *Server) handleTokensPage(w http.ResponseWriter, r *http.Request) {
-	c := claimsFrom(r.Context())
-	principal := c.Name
-	if principal == "" {
-		principal = c.Email
-	}
-	data := tokensPageData{Version: version.Short(), Principal: principal}
+	data := tokensPageData{Version: version.Short(), Account: accountFrom(claimsFrom(r.Context()))}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tokensTemplate.Execute(w, data); err != nil {

@@ -26,7 +26,7 @@ var shellTemplate = mustPageTemplate("shell", shellTemplateSrc)
 const rawPathSegment = "__raw"
 
 // shellData is the canvas shell's render context. Everything identity-flavored
-// (the ownership line, the principal chip, Share, Duplicate) is populated only
+// (the ownership line, the account menu, Share, Duplicate, Delete) is populated only
 // under OIDC; with no OIDC those fields are zero and the template's {{if}}
 // guards render none of that chrome -- the same rule the gallery follows (see
 // handleIndex and handlers_index_identity_test.go).
@@ -43,8 +43,10 @@ type shellData struct {
 	FaviconURL string
 	Version    string
 
-	OIDC       bool
-	Principal  string
+	OIDC bool
+	// Account is the account menu's context: the viewer's identity plus the
+	// Tokens / Log out actions. Empty (and so unrendered) outside OIDC.
+	Account    accountData
 	Owned      bool
 	OwnerLabel string
 	// CanShare is the owner-or-admin decision reused verbatim from the
@@ -55,7 +57,11 @@ type shellData struct {
 	// canvas (see serveWrite), so offering Duplicate to a viewer who only has
 	// a view grant would render a button that can do nothing but 403.
 	CanDuplicate bool
-	UpdatedAgo   string
+	// CanDelete is the same write decision again: DELETE /api/canvases/{id}
+	// from a browser session is authorized against CanWrite on this canvas
+	// (see serveWrite), so a view-only viewer must not be offered it.
+	CanDelete  bool
+	UpdatedAgo string
 }
 
 // handleCanvasShell serves GET /c/{id}/ -- the canvas shell: a slim top bar
@@ -133,11 +139,7 @@ func (s *Server) handleCanvasShell(w http.ResponseWriter, r *http.Request) {
 	}
 	if data.OIDC {
 		c := claimsFrom(r.Context())
-		if c.Name != "" {
-			data.Principal = c.Name
-		} else {
-			data.Principal = c.Email
-		}
+		data.Account = accountFrom(c)
 		// Reuse the gallery's owner/share decision rather than restating it, so
 		// the two surfaces can't drift on who owns what.
 		var ic indexCanvas
@@ -145,6 +147,7 @@ func (s *Server) handleCanvasShell(w http.ResponseWriter, r *http.Request) {
 		data.Owned = ic.Owned
 		data.CanShare = ic.CanShare
 		data.CanDuplicate = ic.CanShare
+		data.CanDelete = ic.CanShare
 		data.OwnerLabel = ic.OwnerLabel
 		if data.OwnerLabel == "" && !ic.Owned {
 			data.OwnerLabel = ownerOrAdmin(info.Owner)
