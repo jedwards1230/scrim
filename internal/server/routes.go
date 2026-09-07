@@ -26,6 +26,29 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /c/{id}", s.handleCanvasRedirect)
 	mux.HandleFunc("GET /c/{id}/__events", s.handleSSE)
 	mux.HandleFunc("GET /c/{id}/favicon.ico", s.handleCanvasFavicon)
+
+	// The canvas shell (#126) and the raw canvas beneath it. Exactly the canvas
+	// ROOT ("/c/{id}/", the {$} exact-match pattern) renders scrim's own chrome
+	// -- title bar + menu -- around an iframe pointing at "/c/{id}/__raw/";
+	// every deeper path still serves the canvas's files directly, unchanged.
+	//
+	// Both patterns are more specific than the "/c/{id}/{rest...}" wildcard
+	// below, so ServeMux picks them without any registration-order dependency,
+	// and neither collides with the exact "/c/{$}" gallery redirect above.
+	//
+	// __raw stays UNDER /c/ deliberately: the hub gate derives a canvas id from
+	// the first segment after /c/ (canvasIDFromURLPath), so an iframe request is
+	// visibility-checked against that canvas exactly like the shell request was.
+	// A raw route mounted anywhere else would degrade to a general authenticated
+	// read and leak private canvases.
+	//
+	// Known wrinkle: a canvas shipping a file literally named "__raw" at its
+	// root becomes unreachable, since "/c/{id}/__raw/..." is claimed here.
+	// Harmless in practice (nothing scrim creates is named that), recorded so a
+	// future reader isn't surprised by it.
+	mux.HandleFunc("GET /c/{id}/{$}", s.handleCanvasShell)
+	mux.HandleFunc("GET /c/{id}/"+rawPathSegment+"/{rest...}", s.handleCanvas)
+
 	mux.HandleFunc("GET /c/{id}/{rest...}", s.handleCanvas)
 
 	mux.HandleFunc("GET /api/status", s.handleAPIStatus)

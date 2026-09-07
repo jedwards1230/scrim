@@ -33,6 +33,16 @@ canvas's on-disk directory and its URL. Write a plain `index.html` (or
 open browser tab over SSE, so you never re-run anything to see the next version.
 `scrim link` reprints the URL any time.
 
+**What that URL serves.** The canvas URL (`/c/<id>/`) is scrim's own *canvas
+shell*: a slim bar with the canvas's title and a menu (version history, refresh,
+duplicate/share where identity is configured, back to the gallery), wrapping the
+canvas itself in an iframe. The canvas is served unchanged at
+`/c/<id>/__raw/` — same skeleton wrapping, markdown rendering, and live-reload
+injection as ever — and any deeper path (`/c/<id>/report.pdf`,
+`/c/<id>/page2.html`) still serves the file directly, with no chrome. Only the
+framed canvas holds a live-reload connection; the shell deliberately holds none,
+so a viewer never opens two.
+
 **The URL carries a `?t=<token>` capability token** — that's expected. Every
 daemon mints a random token at startup and every printed URL includes it; the
 first request with a valid token sets a cookie and is redirected to the same URL

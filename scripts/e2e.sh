@@ -209,6 +209,25 @@ with_events_path() {
   fi
 }
 
+# with_raw_path rewrites a canvas URL (which may carry a "?t=..." query) into
+# the URL of the canvas's own content, which since the canvas shell (#126)
+# lives under "__raw/" -- the canvas root itself serves scrim's chrome around
+# an iframe pointing there. Preserves the query string, like with_events_path.
+with_raw_path() {
+  local url="$1" base query
+  base="$(strip_query "$url")"
+  case "$url" in
+    *'?'*) query="${url#*\?}" ;;
+    *) query="" ;;
+  esac
+  base="${base%/}/__raw/"
+  if [ -n "$query" ]; then
+    echo "${base}?${query}"
+  else
+    echo "$base"
+  fi
+}
+
 # with_status_path rewrites a canvas URL (which may carry a "?t=..." query)
 # into that daemon's /api/status URL, preserving the query string so the
 # same token authenticates the status call.
@@ -282,7 +301,26 @@ echo '<html><body><h1>Hello E2E</h1></body></html>' >"$CANVAS_DIR/index.html"
 # rather than expecting the first hop itself to return content. This is
 # also the first half of the "valid token succeeds" auth assertion.
 JAR1="$WORKDIR/jar1.txt"
-BODY=$(curl -fsS -L -b "$JAR1" -c "$JAR1" "$CANVAS_URL" || true)
+SHELL_BODY=$(curl -fsS -L -b "$JAR1" -c "$JAR1" "$CANVAS_URL" || true)
+
+# The canvas ROOT now serves the shell (#126): scrim's own chrome around an
+# iframe pointing at the canvas. It must carry NO reload script of its own --
+# a second EventSource per viewer would double every SSE connection.
+if echo "$SHELL_BODY" | grep -q 'id="menu-btn"' && echo "$SHELL_BODY" | grep -q '/__raw/'; then
+  ok "canvas root serves the shell (menu + iframe pointing at __raw/)"
+else
+  bad "canvas root serves the shell (menu + iframe pointing at __raw/)"
+fi
+if echo "$SHELL_BODY" | grep -q "__events"; then
+  bad "shell must not carry a live-reload script (found __events)"
+else
+  ok "shell carries no live-reload script"
+fi
+
+# The canvas's own content, with the reload script, is served under __raw/.
+# The cookie set by the redirect above authenticates it, like a browser's.
+RAW_URL="$(with_raw_path "$CANVAS_URL")"
+BODY=$(curl -fsS -b "$JAR1" "$(strip_query "$RAW_URL")" || true)
 if echo "$BODY" | grep -q "Hello E2E"; then
   ok "served HTML contains original content"
 else
@@ -925,7 +963,14 @@ printf '# Hello Markdown\n\nSome *body* text.\n' >"$CANVAS_DIR11/index.md"
 # it (-L), picking up and resending the cookie it sets along the way
 # (-b/-c a jar), just like a real browser would.
 JAR11="$WORKDIR/jar11.txt"
-BODY11=$(curl -fsS -L -b "$JAR11" -c "$JAR11" "$CANVAS_URL11" || true)
+SHELL11=$(curl -fsS -L -b "$JAR11" -c "$JAR11" "$CANVAS_URL11" || true)
+if echo "$SHELL11" | grep -q 'id="menu-btn"'; then
+  ok "index.md scenario: the canvas root serves the shell"
+else
+  bad "index.md scenario: the canvas root serves the shell"
+fi
+# Content assertions moved to __raw/, where the canvas itself is now served.
+BODY11=$(curl -fsS -b "$JAR11" "$(strip_query "$(with_raw_path "$CANVAS_URL11")")" || true)
 if echo "$BODY11" | grep -q "<h1>Hello Markdown</h1>"; then
   ok "index.md scenario: response contains goldmark-rendered heading"
 else
@@ -983,8 +1028,10 @@ CANVAS_DIR12=$(echo "$OUT12" | sed -n '1p')
 CANVAS_URL12=$(echo "$OUT12" | sed -n '2p')
 printf '<h1>Just a fragment</h1>\n<p>no doctype or html tag here</p>\n' >"$CANVAS_DIR12/index.html"
 
-# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15.
-BODY12=$(curl -fsS -L -b "$WORKDIR/jar12.txt" -c "$WORKDIR/jar12.txt" "$CANVAS_URL12" || true)
+# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15,
+# then read the canvas itself from __raw/ (the root is the shell now).
+curl -fsS -L -b "$WORKDIR/jar12.txt" -c "$WORKDIR/jar12.txt" "$CANVAS_URL12" >/dev/null 2>&1 || true
+BODY12=$(curl -fsS -b "$WORKDIR/jar12.txt" "$(strip_query "$(with_raw_path "$CANVAS_URL12")")" || true)
 if echo "$BODY12" | grep -q "Just a fragment"; then
   ok "fragment scenario: response contains the fragment's original content"
 else
@@ -1006,8 +1053,12 @@ CANVAS_DIR13=$(echo "$OUT13" | sed -n '1p')
 CANVAS_URL13=$(echo "$OUT13" | sed -n '2p')
 printf '<!doctype html>\n<html><head><title>e2e complete</title></head><body><h1>Complete Doc</h1></body></html>\n' >"$CANVAS_DIR13/index.html"
 
-# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15.
-BODY13=$(curl -fsS -L -b "$WORKDIR/jar13.txt" -c "$WORKDIR/jar13.txt" "$CANVAS_URL13" || true)
+# Follow the token-stripping redirect (-L) with a jar, same as Scenario 15,
+# then assert against __raw/: the "a complete document is NOT skeleton-wrapped"
+# invariant lives with the canvas content, which the shell frames rather than
+# rewrites.
+curl -fsS -L -b "$WORKDIR/jar13.txt" -c "$WORKDIR/jar13.txt" "$CANVAS_URL13" >/dev/null 2>&1 || true
+BODY13=$(curl -fsS -b "$WORKDIR/jar13.txt" "$(strip_query "$(with_raw_path "$CANVAS_URL13")")" || true)
 if echo "$BODY13" | grep -q "<title>e2e complete</title>" && echo "$BODY13" | grep -q "<h1>Complete Doc</h1>"; then
   ok "complete-document scenario: original document content is present verbatim"
 else
@@ -1181,7 +1232,10 @@ run_privacy_scenario() {
   # 1. A successful request: follow the token-stripping redirect (-L),
   # picking up and resending the cookie it sets along the way (-b/-c), just
   # like a real browser would.
-  body=$(curl -fsS -L -b "$jar" -c "$jar" "$canvas_url" || true)
+  curl -fsS -L -b "$jar" -c "$jar" "$canvas_url" >/dev/null 2>&1 || true
+  # The content itself lives under __raw/ since the shell (#126); the cookie
+  # picked up above authenticates it.
+  body=$(curl -fsS -b "$jar" "$(strip_query "$(with_raw_path "$canvas_url")")" || true)
   if echo "$body" | grep -q "privacy e2e content"; then
     ok "privacy run $n: successful canvas request serves real content"
   else
@@ -1284,7 +1338,14 @@ else
   bad "hub scenario: push reports the hub canvas URL (got: $PUSH_OUT)"
 fi
 
-HUB_BODY=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/c/hub-push-test/" || true)
+HUB_SHELL=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/c/hub-push-test/" || true)
+if echo "$HUB_SHELL" | grep -q 'id="menu-btn"'; then
+  ok "hub scenario: hub serves the canvas shell at the canvas root"
+else
+  bad "hub scenario: hub serves the canvas shell at the canvas root"
+fi
+# The pushed canvas itself is under __raw/ (#126).
+HUB_BODY=$(curl -fsS "http://127.0.0.1:$HUB1_PORT/c/hub-push-test/__raw/" || true)
 if echo "$HUB_BODY" | grep -q "hub e2e content"; then
   ok "hub scenario: hub serves the pushed canvas HTML"
 else

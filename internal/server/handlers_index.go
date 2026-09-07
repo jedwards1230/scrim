@@ -3,7 +3,6 @@ package server
 import (
 	_ "embed"
 	"fmt"
-	"html/template"
 	"net/http"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 //go:embed templates/index.html.tmpl
 var indexTemplateSrc string
 
-var indexTemplate = template.Must(template.New("index").Parse(indexTemplateSrc))
+var indexTemplate = mustPageTemplate("index", indexTemplateSrc)
 
 type indexCanvas struct {
 	ID          string

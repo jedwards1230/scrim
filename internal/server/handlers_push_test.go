@@ -276,14 +276,16 @@ func TestHubPushRoutePresentAndGated(t *testing.T) {
 
 	// Now a read (GET) from an allowed CIDR (loopback, the httptest server
 	// always connects from 127.0.0.1) should serve the pushed content.
-	getResp, err := http.Get(ts.URL + "/c/report/")
+	// Canvas content lives under __raw/ since the shell (#126); the shell at
+	// the canvas root wraps this same content in chrome.
+	getResp, err := http.Get(ts.URL + "/c/report/__raw/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = getResp.Body.Close() }()
 	getBody := readBody(t, getResp)
 	if !strings.Contains(getBody, "hello hub") {
-		t.Errorf("GET /c/report/ body = %q, want it to contain the pushed content", getBody)
+		t.Errorf("GET /c/report/__raw/ body = %q, want it to contain the pushed content", getBody)
 	}
 }
 

@@ -537,7 +537,9 @@ paths:
         duplicated verbatim onto the copy, so every field it records comes across — authored
         title/description/icon, and the recorded `owner` and `grants` along with them (a derived
         default icon stays derived from the target's own id). A source exceeding the copy size or
-        file-count limit is `413`.
+        file-count limit is `413`. Besides the bearer credentials every machine-API write takes,
+        this endpoint also accepts a browser session that may write the SOURCE canvas — that is
+        what the canvas shell's Duplicate menu item uses; it never sends `overwrite`.
       parameters:
         - $ref: '#/components/parameters/CanvasId'
       requestBody:

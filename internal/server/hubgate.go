@@ -45,7 +45,8 @@ const bearerPrefix = "Bearer "
 // one carries varies: claim is open to ANY authenticated caller (session, user
 // token, or forwarded actor) and skips the ownership check, which the claim
 // handler enforces itself; /api/tokens* is session-only (a user token or the
-// machine plane gets 403); grant mutation needs a session that OWNS the canvas;
+// machine plane gets 403); grant mutation and canvas duplication both need a
+// session that OWNS the canvas;
 // and every other write needs a bearer, bounded by userTokenMayWrite.
 //
 // OIDC vs CIDR is deliberately exclusive, not layered: when OIDC is on it is
@@ -267,8 +268,10 @@ func (s *Server) observeCFActor(c identity.Claims) {
 
 // serveWrite authorizes a write (a non-GET/HEAD request) for a non-admin caller
 // (admin is served earlier). The token-management endpoints are open to any
-// session (a logged-in principal mints/revokes its own tokens); every other
-// write requires a user bearer token whose owner may write the target canvas.
+// session (a logged-in principal mints/revokes its own tokens); a session that
+// OWNS a canvas may additionally mutate its grants and duplicate it; every
+// other write requires a user bearer token whose owner may write the target
+// canvas.
 func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Handler, c identity.Claims, tok *usertoken.Token) {
 	// A gateway-forwarded actor rides the admin push token (the machine plane)
 	// but acts AS the actor (Admin:false, no user token). It is distinguished
@@ -332,6 +335,39 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// which is correct. The admin (served earlier), user-token, and
 	// forwarded-actor grant paths are handled above and stay unchanged.
 	if isGrantMutationPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
+		id, ok := writeTargetCanvasID(r.URL.Path)
+		if !ok {
+			http.Error(w, "bad request: invalid canvas id", http.StatusBadRequest)
+			return
+		}
+		owner, _, err := canvas.GetOwnerGrants(s.metaDir, id)
+		if err != nil {
+			http.Error(w, "forbidden: cannot determine canvas ownership", http.StatusForbidden)
+			return
+		}
+		if !identity.CanWrite(ownerOrAdmin(owner), c) {
+			// 403, not 404: the caller is a logged-in principal that named the id,
+			// so "not yours" leaks nothing it doesn't already know.
+			http.Error(w, "forbidden: you do not own this canvas", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Canvas duplication by a browser session (#126). Modelled exactly on the
+	// grant-mutation branch above, and CSRF-safe for the same reason: the
+	// session cookie is HttpOnly + SameSite=Lax, so no cross-site POST can
+	// carry it. A session that may WRITE the SOURCE canvas may copy it -- the
+	// shell's Duplicate menu item is the only caller.
+	//
+	// This checks the SOURCE (the id in the path) and nothing else. The copy's
+	// TARGET comes from the JSON body and is authorized by neither auth plane
+	// -- a pre-existing hole userTokenMayWrite has too (it derives its id from
+	// the path as well), tracked in jedwards1230/scrim#135. This branch does
+	// not widen it: any logged-in principal can already mint a user token and
+	// take the existing path, and the shell never sends "overwrite".
+	if isCopyPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
 		id, ok := writeTargetCanvasID(r.URL.Path)
 		if !ok {
 			http.Error(w, "bad request: invalid canvas id", http.StatusBadRequest)
@@ -442,6 +478,25 @@ func isGrantMutationPath(method, path string) bool {
 	default:
 		return false
 	}
+}
+
+// isCopyPath reports whether method+path addresses the canvas-duplication
+// endpoint (POST /api/canvases/{id}/copy) -- the discriminator serveWrite uses
+// to route a session write to the source-ownership branch. Every other
+// verb/shape falls through to the machine-plane rules unchanged.
+func isCopyPath(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	rest, ok := strings.CutPrefix(path, "/api/canvases/")
+	if !ok {
+		return false
+	}
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return false
+	}
+	return rest[slash+1:] == "copy"
 }
 
 // writeTargetCanvasID extracts the canvas id a write path mutates, covering the

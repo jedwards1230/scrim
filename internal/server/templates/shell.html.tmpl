@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} &mdash; scrim</title>
+<link rel="icon" href="{{.FaviconURL}}">
+<style>
+{{template "theme-css" .}}
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-bg);
+    flex: 0 0 auto;
+  }
+  .bar-title { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+  .icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; border-radius: 0.4rem;
+    font-size: 1rem; flex: 0 0 auto;
+  }
+  .bar-title h1 {
+    font-size: 0.95rem; font-weight: 600; margin: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bar-actions { display: flex; align-items: center; gap: 0.4rem; flex: 0 0 auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    border: 1px solid var(--border); background: var(--bg);
+    border-radius: 999px; padding: 0.25rem 0.6rem; font-size: 0.8rem;
+    max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .btn {
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+    border-radius: 0.5rem; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.85rem;
+    text-decoration: none; display: inline-block;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .card-btn { /* revoke buttons inside the share dialog */
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+    border-radius: 0.5rem; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem;
+  }
+  :focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute; right: 0; top: calc(100% + 0.35rem); z-index: 10;
+    min-width: 15rem; padding: 0.35rem;
+    border: 1px solid var(--border); border-radius: 0.6rem;
+    background: var(--card-bg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+  .menu[hidden] { display: none; }
+  .menu-owner { padding: 0.4rem 0.55rem 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; }
+  .menu-owner .who { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-owner .when { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
+  .menu-item {
+    display: block; width: 100%; text-align: left;
+    border: 0; background: none; color: var(--fg);
+    border-radius: 0.4rem; padding: 0.4rem 0.55rem;
+    font: inherit; font-size: 0.85rem; cursor: pointer; text-decoration: none;
+  }
+  .menu-item:hover:not([disabled]) { background: var(--bg); }
+  .menu-item[disabled] { color: var(--muted); cursor: not-allowed; }
+  .menu-sep { height: 1px; background: var(--border); margin: 0.3rem 0; }
+  .versions { padding: 0.1rem 0.55rem 0.4rem; }
+  .versions ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .versions li { font-size: 0.78rem; color: var(--muted); display: flex; justify-content: space-between; gap: 0.5rem; }
+  .versions li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-error { padding: 0.1rem 0.55rem 0.4rem; font-size: 0.78rem; color: #dc2626; }
+  .frame { flex: 1 1 auto; width: 100%; border: 0; background: var(--card-bg); }
+{{if .OIDC}}{{template "share-css" .}}{{end}}
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body data-canvas-id="{{.ID}}">
+<header class="bar">
+  <div class="bar-title">
+    <span class="icon" style="background:{{.Color}}22;">{{.Icon}}</span>
+    <h1 title="{{.Title}}">{{.Title}}</h1>
+  </div>
+  <div class="bar-actions">
+    {{if .OIDC}}{{if .Principal}}<span class="chip" title="{{.Principal}}">{{.Principal}}</span>{{end}}{{end}}
+    <button id="theme-toggle" class="btn" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
+    <div class="menu-wrap">
+      <button id="menu-btn" class="btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="canvas-menu" aria-label="Canvas menu">&#8942;</button>
+      <div id="canvas-menu" class="menu" role="menu" aria-labelledby="menu-btn" hidden>
+        {{if .OIDC}}
+        <div class="menu-owner">
+          <div class="who">{{if .Owned}}Artifact by you{{else}}Artifact by {{.OwnerLabel}}{{end}}</div>
+          <div class="when">Updated {{.UpdatedAgo}}</div>
+        </div>
+        {{end}}
+        <button class="menu-item" type="button" role="menuitem" disabled aria-disabled="true" title="Not yet supported">Rename</button>
+        {{if .CanDuplicate}}<button id="menu-duplicate" class="menu-item" type="button" role="menuitem" data-duplicate="{{.ID}}">Duplicate</button>{{end}}
+        {{if .CanShare}}<button class="menu-item" type="button" role="menuitem" data-share="{{.ID}}" data-title="{{.Title}}">Share</button>{{end}}
+        <button id="menu-versions" class="menu-item" type="button" role="menuitem" aria-expanded="false" aria-controls="version-list">Version history</button>
+        <div id="version-list" class="versions" hidden></div>
+        <button id="menu-refresh" class="menu-item" type="button" role="menuitem">Refresh</button>
+        <button class="menu-item" type="button" role="menuitem" disabled aria-disabled="true" title="Not yet supported">Pin</button>
+        <div class="menu-sep"></div>
+        <a class="menu-item" role="menuitem" href="/">All artifacts</a>
+        <div id="menu-error" class="menu-error" hidden></div>
+      </div>
+    </div>
+  </div>
+</header>
+<iframe id="canvas-frame" class="frame" src="{{.RawURL}}" title="{{.Title}}"></iframe>
+{{if .OIDC}}{{template "share-dialog" .}}{{end}}
+<script>
+{{template "theme-js" .}}
+(function () {
+  // The canvas menu (#126). A real <button> toggling a real element -- no
+  // div-with-onclick -- so it is keyboard-reachable, announces its state via
+  // aria-expanded, and closes on Escape or an outside click.
+  //
+  // NOTE: this page deliberately carries NO live-reload EventSource. The
+  // canvas itself is served in the iframe below by the ordinary canvas path,
+  // which injects the reload script there; a second EventSource here would
+  // double every viewer's SSE connections (inflating the gallery's viewer
+  // count and the hub's per-canvas caps) and would blow away open menu state
+  // on every agent write.
+  var btn = document.getElementById("menu-btn");
+  var menu = document.getElementById("canvas-menu");
+  var frame = document.getElementById("canvas-frame");
+  var errEl = document.getElementById("menu-error");
+
+  function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+  function clearError() { errEl.textContent = ""; errEl.hidden = true; }
+
+  function setOpen(open) {
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  setOpen(false);
+
+  btn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    setOpen(menu.hidden);
+  });
+  menu.addEventListener("click", function (e) { e.stopPropagation(); });
+  document.addEventListener("click", function () { setOpen(false); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape" || menu.hidden) return;
+    setOpen(false);
+    btn.focus();
+  });
+
+  // Refresh is purely client-side: re-load the iframe, no server round trip.
+  document.getElementById("menu-refresh").addEventListener("click", function () {
+    clearError();
+    try {
+      frame.contentWindow.location.reload();
+    } catch (err) {
+      // Defensive: re-assigning src reloads it too.
+      frame.setAttribute("src", frame.getAttribute("src"));
+    }
+    setOpen(false);
+  });
+
+  // Version history: names + relative timestamps only. Entries are NOT
+  // clickable -- nothing serves a snapshot's content yet, so a link would go
+  // nowhere. The listing endpoint is hub-only, hence the explicit
+  // "unavailable" branch for the local daemon.
+  var versionsBtn = document.getElementById("menu-versions");
+  var versionsBox = document.getElementById("version-list");
+  var versionsLoaded = false;
+  var CANVAS_ID = document.body.getAttribute("data-canvas-id") || "";
+
+  function relative(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return "";
+    var secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (secs < 60) return "just now";
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return mins + "m ago";
+    var hours = Math.round(mins / 60);
+    if (hours < 24) return hours + "h ago";
+    return Math.round(hours / 24) + "d ago";
+  }
+
+  function renderVersions(entries) {
+    versionsBox.replaceChildren();
+    var list = document.createElement("ul");
+    if (!entries || entries.length === 0) {
+      var none = document.createElement("li");
+      none.textContent = "No versions yet";
+      list.appendChild(none);
+    } else {
+      entries.forEach(function (e) {
+        var li = document.createElement("li");
+        var name = document.createElement("span");
+        name.className = "name";
+        // textContent, never innerHTML: a snapshot label is agent-supplied.
+        name.textContent = e.label ? e.label : e.name;
+        var when = document.createElement("span");
+        when.textContent = relative(e.timestamp);
+        li.appendChild(name);
+        li.appendChild(when);
+        list.appendChild(li);
+      });
+    }
+    versionsBox.appendChild(list);
+  }
+
+  function loadVersions() {
+    fetch("/api/canvases/" + encodeURIComponent(CANVAS_ID) + "/snapshots", { credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok) return Promise.reject(new Error("HTTP " + resp.status));
+        return resp.json();
+      })
+      .then(function (entries) {
+        versionsLoaded = true;
+        renderVersions(entries);
+      })
+      .catch(function () {
+        versionsBox.replaceChildren();
+        var p = document.createElement("p");
+        p.textContent = "Version history isn't available on this server.";
+        versionsBox.appendChild(p);
+      });
+  }
+
+  versionsBtn.addEventListener("click", function () {
+    var open = versionsBox.hidden;
+    versionsBox.hidden = !open;
+    versionsBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open && !versionsLoaded) loadVersions();
+  });
+
+  // Duplicate: POST /api/canvases/{id}/copy, which a browser session may do
+  // for a canvas it owns. "overwrite" is deliberately never sent -- a name
+  // collision must come back as a 409 the viewer can react to, never a silent
+  // clobber of somebody's canvas.
+  var dupBtn = document.getElementById("menu-duplicate");
+  if (dupBtn) {
+    dupBtn.addEventListener("click", function () {
+      clearError();
+      var suggested = CANVAS_ID + "-copy";
+      var target = window.prompt("Duplicate as:", suggested);
+      if (target === null) return;
+      target = target.trim();
+      if (target === "") return;
+      dupBtn.disabled = true;
+      fetch("/api/canvases/" + encodeURIComponent(CANVAS_ID) + "/copy", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: target })
+      })
+        .then(function (resp) {
+          if (resp.ok) {
+            window.location.assign("/c/" + encodeURIComponent(target) + "/");
+            return;
+          }
+          if (resp.status === 409) throw new Error("A canvas named “" + target + "” already exists.");
+          throw new Error("Couldn't duplicate this canvas (HTTP " + resp.status + ").");
+        })
+        .catch(function (e) {
+          dupBtn.disabled = false;
+          showError(e.message || "Couldn't duplicate this canvas.");
+        });
+    });
+  }
+})();
+{{if .OIDC}}
+{{template "share-js" .}}
+{{end}}
+</script>
+</body>
+</html>

@@ -4,30 +4,7 @@
 <meta charset="utf-8">
 <title>scrim &mdash; tokens</title>
 <style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f7f8;
-    --fg: #1a1a1a;
-    --muted: #666;
-    --card-bg: #ffffff;
-    --border: #e2e2e2;
-  }
-  :root[data-theme="dark"] {
-    --bg: #16171a;
-    --fg: #e8e8e8;
-    --muted: #9a9a9a;
-    --card-bg: #212226;
-    --border: #33343a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #16171a;
-      --fg: #e8e8e8;
-      --muted: #9a9a9a;
-      --card-bg: #212226;
-      --border: #33343a;
-    }
-  }
+{{template "theme-css" .}}
   * { box-sizing: border-box; }
   body {
     font-family: system-ui, sans-serif;
@@ -124,24 +101,7 @@
 </main>
 <footer>scrim {{.Version}}</footer>
 <script>
-(function () {
-  // Shared dashboard-chrome light/dark toggle (see index page).
-  var toggle = document.getElementById("theme-toggle");
-  var root = document.documentElement;
-  var stored = localStorage.getItem("scrim-theme");
-  if (stored) root.setAttribute("data-theme", stored);
-  toggle.addEventListener("click", function () {
-    var current = root.getAttribute("data-theme");
-    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-    var next;
-    if (current === "dark") next = "light";
-    else if (current === "light") next = "dark";
-    else next = prefersDark ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    localStorage.setItem("scrim-theme", next);
-  });
-})();
-
+{{template "theme-js" .}}
 (function () {
   // My-tokens management (#53): list, mint, revoke via the /api/tokens JSON
   // endpoints. Every principal-supplied value (name, owner email, allowance
