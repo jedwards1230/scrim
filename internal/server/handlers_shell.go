@@ -162,6 +162,11 @@ func (s *Server) handleCanvasShell(w http.ResponseWriter, r *http.Request) {
 // line. Deliberately coarse: the shell carries no live reload, so a precise
 // figure would only go stale on the page.
 func relativeAge(d time.Duration) string {
+	// A canvas mtime in the future (clock skew, a restored archive, a file
+	// written with an explicit timestamp) would otherwise render "-1d ago".
+	if d < 0 {
+		d = 0
+	}
 	switch {
 	case d < time.Minute:
 		return "just now"

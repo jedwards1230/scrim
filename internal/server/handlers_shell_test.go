@@ -1,8 +1,10 @@
 package server
 
 import (
+	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,6 +275,115 @@ func TestCanvasShellRawPathIsPerCanvasGated(t *testing.T) {
 	}
 }
 
+// TestCanvasShellEscapesTitle proves a hostile canvas title cannot break out of
+// the three attribute/text contexts the shell puts it in. html/template's
+// contextual escaper is what makes that true; this pins it, since canvas.Create
+// accepts an arbitrary title string and a canvas is agent-authored.
+func TestCanvasShellEscapesTitle(t *testing.T) {
+	s, ts := newTestServer(t)
+	const evil = `" onload="alert(1)`
+	if _, err := canvas.Create(s.canvasesDir, s.metaDir, "evil", evil, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	writeCanvas(t, s, "evil", "<html><body>x</body></html>")
+
+	resp, err := http.Get(ts.URL + "/c/evil/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, `onload="alert(1)`) {
+		t.Errorf("a quote-bearing title escaped its attribute context:\n%s", body)
+	}
+	if !strings.Contains(body, "&#34; onload=&#34;alert(1)") {
+		t.Errorf("the title is not rendered in its escaped form:\n%s", body)
+	}
+}
+
+// TestCanvasShellForwardsLinkSecretToTheFrame proves a link-grant viewer's
+// iframe actually resolves: the shell request authenticated with ?k=<secret>,
+// and the framed request is gated per-canvas the same way, so the secret has to
+// ride along -- exactly once, not double-encoded.
+func TestCanvasShellForwardsLinkSecretToTheFrame(t *testing.T) {
+	s, _, _ := newOIDCHub(t)
+	ownedCanvas(t, s, "linked", "alice@example.com")
+
+	// A secret with characters that must be percent-encoded in a query string,
+	// so a missing or doubled encoding both show up.
+	const secret = "abc+def/ghi=" //nolint:gosec // a test fixture, not a credential
+	if err := canvas.AddGrant(s.metaDir, "linked", canvas.Grant{
+		Kind:           canvas.GrantLink,
+		LinkID:         "l1",
+		LinkSecretHash: canvas.HashLinkSecret(secret),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/c/linked/?k="+url.QueryEscape(secret), nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("link-grant GET /c/linked/ = %d, want 200", rec.Code)
+	}
+
+	// Pull the iframe src back out of the rendered page and request it: if the
+	// secret were dropped or double-encoded, the gate would 302/404 this.
+	body := rec.Body.String()
+	const marker = `<iframe id="canvas-frame" class="frame" src="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("no iframe in the shell:\n%s", body)
+	}
+	rest := body[i+len(marker):]
+	rawSrc := html.UnescapeString(rest[:strings.IndexByte(rest, '"')])
+
+	frameReq := httptest.NewRequest(http.MethodGet, rawSrc, nil)
+	frameReq.Header.Set("Accept", "text/html")
+	frameRec := httptest.NewRecorder()
+	s.routes().ServeHTTP(frameRec, frameReq)
+	if frameRec.Code != http.StatusOK {
+		t.Fatalf("framed GET %s = %d, want 200 (the link secret must reach the frame)", rawSrc, frameRec.Code)
+	}
+}
+
+// TestCanvasRawServesNestedPaths pins the route-precedence claim: a literal
+// __raw segment beats the /c/{id}/{rest...} wildcard for nested paths too, and
+// a traversal attempt out of __raw is still refused.
+func TestCanvasRawServesNestedPaths(t *testing.T) {
+	s, ts := newTestServer(t)
+	writeCanvas(t, s, "nested", "<html><body>root</body></html>")
+	if err := os.MkdirAll(filepath.Join(s.canvasesDir, "nested", "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.canvasesDir, "nested", "assets", "app.js"),
+		[]byte("console.log('hi')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/c/nested/__raw/assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if body := readBody(t, resp); body != "console.log('hi')" {
+		t.Errorf("nested __raw asset body = %q, want the file's content", body)
+	}
+
+	// Traversal out of the canvas root is refused on the __raw route exactly as
+	// it is on the plain one (resolveServablePath is the same guard).
+	esc, err := http.Get(ts.URL + "/c/nested/__raw/..%2f..%2f..%2fetc%2fpasswd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = esc.Body.Close()
+	if esc.StatusCode != http.StatusNotFound {
+		t.Errorf("traversal through __raw status = %d, want 404", esc.StatusCode)
+	}
+}
+
 // TestRelativeAge is a table check on the shell's coarse "updated" label.
 func TestRelativeAge(t *testing.T) {
 	tests := []struct {
@@ -280,6 +391,7 @@ func TestRelativeAge(t *testing.T) {
 		age  time.Duration
 		want string
 	}{
+		{"future mtime clamps to zero", -5 * time.Hour, "just now"},
 		{"seconds", 30 * time.Second, "just now"},
 		{"minutes", 90 * time.Second, "1m ago"},
 		{"hours", 3 * time.Hour, "3h ago"},
