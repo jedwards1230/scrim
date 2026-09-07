@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	_ "embed"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
@@ -149,13 +151,24 @@ func (s *Server) handleCanvasShell(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Render into a buffer, not straight into the ResponseWriter: Execute
+	// starts writing as soon as it renders, so a mid-render failure would have
+	// already committed 200 + a partial page and the http.Error below could
+	// change neither. Buffering keeps the error path able to send a real 500.
+	// The shell is a small page and the template is parsed at init, so the
+	// buffer costs nothing and the error path is unreachable in practice --
+	// which is exactly why it should not be able to emit a truncated page.
+	var buf bytes.Buffer
+	if err := shellTemplate.Execute(&buf, data); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Same reasoning as the canvas itself: the shell names a canvas and its
 	// owner, so it must not be retained by any cache.
 	w.Header().Set("Cache-Control", "no-store")
-	if err := shellTemplate.Execute(w, data); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	_, _ = w.Write(buf.Bytes())
 }
 
 // relativeAge renders a coarse "how long ago" label for the shell's ownership

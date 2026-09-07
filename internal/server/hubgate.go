@@ -364,9 +364,9 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// This checks the SOURCE (the id in the path) and nothing else. The copy's
 	// TARGET comes from the JSON body and is authorized by neither auth plane
 	// -- a pre-existing hole userTokenMayWrite has too (it derives its id from
-	// the path as well), tracked in jedwards1230/scrim#137. This branch does not widen it: any
-	// logged-in principal can already mint a user token and take the existing
-	// path, and the shell never sends "overwrite".
+	// the path as well), tracked in jedwards1230/scrim#135. This branch does
+	// not widen it: any logged-in principal can already mint a user token and
+	// take the existing path, and the shell never sends "overwrite".
 	if isCopyPath(r.Method, r.URL.Path) && c.Email != "" && tok == nil && !machineActor {
 		id, ok := writeTargetCanvasID(r.URL.Path)
 		if !ok {
