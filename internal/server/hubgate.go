@@ -356,7 +356,7 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 
-	// Canvas duplication (#126) and deletion (#137) by a browser session.
+	// Canvas duplication and deletion (#126) by a browser session.
 	// Modelled exactly on the grant-mutation branch above, and CSRF-safe for
 	// the same reason: the session cookie is HttpOnly + SameSite=Lax, so no
 	// cross-site POST/DELETE can carry it. A session that may WRITE the canvas
