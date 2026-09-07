@@ -8,6 +8,13 @@ import (
 	"testing"
 )
 
+// These tests exercise canvas CONTENT serving, which since the canvas shell
+// (#126) lives at /c/{id}/__raw/ -- the canvas root itself now renders scrim's
+// chrome around an iframe pointing here (see handlers_shell_test.go). Every
+// assertion below is the pre-shell one, unchanged, just re-pointed: skeleton
+// wrapping, markdown rendering, and reload-script injection must all behave
+// exactly as they did when this was the root path.
+
 func TestHandleCanvasRendersIndexMarkdown(t *testing.T) {
 	s, ts := newTestServer(t)
 	canvasDir := filepath.Join(s.canvasesDir, "notes")
@@ -18,14 +25,14 @@ func TestHandleCanvasRendersIndexMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(ts.URL + "/c/notes/")
+	resp, err := http.Get(ts.URL + "/c/notes/__raw/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /c/notes/ status = %d, want 200", resp.StatusCode)
+		t.Fatalf("GET /c/notes/__raw/ status = %d, want 200", resp.StatusCode)
 	}
 	body := readBody(t, resp)
 	if !strings.Contains(body, "<h1>Hello Markdown</h1>") {
@@ -85,7 +92,7 @@ func TestHandleCanvasWrapsHTMLFragment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(ts.URL + "/c/fragment/")
+	resp, err := http.Get(ts.URL + "/c/fragment/__raw/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +124,7 @@ func TestHandleCanvasCompleteDocumentNotWrapped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(ts.URL + "/c/complete/")
+	resp, err := http.Get(ts.URL + "/c/complete/__raw/")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,6 @@ package server
 
 import (
 	_ "embed"
-	"html/template"
 	"net/http"
 
 	"github.com/jedwards1230/scrim/internal/version"
@@ -11,7 +10,7 @@ import (
 //go:embed templates/tokens.html.tmpl
 var tokensTemplateSrc string
 
-var tokensTemplate = template.Must(template.New("tokens").Parse(tokensTemplateSrc))
+var tokensTemplate = mustPageTemplate("tokens", tokensTemplateSrc)
 
 // tokensPageData is the my-tokens page's render context. The token list itself
 // is fetched client-side (GET /api/tokens) so mint/revoke update in place

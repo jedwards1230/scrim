@@ -51,7 +51,10 @@ func TestHandleCanvasServesFileAndInjectsScript(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(ts.URL + "/c/report/")
+	// The canvas's own content is served under __raw/ since the shell (#126)
+	// took over the canvas root; the injection behavior asserted below is
+	// unchanged.
+	resp, err := http.Get(ts.URL + "/c/report/__raw/")
 	if err != nil {
 		t.Fatal(err)
 	}
