@@ -8,14 +8,18 @@ browser.
 
 ## Documentation map
 
-`README.md` covers the local product only (add → edit → link, flags, auth). The
+[`docs/PRD.md`](docs/PRD.md) is the top of the tree: the product contract — goals, non-goals,
+the full intended surface, locked decisions, and a §11 index of where intent and today differ.
+Read it before proposing a feature or reversing a stated non-goal. `README.md` covers the local product only (add → edit → link, flags, auth). The
 hub and its identity plane live under `docs/`: [`docs/hub.md`](docs/hub.md) (hub
 server, push, CIDR gate, container, machine API), [`docs/mcp.md`](docs/mcp.md)
 (`scrim mcp`: tools, local/hub mode, streamable HTTP, OAuth),
 [`docs/identity.md`](docs/identity.md) (OIDC reads, ownership/sharing/tokens,
 the trusted-gateway forwarded-identity plane, Authentik feeder),
 [`docs/threat-model.md`](docs/threat-model.md) (the hub's three trade-offs), and
-[`docs/stability.md`](docs/stability.md) (pre-1.0 policy). The hub machine-API
+[`docs/stability.md`](docs/stability.md) (pre-1.0 policy), and
+[`docs/testing-strategy.md`](docs/testing-strategy.md) (test doctrine, coverage gaps, and the
+*proposed* benchmark regime — explicitly a proposal, not a gate). The hub machine-API
 contract is the OpenAPI spec at [`api/openapi.yaml`](api/openapi.yaml).
 
 Kubernetes deployment is the Helm chart at
@@ -43,7 +47,7 @@ Key packages under `internal/`:
 | `mdns` | Loopback-vs-LAN bind detection, and starting/stopping the `scrim.local` mDNS advertisement (`github.com/hashicorp/mdns`) |
 | `logging` | Sole sanctioned logging surface for `server`, plus `config`'s startup permission hardening and `authentik`'s directory feeder (`CategoryConfig`/`CategoryDirectory`): category+error only (no request paths/canvas IDs/tokens ever logged), wraps `http.Server.ErrorLog`. `daemon` does not use it |
 | `identity` | The hub's request-time authorization policy: the `Claims` a request carries and the pure `CanView`/`CanWrite` decisions over a canvas's stored owner+grants. No I/O and no IdP calls, so access decisions hold with the IdP unreachable. See [`docs/identity.md`](docs/identity.md) for the plane as a whole |
-| `oidc` | Generic OIDC login for hub reads (`github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2`): discovery-driven authorization-code flow with state/nonce/PKCE, the `/auth/login`/`callback`/`logout` routes, and a signed session cookie. Logout is **RP-initiated** (OIDC RP-Initiated Logout 1.0): it clears scrim's cookies then redirects to the issuer's **discovered** `end_session_endpoint` so the IdP session ends too -- clearing only the local cookie leaves the IdP's SSO cookie alive and the user is silently re-authenticated on the next request. The raw ID token is retained in its own signed cookie (never folded into the session cookie, whose 4KB budget a group-heavy token would blow -- browsers drop an oversized cookie silently) to serve as `id_token_hint`; `post_logout_redirect_uri` is omitted unless an operator configures one, since IdPs reject an unregistered value. IdP-agnostic -- nothing provider-specific in the code |
+| `oidc` | Generic OIDC login for hub reads (`github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2`): discovery-driven authorization-code flow with state/nonce/PKCE, the `/auth/login`/`callback`/`logout` routes, and a signed session cookie. Logout is **RP-initiated** (OIDC RP-Initiated Logout 1.0): it clears scrim's cookies then redirects to the issuer's **discovered** `end_session_endpoint` so the IdP session ends too -- clearing only the local cookie leaves the IdP's SSO cookie alive and the user is silently re-authenticated on the next request. The raw ID token is retained in its own signed cookie (never folded into the session cookie, whose 4KB budget a group-heavy token would blow -- browsers drop an oversized cookie silently) to serve as `id_token_hint`; `post_logout_redirect_uri` is omitted unless an operator configures one, since IdPs reject an unregistered value -- when it IS configured it points at `GET /logged-out` (`server/handlers_logged_out.go`), scrim's own signed-out landing page: gate-exempt by exact match, reads no session and renders no identity, and today the only page an anonymous visitor can reach. IdP-agnostic -- nothing provider-specific in the code |
 | `usertoken` | The hub's user-minted bearer tokens: named credentials that act AS their owning principal on the machine plane. Whole-file JSON under the meta dir, SHA-256 hashes only (the raw secret is returned once at mint). The global admin push token deliberately does NOT live here |
 | `principal` | Lazily-populated, display-only registry of the principals the hub has seen (logins, verified forwarded actors, grant targets), backing `GET /api/principals` autocomplete. Enforcement NEVER reads it |
 | `authentik` | OPTIONAL read-only Authentik users/groups pull that enriches that same autocomplete, behind an in-memory TTL cache. Never persisted, never enforced; an unreachable Authentik degrades autocomplete and nothing else |
@@ -108,9 +112,13 @@ one clean filesystem event, one SSE reload, never a partial-serve. A
 `Dockerfile` at the repo root packages `scrim hub` as a container
 (`gcr.io/distroless/static-debian12:nonroot`, `/data` volume);
 `release.yml` publishes it multi-arch (amd64/arm64) to
-`ghcr.io/jedwards1230/scrim` on every semver-labeled release. Deployment
-(Kubernetes manifests, ingress/Traefik routing) deliberately lives outside
-this repo -- the hub itself must stay fully usable standalone.
+`ghcr.io/jedwards1230/scrim` on every semver-labeled release. The Kubernetes
+deployment surface is the Helm chart at `deploy/charts/scrim` (see the
+documentation map above) -- CI-gated by the `chart-lint` job and pushed to
+`oci://ghcr.io/jedwards1230/charts` by the same release. What deliberately
+lives outside this repo is the cluster-*specific* half: app-of-apps wiring,
+per-cluster values, and the OAuth DCR facade the homelab runs alongside these
+workloads. The hub itself must stay fully usable standalone, chart or no chart.
 
 **Hard invariant**: the default daemon path (`scrim add`/`serve`/...) gets
 zero new behavior, dependencies, or HTTP surface from hub mode --

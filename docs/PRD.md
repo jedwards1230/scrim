@@ -181,8 +181,9 @@ they try to change persists.
 ### The operator (hub only)
 
 Someone has to run the hub. That person deploys one container against one volume, sets a push
-token, and points an IdP at it. Deployment topology (Kubernetes manifests, ingress) is
-deliberately *not* scrim's concern — the hub must remain fully usable as a standalone binary.
+token, and points an IdP at it. A Helm chart in this repo packages that for Kubernetes (§9); the
+cluster-*specific* topology around it is deliberately not scrim's concern — the hub must remain
+fully usable as a standalone binary, chart or no chart.
 
 ## 4. Goals
 
@@ -216,7 +217,7 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | Public-internet exposure by default | **Firm, reaffirmed 2026-09-05** (§13.8). LAN/Tailscale + IdP. Anything wider is the environment's job. |
 | An anonymous `public` grant kind | **Firm** (§13.8). `everyone` means every *authenticated* principal; `link` is the widest anonymous reach and stays a bearer secret rather than an open door. A canvas readable with no credential at all makes the hub a publishing platform, which is a different product with a different threat model. |
 | Outbound notification (email/SMTP/webhook) when a canvas is shared | **Deferred by decision** (§13.10). Sharing stays silent and the sharer sends the link. A new outbound dependency in a seven-dependency binary needs a stronger case than the one that exists today; revisit once the collaborator flow is real enough to have a complaint. |
-| Deployment manifests (K8s, ingress, Traefik) in this repo | **Firm.** The hub must stay usable standalone. |
+| Deployment manifests (K8s, ingress, Traefik) in this repo | **Reversed, narrowly.** A Helm chart ships at `deploy/charts/scrim` — two workloads (`hub`, `mcp`), their ingresses, a NetworkPolicy and a `OnePasswordItem` — CI-gated by `chart-lint` (§10) and published to `oci://ghcr.io/jedwards1230/charts` on every release (§9). What stays out is the cluster-*specific* wiring. The chart is optional packaging: the hub is still fully usable standalone. |
 | Generated OpenAPI / client codegen | **Firm.** The spec is hand-authored and CI-linted. |
 | Browser-driven tests of the reload script | **Firm.** Four statements of JS, already exercised end-to-end (`scripts/e2e.sh` scenarios 3 and 15 assert a real `event: reload` reaches a real client; 17 and the hub scenario assert the injection itself); a real browser would be the flakiest thing in the repo. |
 | Load-generation harness (`k6`/`vegeta`) | **Firm.** It would measure GitHub's runners, not scrim. |
@@ -246,7 +247,7 @@ deliberately *not* scrim's concern — the hub must remain fully usable as a sta
 | Distribution | `go install`, signed release binaries (5 platforms), GHCR multi-arch image | The binary is the source of truth; the plugin is a thin skill wrapper. |
 | Plugin home | The scrim repo hosts its own marketplace (`jedwards1230-scrim`) | Version the skill with the tool it documents, not with an unrelated plugin fleet. |
 | Versioning | Pre-1.0; on-disk layout may change between minors; migrations forward-only | Honest about the surface still settling. |
-| Permission hardening failure | Hard-fail, unless `--allow-weak-permissions` is passed explicitly | Fail closed by default; never silently downgrade to a world-readable directory, but never strand a user with no recourse either. |
+| Permission hardening failure | Hard-fail, unless `--allow-weak-permissions` **(not built)** is passed explicitly | Fail closed by default; never silently downgrade to a world-readable directory, but never strand a user with no recourse either. |
 | Write-level sharing | A per-grant `view`/`edit` permission field, gated behind optimistic concurrency landing first | A permission field composes with all four grant kinds; an `edit` kind cannot compose with `link`. Multi-editor without `If-Match` is silent data loss. |
 | Canvas chrome **(not built)** | A scrim-owned wrapper page at `/c/<id>/` holding the canvas in a sandboxed iframe; the unwrapped content keeps its own sub-path | Share, history, and comment controls must not run inside agent-authored JS. §12.1 commits to never protecting the viewer from the canvas, so chrome injected into the document would be readable, tamperable, and hideable by the very content it describes. |
 | Roles **(not built)** | Three principal roles — `admin`, `member`, `guest` — derived from an IdP claim, never a user list scrim stores itself | Ownership plus a shared admin *token* is an ACL, not a user model: no principal can see everything, reassign an orphaned canvas, or be de-privileged. Deriving from a claim preserves "any user the IdP authenticates is accepted, no list to pre-seed". |
@@ -277,8 +278,10 @@ upgrade never requires a manual migration step**.
 
 What 1.0 does *not* require: feature completeness. Every **(not built)** item in this document may
 still be unbuilt at 1.0. The gate is that the surface has stopped moving, not that it has stopped
-growing — plus the merge protection in §13.3 actually being enforced, since a frozen contract with
-an advisory CI gate is a promise nothing checks.
+growing — plus the merge protection in §13.3 *enforcing*, not merely existing. The ruleset is
+configured and requires the `CI` check (§10), so the remaining precondition is narrower than it
+was: closing `jedwards1230/scrim#113`, after which a skipped job can no longer satisfy that check.
+Until then a frozen contract still rests on a gate a skipped job passes.
 
 ## 7. Product surface
 
@@ -369,10 +372,15 @@ Hub-only additions — the **machine API**, documented as a hand-authored OpenAP
 | snapshots | `GET`/`POST .../snapshots`, `POST .../snapshots/{name}/revert` |
 | grants | `GET`/`POST .../grants`, `DELETE .../grants/{grantRef}` |
 | ownership | `POST /api/canvases/{id}/claim` |
-| tokens | `GET`/`POST /api/tokens`, `DELETE /api/tokens/{id}`, `GET /tokens` (HTML) |
+| tokens | `GET`/`POST /api/tokens`, `DELETE /api/tokens/{id}`, `GET /tokens` (HTML †) |
 | principals | `GET /api/principals?q=` (autocomplete; display-only, never an authorization source) |
 | ops | `GET /healthz` (gate-exempt), `GET /api/openapi.yaml` (gate-exempt) |
-| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`), `GET /logged-out` — present only under OIDC. `/logged-out` is gate-exempt by exact match and renders no identity, and it is currently the **only** page an anonymous visitor can reach at all, which is exactly §13.9's problem statement. |
+| auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`), `GET /logged-out` (HTML †) — present only under OIDC. `/logged-out` is gate-exempt by exact match and renders no identity, and it is currently the **only** page an anonymous visitor can reach at all, which is exactly §13.9's problem statement. |
+
+† **Outside the spec by design.** `/tokens` and `/logged-out` are server-rendered HTML pages, not
+machine API, so `api/openapi.yaml` does not describe them — and §7.7's "`api/openapi.yaml` is
+normative" is bounded to the machine surface accordingly. Every other route in the table is in the
+spec, `/healthz` and the `/auth/*` trio included.
 
 Documented caps: push archive ≤50 MiB uncompressed / ≤1000 entries / regular files and
 directories only; per-file write ≤2 MiB decoded; PATCH body ≤6 MiB; edit conflicts return `409`.
@@ -406,10 +414,14 @@ and on the gallery's own render context.
 
 17 tools today; `path` is local-mode only, so a hub-mode server exposes 16. Every tool carries
 annotations, with `ReadOnlyHint` derived from the same scope map that enforces OAuth, so the two
-cannot drift.
+cannot drift. Two rules bound that map rather than appearing in it: a tool absent from it requires
+`scrim:write` (fail closed — a newly added tool is never accidentally callable with a read-only
+token), and a `scrim:write` grant satisfies a `scrim:read` requirement, write strictly dominating
+read. §6.1 freezes tool scopes at 1.0; these two defaults freeze with them.
 
-Two comment tools are intended and **(not built)**. They are hub-only, like the grant tools, so
-they would take hub mode to 18 and leave local mode at 17.
+Two comment tools are intended and **(not built)**. They would be hub-only — unlike
+`share_canvas`/`list_grants`, which register in both modes — so they would take hub mode to 18 and
+leave local mode at 17.
 
 | Tool | Scope | Purpose |
 |---|---|---|
@@ -518,6 +530,9 @@ What the hub owes a canvas over time, independent of the archive/TTL features de
   recovery story.
 - **A push replaces content, never identity.** Owner, grants, and snapshot history survive a
   re-push; the atomic swap means a reader sees the old canvas or the new one, never neither.
+  *Descriptive* metadata is the exception and does not inherit that guarantee: title, description,
+  and icon are read from the push's own query parameters and written unconditionally, so a re-push
+  that omits them clears them.
 - **Snapshots are the user's, not the system's.** Nothing prunes them automatically today
   (`#45`), and any future retention must be opt-in per canvas rather than a global default —
   silently discarding a snapshot someone took deliberately is the one unacceptable outcome.
@@ -563,6 +578,16 @@ The iframe is the security argument, not a layout preference. §12.1 commits to 
 the viewer from the canvas, so any chrome injected into the agent's document would be readable and
 tamperable by that document — a canvas could hide the comment button, misreport its owner, or read
 a comment draft. A separate browsing context is what makes the chrome's claims trustworthy.
+
+**The sandbox itself is blocked on the reload channel (`jedwards1230/scrim#138`).** A sandbox
+strong enough to matter — one *without* `allow-same-origin` — puts the canvas on an opaque origin,
+and the reload script scrim injects into it can then no longer open its `EventSource` back to
+`/c/{id}/__events`: live reload, the product's core loop, breaks. A sandbox *with*
+`allow-same-origin` keeps reload working and buys nothing against the threat above, since the
+framed document can still reach `parent.document`. Both branches fail, so a first shell
+implementation frames the canvas **unsandboxed** and the isolation lands only once the reload
+channel stops depending on same-origin (`postMessage` from the shell). The intent above is
+unchanged; what is qualified is when it can be honored.
 
 Three constraints this must satisfy:
 
@@ -618,9 +643,12 @@ moves it implicitly, and a `revert` — which changes the canvas rather than the
 silently repoint a pinned share. A recipient sees which version they are on; they cannot change it.
 Consistently with §13.10, moving the pin notifies nobody.
 
-**This depends on `jedwards1230/scrim#108`.** Scrim's snapshots are manual only: `snap` is a
-deliberate act and a push creates nothing. So on today's storage there is usually nothing to pin
-to. `jedwards1230/scrim#108` (*versioning 2/3: auto-snapshot on write, debounced*) is what makes a
+**This depends on `jedwards1230/scrim#108`.** Nothing scrim does routinely produces a version.
+`snap` is a deliberate act, and the only automatic snapshots are defensive ones taken to make a
+destructive operation undoable — `prerevert` before a `revert`, `precopy` before an overwriting
+`copy`. The load-bearing half is unchanged: **a push creates nothing**, so the canvas an agent is
+actively pushing to accumulates no versions at all, and on today's storage there is usually
+nothing to pin to. `jedwards1230/scrim#108` (*versioning 2/3: auto-snapshot on write, debounced*) is what makes a
 push produce a version, and without it this control would list the handful of moments someone
 happened to run `snap` — a sparse, arbitrary list that is worse than no list, because it looks
 authoritative. Shipping the pin ahead of `#108` is therefore not a smaller first step; it is the
@@ -748,7 +776,9 @@ shipped: the goal was met, the mechanism was not the one originally sketched.
 - **Releases:** opt-in per PR via a `semver:patch|minor|major` label — no label, no release.
   Each release publishes an immutable tag, cross-built binaries for linux/amd64, linux/arm64,
   darwin/amd64, darwin/arm64, windows/amd64, a `SHA256SUMS` manifest keyless-signed with cosign
-  (Sigstore/Fulcio, logged to Rekor), and a multi-arch GHCR image.
+  (Sigstore/Fulcio, logged to Rekor), a multi-arch GHCR image, and the Helm chart at
+  `oci://ghcr.io/jedwards1230/charts/scrim` — its `version`/`appVersion` stamped from the tag, so
+  the chart is never versioned by hand.
 - **Container:** distroless-nonroot, `/data` volume, `EXPOSE 7788`, entrypoint `scrim hub`, so
   `docker run <image> --push-token ... --allow ...` appends flags naturally.
 - **Local operations:** none. The daemon starts itself and stops itself. `scrim status` reports
@@ -761,8 +791,12 @@ shipped: the goal was met, the mechanism was not the one originally sketched.
   (`/plugin marketplace add jedwards1230/scrim`, then `/plugin install scrim@jedwards1230-scrim`)
   that never bundles or self-installs the binary. Its version tracks the plugin-relevant surface,
   not the tool's release version — enforced in CI.
-- **Deployment manifests live elsewhere by design.** The homelab runs the hub, an MCP server,
-  and an OAuth DCR facade as separate workloads; none of that belongs in this repo.
+- **The deployment surface is a chart here; the cluster wiring is elsewhere.**
+  [`deploy/charts/scrim`](../deploy/charts/scrim/README.md) is one chart with two workloads — `hub`
+  (stateful, browser-facing) and `mcp` (stateless, agent-facing) — plus their ingresses, a
+  NetworkPolicy, and a `OnePasswordItem`. What deliberately does *not* live here is anything true
+  of one cluster and not of the product: the homelab's app-of-apps wiring, its per-cluster values,
+  and the OAuth DCR facade it runs alongside these two workloads.
 - **What an operator should be able to see** — the end state, **(not built)**, tracked by
   `jedwards1230/scrim#44`. An opt-in Prometheus endpoint on a *separate* bind (never the serving
   port, so metrics are not gated by — or exposed through — the read gate), publishing counts and
@@ -776,9 +810,9 @@ shipped: the goal was met, the mechanism was not the one originally sketched.
 ## 10. Quality bar
 
 A change is complete when all of the following hold. CI enforces every row, aggregated by a `ci`
-gate job — though the mapping is not one row to one job: the eight rows below run as six jobs
-(`test`, `e2e`, `lint`, `spec-lint`, `govulncheck`, `build`), with vet and the Windows
-cross-targets as steps of `test` and module hygiene as a step of `lint`.
+gate job — though the mapping is not one row to one job: the nine rows below run as seven jobs
+(`test`, `e2e`, `lint`, `spec-lint`, `govulncheck`, `build`, `chart-lint`), with vet and the
+Windows cross-targets as steps of `test` and module hygiene as a step of `lint`.
 
 | Gate | Command |
 |---|---|
@@ -790,24 +824,25 @@ cross-targets as steps of `test` and module hygiene as a step of `lint`.
 | API spec validity | `vacuum lint --fail-severity error api/openapi.yaml` |
 | Vulnerabilities | `govulncheck ./...` |
 | Build | `make build` + `./scrim --version` |
+| Helm chart | `helm lint deploy/charts/scrim`, then `helm template` against both the default values and `ci/homelab-values.yaml`; plus two guard assertions — a `dataDir` outside the mounted volume must fail to render, and so must an `/mcp` ingress with no OAuth issuer |
 
 Coverage is **computed and reported, not gated**: the `test` job prints a total to the job summary
 and no threshold fails the build. The number is a signal for a human, and §11 tracks the seams
 where it matters.
 
-**Merge protection — decided, not yet configured (§13.3, `jedwards1230/scrim#92`).** The intent is
-that the `ci` aggregate is the **sole required status check** on `main`: it exists to be exactly
-that, so adding a CI job never becomes a two-place change.
+**Merge protection — configured (§13.3, `jedwards1230/scrim#92`).** The `ci` aggregate is the
+**sole required status check** on `main`: it exists to be exactly that, so adding a CI job never
+becomes a two-place change.
 
-> **Today a red build can merge.** `main` carries a ruleset with `deletion`, `non_fast_forward`,
-> and `pull_request` only — **no required status checks at all**. Nothing mechanical stops a PR
-> with a failing `ci` from being merged; the gate is currently a human reading the checks. This is
-> the single largest gap between this document and reality, and it is the reason §6.1 names it as
-> a precondition for 1.0.
+> **The ruleset is active.** `main` carries an active ruleset with `deletion`, `non_fast_forward`,
+> `pull_request`, and `required_status_checks`, and that last rule requires exactly one context —
+> `CI`, the `ci` aggregate job at `.github/workflows/ci.yml:278-279`. Decision §13.3 is
+> implemented as specified: a PR whose `ci` job *fails* cannot be merged.
 >
-> This is **not a scrim-only defect** — the same "sole required status check" claim appears in the
-> tv-shell and discord-ops PRDs and is equally unconfigured there. Of the repos audited, only
-> `my-wiki` actually has it set. Fixing scrim's ruleset does not fix the others.
+> **The residual hole is `jedwards1230/scrim#113`.** The aggregate fails only on `failure` or
+> `cancelled` (`.github/workflows/ci.yml:287-291`), so a `skipped` need passes it — and passing
+> the aggregate is passing the one check the ruleset requires. Merge protection therefore stops a
+> *red* build but not a *silently-skipped* one, which is why §6.1 still conditions 1.0 on `#113`.
 
 **Testing doctrine.** Go is the default; shell e2e is only for what needs a real process, a real
 built binary, or real CLI ergonomics — daemon spawn, stale pid, double-start, version-skew
@@ -862,8 +897,8 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
 | Markdown rendering | Every `.md` gets a styled rendered URL (today: `index.md` only) | partial | `jedwards1230/scrim#101` |
 | Diagrams | Native mermaid in the goldmark pipeline | not started | `jedwards1230/scrim#100` |
 | Observability | Opt-in Prometheus `/metrics`, counts/gauges only, separate bind | not started | `jedwards1230/scrim#44` |
-| Test coverage of load-bearing seams | Cover the five functions still at 0%: `server.hub.broadcast` (SSE fan-out), `daemon.spawnAndWait` + `daemon.detach` (self-start), and the `handleShareCanvas`/`handleListGrants` MCP handlers. Their surrounding code is well covered — `handleSSE` 66%, `withSpawnLock` 86%, the grant backends 80-86%, 75% overall — so this is five specific holes, not an untested subsystem (§12) | not started | `jedwards1230/scrim#78`, `#79`, `#80` |
-| Merge protection | `ci` aggregate required as the sole status check on `main` (§13.3). **`main` has no required status checks today — a red build can merge** (§10) | **gap** | `jedwards1230/scrim#92` |
+| Test coverage of load-bearing seams | Cover the five functions still at 0%: `server.hub.broadcast` (SSE fan-out), `daemon.spawnAndWait` + `daemon.detach` (self-start), and the `handleShareCanvas`/`handleListGrants` MCP handlers. Their surrounding code is well covered — `handleSSE` 84%, `withSpawnLock` 86%, the grant backends 86-89%, 79% overall — so this is five specific holes, not an untested subsystem (§12) | not started | `jedwards1230/scrim#78`, `#79`, `#80` |
+| Merge protection | `ci` aggregate required as the sole status check on `main` (§13.3). The ruleset is **active** and requires exactly the `CI` context; the residual hole is that a `skipped` need still passes the aggregate (§10) | shipped, less `#113` | `jedwards1230/scrim#92`, `#113` |
 | `ci` gate fails open on a skipped job | The aggregate must treat any non-`success` need as a failure; today a `skipped` need passes it. Latent while no job is conditional, load-bearing the moment `#92` makes `ci` the only gate | **bug** | `jedwards1230/scrim#113` |
 | Windows verification | ACL code actually executes in CI | **gap** | `jedwards1230/scrim#89` |
 | Windows ACL escape hatch | `--allow-weak-permissions` opt-out of the hard-fail (§13.1) | not started | `jedwards1230/scrim#90` |
@@ -873,7 +908,7 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
 | MCP spec currency | Adopt MCP `2026-07-28` | not started | `jedwards1230/scrim#71` |
 | **Collaboration surface** (umbrella) | The recipient half of the product: a collaborator can tell what they are looking at, get in, see how it got here, and respond (§7.9) | not started | `jedwards1230/scrim#124` |
 | Landing page | An identity-free page an unauthenticated visitor can read, instead of an immediate IdP bounce. Today `/logged-out` is the *only* page they can reach | not started | `jedwards1230/scrim#125` |
-| Canvas shell | `/c/<id>/` becomes a scrim-owned wrapper with the canvas in a sandboxed iframe. **Structural dependency** for comments, history, and a legible access level | not started | `jedwards1230/scrim#126` |
+| Canvas shell | `/c/<id>/` becomes a scrim-owned wrapper with the canvas in an iframe; **sandboxing it is blocked on the reload-channel rework** (`#138`, §7.9). **Structural dependency** for comments, history, and a legible access level | not started | `jedwards1230/scrim#126` |
 | Version history UI | A read-only URL per snapshot, browsable from the shell. `snap`/`snaps`/`revert` ship on CLI, API, and MCP with **zero web UI**; independent of `#106`–`#108` | not started | `jedwards1230/scrim#127` |
 | Shared-version pinning | A share is bound to a version, `Latest` (a tracking mode) by default; the owner may freeze it to a numbered one (§13.13). **Depends on `jedwards1230/scrim#108`** — pushes create no snapshots today, so there is nothing to pin to | not started | `jedwards1230/scrim#134` |
 | Comments | Canvas-threaded, stamped with the version written against, rendered as text | not started | `jedwards1230/scrim#128` |
@@ -915,8 +950,8 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
   accumulates them quickly.
 - **Five load-bearing functions are untested.** `server.hub.broadcast`, `daemon.spawnAndWait`,
   `daemon.detach`, and the `handleShareCanvas`/`handleListGrants` MCP handlers sit at exactly 0%.
-  Note the scope: their neighbours are covered (`handleSSE` 66%, `withSpawnLock` 86%, the grant
-  backends 80-86%, 75% overall), so what is missing is fan-out delivery, the fork/exec itself, and
+  Note the scope: their neighbours are covered (`handleSSE` 84%, `withSpawnLock` 86%, the grant
+  backends 86-89%, 79% overall), so what is missing is fan-out delivery, the fork/exec itself, and
   two tool wrappers — not SSE, spawn, or grants as subsystems. Known and phased (`#78`-`#80`).
 - **Known performance ceilings**: the local daemon's SSE connections are uncapped; push latency
   includes an inline delete of the previous canvas under the push lock; token and principal
