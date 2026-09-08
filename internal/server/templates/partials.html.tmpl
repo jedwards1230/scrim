@@ -71,6 +71,11 @@ needs per-page data stays in the page template.
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   }
   .menu[hidden] { display: none; }
+  /* Menus hang from the right edge of their trigger by default, which is
+     right for a trigger in the right-hand action group. A menu whose trigger
+     sits at the LEFT edge of the bar (the canvas shell's title) must hang the
+     other way, or it opens off the left of the viewport. */
+  .menu-start { right: auto; left: 0; }
   .menu-head { padding: 0.4rem 0.55rem 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; }
   .menu-head .who { font-size: 0.85rem; overflow-wrap: anywhere; }
   .menu-head .when { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; overflow-wrap: anywhere; }
