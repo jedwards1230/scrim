@@ -47,11 +47,13 @@ func TestCanvasShellRendersAtRoot(t *testing.T) {
 	body := readBody(t, resp)
 
 	for _, want := range []string{
-		`<h1 title="My Shell">My Shell</h1>`, // the canvas title in the bar
+		`<span class="name">My Shell</span>`, // the canvas title in the bar
 		`src="/c/shell1/__raw/"`,             // the iframe points at the raw canvas
-		`id="menu-btn"`,                      // a real button, not a div
-		`aria-expanded="false"`,              // with announced state
-		`>Version history<`,                  // always-present menu items
+		// The title itself is the menu's trigger -- a real button, not a div.
+		`id="menu-btn" class="title-btn"`,
+		`aria-controls="canvas-menu"`,
+		`aria-expanded="false"`, // with announced state
+		`>Version history<`,     // always-present menu items
 		`>Refresh<`,
 		`href="/">All artifacts<`,
 	} {
@@ -403,5 +405,45 @@ func TestRelativeAge(t *testing.T) {
 				t.Errorf("relativeAge(%v) = %q, want %q", tt.age, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCanvasShellBarSplit pins the bar's division of labor: Share is promoted
+// to its own named button in the right-hand action group, and the canvas's
+// management verbs hang off the title menu at the left. The important half is
+// that Share appears exactly ONCE -- promoting it while also leaving it in the
+// menu would give one dialog two triggers, which is the drift this test
+// exists to catch.
+func TestCanvasShellBarSplit(t *testing.T) {
+	s, auth, idp := newOIDCHub(t)
+	ownedCanvas(t, s, "alices", "alice@example.com")
+
+	alice := sessionFor(t, auth, idp, "sub-alice", "alice@example.com", nil)
+	body, code := shellGET(t, s, "alices", alice)
+	if code != http.StatusOK {
+		t.Fatalf("GET /c/alices/ (alice) = %d, want 200", code)
+	}
+
+	if !strings.Contains(body, `id="bar-share"`) {
+		t.Error("the owner's bar is missing the dedicated Share button")
+	}
+	if n := strings.Count(body, `data-share="alices"`); n != 1 {
+		t.Errorf("Share trigger count = %d, want exactly 1 (the bar button)", n)
+	}
+
+	// The menu runs from its own id to the start of the action group, so
+	// anything share-shaped inside that span is a second trigger.
+	menuStart := strings.Index(body, `id="canvas-menu"`)
+	actions := strings.Index(body, `class="bar-actions"`)
+	if menuStart < 0 || actions < menuStart {
+		t.Fatal("could not locate the canvas menu and the action group in order")
+	}
+	if strings.Contains(body[menuStart:actions], "data-share") {
+		t.Error("Share is still in the title menu; it belongs only in the bar")
+	}
+
+	// A rule separates the navigational item from the destructive one.
+	if !strings.Contains(body, `<div class="menu-sep"></div>`+"\n      "+`<button id="menu-delete"`) {
+		t.Error("Delete is not separated from All artifacts by a rule")
 	}
 }

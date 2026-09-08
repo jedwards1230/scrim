@@ -27,15 +27,24 @@
     background: var(--card-bg);
     flex: 0 0 auto;
   }
-  .bar-title { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+  .bar-title { min-width: 0; }
+  .bar-title h1 { margin: 0; font-size: 0.95rem; min-width: 0; }
+  /* The title IS the canvas menu's trigger, so it has to read as a title
+     first and a control second: no chrome at rest, a button's affordances on
+     hover and focus. */
+  .title-btn {
+    display: flex; align-items: center; gap: 0.5rem; max-width: min(22rem, 45vw);
+    border: 1px solid transparent; background: none; color: inherit;
+    border-radius: 0.5rem; padding: 0.2rem 0.4rem;
+    font: inherit; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+  }
+  .title-btn:hover { border-color: var(--border); background: var(--bg); }
+  .title-btn .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title-btn .caret { flex: 0 0 auto; font-size: 0.7rem; color: var(--muted); }
   .icon {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.75rem; height: 1.75rem; border-radius: 0.4rem;
     font-size: 1rem; flex: 0 0 auto;
-  }
-  .bar-title h1 {
-    font-size: 0.95rem; font-weight: 600; margin: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .bar-actions { display: flex; align-items: center; gap: 0.4rem; flex: 0 0 auto; }
   .chip {
@@ -50,6 +59,9 @@
     text-decoration: none; display: inline-block;
   }
   .btn:hover { border-color: var(--muted); }
+  /* Share is the bar's one promoted action, so it carries a little more
+     weight than the icon buttons beside it. */
+  .btn-share { font-weight: 600; }
   .card-btn { /* revoke buttons inside the share dialog */
     border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
     border-radius: 0.5rem; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem;
@@ -75,36 +87,40 @@
 </head>
 <body data-canvas-id="{{.ID}}">
 <header class="bar">
-  <div class="bar-title">
-    <span class="icon" style="background:{{.Color}}22;">{{.Icon}}</span>
-    <h1 title="{{.Title}}">{{.Title}}</h1>
+  <!-- The bar is split on purpose. Sharing is the one action a viewer reaches
+       for often enough to deserve its own control, so it sits at the right as
+       a named button; everything else -- the canvas's own management verbs --
+       hangs off the title at the left, where the thing being managed is
+       named. Share therefore appears ONCE on this page: promoting it to the
+       bar and also leaving it in the menu would be two triggers for one
+       dialog. -->
+  <div class="bar-title menu-wrap">
+    <h1><button id="menu-btn" class="title-btn" type="button" data-menu aria-expanded="false" aria-controls="canvas-menu" title="{{.Title}}"><span class="icon" style="background:{{.Color}}22;">{{.Icon}}</span><span class="name">{{.Title}}</span><span class="caret" aria-hidden="true">&#9662;</span></button></h1>
+    <div id="canvas-menu" class="menu menu-start" aria-labelledby="menu-btn" hidden>
+      {{if .OIDC}}
+      <div class="menu-head">
+        <div class="who">{{if .Owned}}Artifact by you{{else}}Artifact by {{.OwnerLabel}}{{end}}</div>
+        <div class="when">Updated {{.UpdatedAgo}}</div>
+      </div>
+      {{end}}
+      <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Rename</button>
+      {{if .CanDuplicate}}<button id="menu-duplicate" class="menu-item" type="button" data-duplicate="{{.ID}}">Duplicate</button>{{end}}
+      <button id="menu-versions" class="menu-item" type="button" aria-expanded="false" aria-controls="version-list">Version history</button>
+      <div id="version-list" class="versions" hidden></div>
+      <button id="menu-refresh" class="menu-item" type="button">Refresh</button>
+      <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Pin</button>
+      <div class="menu-sep"></div>
+      <a class="menu-item" href="/">All artifacts</a>
+      {{if .CanDelete}}<div class="menu-sep"></div>
+      <button id="menu-delete" class="menu-item menu-item-danger" type="button" data-delete="{{.ID}}" data-title="{{.Title}}">Delete&hellip;</button>{{end}}
+      <div id="menu-note" class="menu-note" hidden></div>
+      <div id="menu-error" class="menu-error" hidden></div>
+    </div>
   </div>
   <div class="bar-actions">
     {{if .OIDC}}{{if .Account.Principal}}{{template "account-menu" .Account}}{{end}}{{end}}
     <button id="theme-toggle" class="btn" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
-    <div class="menu-wrap">
-      <button id="menu-btn" class="btn" type="button" data-menu aria-expanded="false" aria-controls="canvas-menu" aria-label="Canvas menu">&#8942;</button>
-      <div id="canvas-menu" class="menu" aria-labelledby="menu-btn" hidden>
-        {{if .OIDC}}
-        <div class="menu-head">
-          <div class="who">{{if .Owned}}Artifact by you{{else}}Artifact by {{.OwnerLabel}}{{end}}</div>
-          <div class="when">Updated {{.UpdatedAgo}}</div>
-        </div>
-        {{end}}
-        <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Rename</button>
-        {{if .CanDuplicate}}<button id="menu-duplicate" class="menu-item" type="button" data-duplicate="{{.ID}}">Duplicate</button>{{end}}
-        {{if .CanShare}}<button class="menu-item" type="button" data-share="{{.ID}}" data-title="{{.Title}}">Share</button>{{end}}
-        <button id="menu-versions" class="menu-item" type="button" aria-expanded="false" aria-controls="version-list">Version history</button>
-        <div id="version-list" class="versions" hidden></div>
-        <button id="menu-refresh" class="menu-item" type="button">Refresh</button>
-        <button class="menu-item" type="button" disabled aria-disabled="true" title="Not yet supported">Pin</button>
-        <div class="menu-sep"></div>
-        <a class="menu-item" href="/">All artifacts</a>
-        {{if .CanDelete}}<button id="menu-delete" class="menu-item menu-item-danger" type="button" data-delete="{{.ID}}" data-title="{{.Title}}">Delete&hellip;</button>{{end}}
-        <div id="menu-note" class="menu-note" hidden></div>
-        <div id="menu-error" class="menu-error" hidden></div>
-      </div>
-    </div>
+    {{if .CanShare}}<button id="bar-share" class="btn btn-share" type="button" data-share="{{.ID}}" data-title="{{.Title}}">Share</button>{{end}}
   </div>
 </header>
 <iframe id="canvas-frame" class="frame" src="{{.RawURL}}" title="{{.Title}}"></iframe>
