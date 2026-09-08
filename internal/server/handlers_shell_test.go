@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -443,7 +444,11 @@ func TestCanvasShellBarSplit(t *testing.T) {
 	}
 
 	// A rule separates the navigational item from the destructive one.
-	if !strings.Contains(body, `<div class="menu-sep"></div>`+"\n      "+`<button id="menu-delete"`) {
+	// Matched with \\s* rather than the literal indentation: what matters is
+	// that the rule is the last thing before Delete, not how the template
+	// happens to be indented today.
+	sepBeforeDelete := regexp.MustCompile(`<div class="menu-sep"></div>\s*<button id="menu-delete"`)
+	if !sepBeforeDelete.MatchString(body) {
 		t.Error("Delete is not separated from All artifacts by a rule")
 	}
 }
