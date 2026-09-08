@@ -35,7 +35,7 @@
     text-decoration: none; display: inline-block;
   }
   .btn:hover { border-color: var(--muted); }
-  section { margin-bottom: 1.5rem; }
+{{template "menu-css" .}}  section { margin-bottom: 1.5rem; }
   h2 { font-size: 0.95rem; margin: 0 0 0.6rem; }
   .card {
     border: 1px solid var(--border); border-radius: 0.75rem;
@@ -66,7 +66,7 @@
 <header>
   <h1>Your tokens</h1>
   <div class="header-actions">
-    {{if .Principal}}<span class="chip" title="{{.Principal}}">{{.Principal}}</span>{{end}}
+    {{if .Account.Principal}}{{template "account-menu" .Account}}{{end}}
     <a class="btn" href="/">&larr; Gallery</a>
     <button id="theme-toggle" class="btn" type="button" aria-label="Toggle light/dark theme">&#9788;/&#9790;</button>
   </div>
@@ -102,6 +102,7 @@
 <footer>scrim {{.Version}}</footer>
 <script>
 {{template "theme-js" .}}
+{{template "menu-js" .}}
 (function () {
   // My-tokens management (#53): list, mint, revoke via the /api/tokens JSON
   // endpoints. Every principal-supplied value (name, owner email, allowance

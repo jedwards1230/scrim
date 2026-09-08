@@ -43,12 +43,13 @@ type indexData struct {
 	Version  string
 
 	// OIDC is true only on a hub with OIDC active; it gates every identity
-	// affordance in the template (chip, logout, badges, share dialog) so a
+	// affordance in the template (account menu, badges, share dialog) so a
 	// non-OIDC hub and the default daemon render exactly as before.
 	OIDC bool
-	// Principal is the logged-in viewer's display name, falling back to email;
-	// empty when anonymous or non-OIDC. Shown in the header chip.
-	Principal string
+	// Account carries the header account menu's identity and actions (Tokens,
+	// Log out). Zero when anonymous or non-OIDC, and the template renders the
+	// menu only when its Principal is non-empty.
+	Account accountData
 }
 
 // handleIndex serves the server-rendered dashboard at "/": a card gallery
@@ -75,11 +76,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	c := claimsFrom(r.Context())
 	data := indexData{Version: version.Short(), OIDC: oidcActive}
 	if oidcActive {
-		if c.Name != "" {
-			data.Principal = c.Name
-		} else {
-			data.Principal = c.Email
-		}
+		data.Account = accountFrom(c)
 	}
 
 	for _, info := range infos {

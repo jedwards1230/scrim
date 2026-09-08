@@ -138,6 +138,13 @@ only to the owner, admin, and explicit grantees until shared.
   `GET /api/principals?q=` — principals the hub has *observed* (logins, verified
   forwarded-identity headers, grant targets), display-only, never an
   authorization source.
+- **Duplicate & delete from the canvas shell** — `POST /api/canvases/{id}/copy`
+  and `DELETE /api/canvases/{id}`. Both accept a browser session that may
+  *write* the canvas named in the path (CSRF-safe for the same reason sharing
+  is: HttpOnly + SameSite=Lax), and the shell renders each menu item only for a
+  viewer that same decision admits — so a view-only grantee is offered neither
+  and would be `403` if they forged the call anyway. Delete always confirms in
+  the browser first, naming the canvas.
 
 **Two planes attribute identity differently.** Direct requests (a browser
 session, or `scrim push --token <user-token>`) carry identity natively.
