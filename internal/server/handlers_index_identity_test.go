@@ -139,7 +139,7 @@ func TestTokensPageHubOnlyAndRendered(t *testing.T) {
 		t.Fatalf("GET /tokens (alice) = %d, want 200", pRec.Code)
 	}
 	body := pRec.Body.String()
-	for _, w := range []string{"Your tokens", `id="mint-btn"`, `id="token-list"`} {
+	for _, w := range []string{"<h1>Devices &amp; access</h1>", `id="mint-btn"`, `id="token-list"`} {
 		if !strings.Contains(body, w) {
 			t.Errorf("tokens page missing %q", w)
 		}

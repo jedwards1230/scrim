@@ -45,7 +45,7 @@ type shellData struct {
 
 	OIDC bool
 	// Account is the account menu's context: the viewer's identity plus the
-	// Tokens / Log out actions. Empty (and so unrendered) outside OIDC.
+	// Devices & access / Log out actions. Empty (and so unrendered) outside OIDC.
 	Account    accountData
 	Owned      bool
 	OwnerLabel string

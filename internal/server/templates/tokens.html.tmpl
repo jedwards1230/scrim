@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>scrim &mdash; tokens</title>
+<title>scrim &mdash; devices &amp; access</title>
 <style>
 {{template "theme-css" .}}
   * { box-sizing: border-box; }
@@ -35,7 +35,7 @@
     text-decoration: none; display: inline-block;
   }
   .btn:hover { border-color: var(--muted); }
-{{template "menu-css" .}}  section { margin-bottom: 1.5rem; }
+{{template "menu-css" .}}  section { margin-bottom: 2rem; }
   h2 { font-size: 0.95rem; margin: 0 0 0.6rem; }
   .card {
     border: 1px solid var(--border); border-radius: 0.75rem;
@@ -52,19 +52,30 @@
   .options input[type="text"] { flex: none; width: 12rem; }
   .token { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
   .token .name { font-weight: 600; }
+  /* Recency leads: it's the one fact this page exists to surface, so it sits
+     directly under the name in body-text weight, above the smaller detail. */
+  .token .lead { font-size: 0.88rem; margin-top: 0.2rem; }
+  .token .lead.never { color: var(--muted); }
   .token .detail { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
   .token.revoked { opacity: 0.55; }
   .pill { font-size: 0.7rem; border-radius: 999px; padding: 0.1rem 0.5rem; border: 1px solid var(--border); color: var(--muted); }
+  .badge {
+    font-size: 0.7rem; border-radius: 999px; padding: 0.1rem 0.5rem;
+    border: 1px solid var(--border); color: var(--muted);
+    margin-left: 0.4rem; white-space: nowrap;
+  }
   .secret-box { margin-top: 0.6rem; }
   .secret-box input { width: 100%; font-size: 0.8rem; padding: 0.4rem 0.5rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--bg); color: var(--fg); margin-bottom: 0.4rem; }
   .muted { color: var(--muted); font-size: 0.82rem; }
+  .note { max-width: 42rem; line-height: 1.45; margin: 0 0 0.9rem; }
+  .disclosure { margin-top: 0.5rem; }
   .error { color: #dc2626; font-size: 0.82rem; margin-top: 0.5rem; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.85rem; max-width: 48rem; margin-left: auto; margin-right: auto; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Your tokens</h1>
+  <h1>Devices &amp; access</h1>
   <div class="header-actions">
     {{if .Account.Principal}}{{template "account-menu" .Account}}{{end}}
     <a class="btn" href="/">&larr; Gallery</a>
@@ -72,8 +83,23 @@
   </div>
 </header>
 <main>
-  <section>
-    <h2>Mint a token</h2>
+  <section id="access">
+    <h2>What has access to your canvases</h2>
+    <p class="muted note" id="session-note">
+      This list covers <strong>tokens only</strong> &mdash; the credentials you hand to a CLI,
+      an agent, or an MCP client. Browser sign-ins are not listed here and cannot be signed out
+      one at a time: scrim's sessions are stateless and simply expire on their own (12 hours by
+      default). The only way to end them is for the operator to rotate the server's session
+      secret, which signs <em>everyone</em> out at once.
+    </p>
+    <div id="token-list"><p class="muted">Loading&hellip;</p></div>
+    <div class="disclosure" id="revoked-wrap" hidden>
+      <button id="revoked-toggle" class="btn" type="button" aria-expanded="false" aria-controls="revoked-list">Show revoked</button>
+      <div id="revoked-list" hidden></div>
+    </div>
+  </section>
+  <section id="mint">
+    <h2>Create a new token</h2>
     <div class="card">
       <div class="mint-row">
         <input id="mint-name" type="text" placeholder="Token name (e.g. laptop CLI)">
@@ -94,20 +120,24 @@
       <div id="mint-error" class="error" hidden></div>
     </div>
   </section>
-  <section>
-    <h2>Existing tokens</h2>
-    <div id="token-list"><p class="muted">Loading&hellip;</p></div>
-  </section>
 </main>
 <footer>scrim {{.Version}}</footer>
 <script>
 {{template "theme-js" .}}
 {{template "menu-js" .}}
 (function () {
-  // My-tokens management (#53): list, mint, revoke via the /api/tokens JSON
-  // endpoints. Every principal-supplied value (name, owner email, allowance
-  // targets) is written via textContent / .value, never innerHTML.
+  // Devices & access (#53). This page reads as an account's "devices / active
+  // sessions" view: it LEADS with what currently has access, ordered by
+  // recency, and keeps minting below that. Everything is driven by the
+  // /api/tokens JSON endpoints (list/mint/revoke) -- no new auth surface, no
+  // new routes.
+  //
+  // Every principal-supplied value (name, owner email, allowance targets) is
+  // written via textContent / .value, never innerHTML.
   var listEl = document.getElementById("token-list");
+  var revokedWrap = document.getElementById("revoked-wrap");
+  var revokedToggle = document.getElementById("revoked-toggle");
+  var revokedList = document.getElementById("revoked-list");
   var nameEl = document.getElementById("mint-name");
   var mintBtn = document.getElementById("mint-btn");
   var errEl = document.getElementById("mint-error");
@@ -119,6 +149,19 @@
   var allowEmails = document.getElementById("allow-emails");
   var allowGroups = document.getElementById("allow-groups");
   var autoshareEveryone = document.getElementById("autoshare-everyone");
+
+  // A token untouched for this long, or one never used at all since it was
+  // minted this long ago, gets a neutral "worth a look" badge. Stated as
+  // information, not alarm: an unused token is not evidence of anything wrong.
+  var STALE_USED_DAYS = 90;
+  var STALE_UNUSED_DAYS = 30;
+
+{{template "timefmt-js" .}}
+  function daysSince(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return 0;
+    return (Date.now() - then) / 86400000;
+  }
 
   function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
   function clearError() { errEl.textContent = ""; errEl.hidden = true; }
@@ -143,51 +186,131 @@
     return "auto-shares: " + kinds.join(", ");
   }
 
+  // Most recently active first, then the never-used, then newest-minted within
+  // each group. The API sorts by creation date, which answers a different
+  // question -- this ordering is entirely client-side and leaves the API's
+  // contract alone.
+  function byRecency(a, b) {
+    var au = a.last_used ? Date.parse(a.last_used) : NaN;
+    var bu = b.last_used ? Date.parse(b.last_used) : NaN;
+    var aUsed = !isNaN(au), bUsed = !isNaN(bu);
+    if (aUsed && bUsed) return bu - au;
+    if (aUsed !== bUsed) return aUsed ? -1 : 1;
+    return (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
+  }
+
+  function staleLabel(t) {
+    if (t.last_used) {
+      return daysSince(t.last_used) >= STALE_USED_DAYS ? "not used in " + STALE_USED_DAYS + "+ days" : "";
+    }
+    return daysSince(t.created_at) >= STALE_UNUSED_DAYS ? "never used since it was created" : "";
+  }
+
+  function tokenCard(t) {
+    var card = document.createElement("div");
+    card.className = "card token" + (t.revoked ? " revoked" : "");
+
+    var left = document.createElement("div");
+    var name = document.createElement("div");
+    name.className = "name";
+    name.textContent = t.name || "(unnamed)"; // textContent: a token name is principal-supplied
+
+    var stale = staleLabel(t);
+    if (stale && !t.revoked) {
+      var badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = stale;
+      name.appendChild(badge);
+    }
+    left.appendChild(name);
+
+    // The lead line is recency, phrased relatively, with the exact timestamp on
+    // the title -- the same treatment the canvas shell gives version history.
+    // A token that has NEVER been used says so outright: the old page simply
+    // omitted the bit, which made "never" and "long ago" look identical.
+    var lead = document.createElement("div");
+    lead.className = "lead";
+    if (t.last_used) {
+      lead.textContent = "Last used " + relative(t.last_used);
+      var exact = absolute(t.last_used);
+      if (exact) lead.title = exact;
+    } else {
+      lead.className = "lead never";
+      lead.textContent = "Never used";
+    }
+    left.appendChild(lead);
+
+    var detail = document.createElement("div");
+    detail.className = "detail";
+    var bits = ["created " + relative(t.created_at)];
+    bits.push(allowanceSummary(t.allowed_grant_targets));
+    var as = autoShareSummary(t.auto_share);
+    if (as) bits.push(as);
+    detail.textContent = bits.join(" · ");
+    var created = absolute(t.created_at);
+    if (created) detail.title = "Created " + created;
+    left.appendChild(detail);
+    card.appendChild(left);
+
+    if (t.revoked) {
+      var pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = "revoked";
+      card.appendChild(pill);
+    } else {
+      var btn = document.createElement("button");
+      btn.className = "btn";
+      btn.type = "button";
+      btn.textContent = "Revoke";
+      btn.addEventListener("click", function () { revoke(t.id); });
+      card.appendChild(btn);
+    }
+    return card;
+  }
+
+  // Frames the absence for what it is -- nothing else can reach these canvases
+  // -- rather than as a missing thing to go create. The second sentence has to
+  // stay true when revoked tokens exist, so it differs in that case.
+  function emptyState(hasRevoked) {
+    var p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = hasRevoked
+      ? "Nothing else has access to your canvases. Every token you've created has been revoked, so only your own browser sign-in can reach them."
+      : "Nothing else has access to your canvases. You haven't created any tokens, so only your own browser sign-in can reach them.";
+    return p;
+  }
+
+  function setRevokedOpen(open) {
+    revokedList.hidden = !open;
+    revokedToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    revokedToggle.textContent = (open ? "Hide revoked (" : "Show revoked (") + revokedList.childElementCount + ")";
+  }
+
   function renderTokens(tokens) {
     listEl.replaceChildren();
-    if (!tokens || tokens.length === 0) {
-      var p = document.createElement("p");
-      p.className = "muted";
-      p.textContent = "No tokens yet.";
-      listEl.appendChild(p);
+    revokedList.replaceChildren();
+    // Re-rendering after a revoke must not slam the disclosure shut on someone
+    // who had it open.
+    var wasOpen = revokedToggle.getAttribute("aria-expanded") === "true";
+    var all = (tokens || []).slice();
+    var live = all.filter(function (t) { return !t.revoked; }).sort(byRecency);
+    var dead = all.filter(function (t) { return t.revoked; }).sort(byRecency);
+
+    if (live.length === 0) {
+      listEl.appendChild(emptyState(dead.length > 0));
+    } else {
+      live.forEach(function (t) { listEl.appendChild(tokenCard(t)); });
+    }
+
+    // Revoked credentials are history, not access: they stay out of the live
+    // list entirely and behind a disclosure that disappears when empty.
+    if (dead.length === 0) {
+      revokedWrap.hidden = true;
       return;
     }
-    tokens.forEach(function (t) {
-      var card = document.createElement("div");
-      card.className = "card token" + (t.revoked ? " revoked" : "");
-
-      var left = document.createElement("div");
-      var name = document.createElement("div");
-      name.className = "name";
-      name.textContent = t.name || "(unnamed)";
-      left.appendChild(name);
-
-      var detail = document.createElement("div");
-      detail.className = "detail";
-      var bits = ["created " + new Date(t.created_at).toLocaleString()];
-      if (t.last_used) bits.push("last used " + new Date(t.last_used).toLocaleString());
-      bits.push(allowanceSummary(t.allowed_grant_targets));
-      var as = autoShareSummary(t.auto_share);
-      if (as) bits.push(as);
-      detail.textContent = bits.join(" · ");
-      left.appendChild(detail);
-      card.appendChild(left);
-
-      if (t.revoked) {
-        var pill = document.createElement("span");
-        pill.className = "pill";
-        pill.textContent = "revoked";
-        card.appendChild(pill);
-      } else {
-        var btn = document.createElement("button");
-        btn.className = "btn";
-        btn.type = "button";
-        btn.textContent = "Revoke";
-        btn.addEventListener("click", function () { revoke(t.id); });
-        card.appendChild(btn);
-      }
-      listEl.appendChild(card);
-    });
+    dead.forEach(function (t) { revokedList.appendChild(tokenCard(t)); });
+    revokedWrap.hidden = false;
+    setRevokedOpen(wasOpen);
   }
 
   function load() {
@@ -196,9 +319,10 @@
       .then(renderTokens)
       .catch(function () {
         listEl.replaceChildren();
+        revokedWrap.hidden = true;
         var p = document.createElement("p");
         p.className = "muted";
-        p.textContent = "Couldn't load tokens.";
+        p.textContent = "Couldn't load your tokens.";
         listEl.appendChild(p);
       });
   }
@@ -247,6 +371,7 @@
       .catch(function () { showError("Couldn't revoke that token."); });
   }
 
+  revokedToggle.addEventListener("click", function () { setRevokedOpen(revokedList.hidden); });
   mintBtn.addEventListener("click", mint);
   secretCopy.addEventListener("click", function () {
     secretVal.select();

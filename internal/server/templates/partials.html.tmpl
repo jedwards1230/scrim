@@ -103,7 +103,7 @@ needs per-page data stays in the page template.
       {{if .Name}}<div class="who">{{.Name}}</div>{{end}}
       {{if .Email}}<div class="{{if .Name}}when{{else}}who{{end}}">{{.Email}}</div>{{end}}
     </div>
-    <a class="menu-item" href="/tokens">Tokens</a>
+    <a class="menu-item" href="/tokens">Devices &amp; access</a>
     <form class="menu-form" method="POST" action="/auth/logout"><button class="menu-item" type="submit">Log out</button></form>
   </div>
 </div>
@@ -159,6 +159,36 @@ needs per-page data stays in the page template.
     });
   });
 })();
+{{end}}
+
+{{define "timefmt-js"}}  // Shared relative/absolute timestamp formatting for the dashboard pages:
+  // the canvas shell's version history and the access page's "last used" line.
+  // Both put a relative age in the text (which is what a human actually reads)
+  // and hang the exact locale timestamp off a title attribute, because two
+  // events on the same afternoon both read "2h ago" and the hover is what
+  // tells them apart. One implementation, so the two pages can't drift.
+  //
+  // Declared inside the caller's IIFE, so these stay function-scoped instead
+  // of becoming page globals.
+  function relative(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return "";
+    var secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (secs < 60) return "just now";
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return mins + "m ago";
+    var hours = Math.round(mins / 60);
+    if (hours < 24) return hours + "h ago";
+    return Math.round(hours / 24) + "d ago";
+  }
+
+  function absolute(iso) {
+    var then = new Date(iso);
+    if (isNaN(then.getTime())) return "";
+    // Locale-formatted, in the viewer's own timezone: the point is telling two
+    // same-day entries apart, which needs a real date and clock time.
+    return then.toLocaleString();
+  }
 {{end}}
 
 {{define "share-css"}}  dialog {

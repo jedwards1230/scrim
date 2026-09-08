@@ -120,14 +120,20 @@ only to the owner, admin, and explicit grantees until shared.
   one it actually created via the gallery's Claim button
   (`POST /api/canvases/{id}/claim`, any authenticated caller); a canvas already
   owned by someone else is `409`, claiming your own is an idempotent `200`.
-- **User tokens** (`/tokens` page; `POST`/`GET /api/tokens`,
+- **User tokens** (the "Devices & access" page at `/tokens`; `POST`/`GET /api/tokens`,
   `DELETE /api/tokens/{id}`) — a logged-in session mints a named bearer token
   that acts AS its owner on the Direct plane: canvases it creates or writes (via
   `scrim push --token` or `scrim mcp --hub`) are owned by that principal, not
   the shared admin credential. A token can carry `auto_share` grants (applied to
   every canvas it creates) and an `allowed_grant_targets` allowance bounding what
   it may later share interactively; minting a token for another principal is
-  admin-only (no privilege escalation).
+  admin-only (no privilege escalation). The page reads as an account's
+  "devices / active sessions" view — it leads with what currently has access,
+  ordered most-recently-used first, flags long-unused credentials, collapses
+  revoked ones behind a disclosure, and keeps minting below the list. It says
+  plainly that it covers **tokens only**: browser sign-ins are not listed and
+  cannot be ended individually (OIDC sessions are stateless and non-revocable —
+  PRD §12; rotating `--oidc-session-secret` is the all-or-nothing kill switch).
 - **Sharing** — `GET`/`POST /api/canvases/{id}/grants`,
   `DELETE .../grants/{grantRef}`. Grant kinds: `user` (one email), `group`,
   `everyone` (any authenticated viewer), `link` (an unguessable secret, shown
