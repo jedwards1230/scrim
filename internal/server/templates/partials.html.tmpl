@@ -189,6 +189,24 @@ needs per-page data stays in the page template.
     // same-day entries apart, which needs a real date and clock time.
     return then.toLocaleString();
   }
+
+  // until() is relative()'s forward-looking twin, for an instant in the FUTURE
+  // (a session's expiry). relative() cannot do this job: it clamps a negative
+  // age to zero, so every not-yet-expired timestamp came out as "just now" --
+  // which on a devices list read as "this session is about to die" for a
+  // session with hours left on it.
+  function until(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return "";
+    var secs = Math.round((then - Date.now()) / 1000);
+    if (secs <= 0) return "expired";
+    if (secs < 60) return "in under a minute";
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return "in " + mins + "m";
+    var hours = Math.round(mins / 60);
+    if (hours < 24) return "in " + hours + "h";
+    return "in " + Math.round(hours / 24) + "d";
+  }
 {{end}}
 
 {{define "share-css"}}  dialog {

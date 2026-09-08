@@ -46,8 +46,10 @@ scrim hub \
   session cookie; if empty a random one is generated (sessions then reset on
   restart). Set a stable value (**at least 32 bytes**, else the hub refuses to
   start) to persist sessions across restarts/replicas.
-- `--oidc-session-ttl` (env `SCRIM_OIDC_SESSION_TTL`, default `12h`). Sessions
-  are **stateless** — see the [threat model](threat-model.md#stateless-non-revocable-oidc-sessions).
+- `--oidc-session-ttl` (env `SCRIM_OIDC_SESSION_TTL`, default `12h`) — how long
+  a session lives if nobody signs it out. Sessions are **server-side records**
+  and individually revocable; see [Browser sessions](#browser-sessions-devices)
+  below and the [threat model](threat-model.md#revocable-oidc-sessions-at-the-cost-of-a-piece-of-state).
 - `--oidc-secure-cookies` (env `SCRIM_OIDC_SECURE_COOKIES`, default `true`) —
   leave on in production; pass `=false` only for a plain-HTTP local test hub.
   Despite the `oidc-` prefix it governs **every** cookie the hub sets: the OIDC
@@ -58,11 +60,50 @@ scrim hub \
 - `--oidc-post-logout-redirect-url` (env `SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL`) —
   optional, **off by default**; see [Logout](#logout) below.
 
+### Browser sessions (devices)
+
+Every login is recorded server-side, in a whole-file JSON registry
+(`sessions.json`) under the hub's meta dir — the `internal/session` package,
+shaped exactly like `internal/usertoken` with the parsed records additionally
+held in memory, since the gate consults them on every authenticated request.
+Each record holds the session id its cookie carries, the principal, the
+**User-Agent string**, and the created/last-seen/expiry timestamps. **No IP
+address is recorded**, and none is displayed. `last_seen` is persisted at most
+once every five minutes, so it lags slightly rather than costing a disk write
+per request.
+
+That registry is what makes a session revocable before it expires. The
+"Devices & access" page at `/tokens` lists a principal's live sign-ins above
+its tokens, labels the one making the request **This browser**, and offers a
+sign-out per entry (`GET /api/sessions`, `DELETE /api/sessions/{id}` — see
+[`api/openapi.yaml`](../api/openapi.yaml)). Ending a session takes effect on
+that browser's very next request. The device label is derived from the
+User-Agent with deliberately crude client-side parsing; an unrecognised agent
+is shown raw rather than labeled with a guess.
+
+Three properties are load-bearing:
+
+- **Session-only plane.** `/api/sessions*` accepts a browser session and
+  nothing else: a user token is `403`, and the admin push token — which has no
+  sign-ins of its own — gets an empty list and `404`. Another principal's
+  session id is `404`, never `403`, exactly like `DELETE /api/tokens/{id}`.
+- **Fail closed, but only on a real failure.** A registry that exists and
+  cannot be read or parsed rejects every session-authenticated request until an
+  operator fixes it. A *missing* file is an empty registry — a hub's first
+  boot — and permits logins normally. The admin push token never consults the
+  registry, so it stays the recovery path either way.
+- **The upgrade signs everyone out once.** A session cookie with no session id
+  in it — every cookie minted before the registry existed — is rejected
+  outright. That is intended: a cookie no record backs is a session nothing can
+  revoke.
+
 ### Logout
 
 Logging out performs **RP-initiated logout** ([OIDC RP-Initiated Logout 1.0][rpl]):
-`POST /auth/logout` clears scrim's own cookies and then redirects the browser to
-the IdP's `end_session_endpoint` so the **IdP session ends too**.
+`POST /auth/logout` clears scrim's own cookies, **drops the session's registry
+record** (so a copy of that cookie taken elsewhere stops working too), and then
+redirects the browser to the IdP's `end_session_endpoint` so the **IdP session
+ends too**.
 
 That second half is the whole point. Clearing only scrim's cookie is not a
 logout while the IdP's SSO cookie survives — the next request bounces through
@@ -130,10 +171,9 @@ only to the owner, admin, and explicit grantees until shared.
   admin-only (no privilege escalation). The page reads as an account's
   "devices / active sessions" view — it leads with what currently has access,
   ordered most-recently-used first, flags long-unused credentials, collapses
-  revoked ones behind a disclosure, and keeps minting below the list. It says
-  plainly that it covers **tokens only**: browser sign-ins are not listed and
-  cannot be ended individually (OIDC sessions are stateless and non-revocable —
-  PRD §12; rotating `--oidc-session-secret` is the all-or-nothing kill switch).
+  revoked ones behind a disclosure, and keeps minting below the list. Browser
+  sign-ins lead the page above the tokens, each individually signable-out — see
+  [Browser sessions](#browser-sessions-devices).
 - **Sharing** — `GET`/`POST /api/canvases/{id}/grants`,
   `DELETE .../grants/{grantRef}`. Grant kinds: `user` (one email), `group`,
   `everyone` (any authenticated viewer), `link` (an unguessable secret, shown

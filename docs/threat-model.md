@@ -44,18 +44,33 @@ connected* peer.
   headers in the first place. Neither half suffices alone; together they bound
   attribution to "scrim-mcp, holding the admin token, on the allowed path."
 
-## Stateless, non-revocable OIDC sessions
+## Revocable OIDC sessions, at the cost of a piece of state
 
-Hub OIDC sessions are **stateless** — there is no server-side session store, so
-a session can't be revoked before it expires. `/auth/logout` ends the IdP
-session too (RP-initiated logout, see [identity.md](identity.md#logout)), but
-the scrim-side half of that is still only a cookie clear **in that one
-browser**: a cookie already copied elsewhere stays valid until its TTL lapses,
-because nothing server-side is consulted to reject it.
+> **Reversed 2026-09-08.** This section previously described sessions as
+> stateless and non-revocable, with secret rotation as the only kill switch.
+> Sessions are now server-side records; what follows is the trade-off that
+> replaced it, not the one that was accepted before.
 
-- **Mitigation:** keep `--oidc-session-ttl` modest (default `12h`) so the window
-  of a leaked cookie is bounded. To invalidate **all** sessions at once in an
-  emergency, rotate `--oidc-session-secret` — every existing cookie's HMAC then
-  fails to verify. Setting a stable secret (≥32 bytes) is what lets sessions
-  survive restarts/replicas in the first place; rotating it is the deliberate
-  kill switch.
+Every login is recorded in a registry under the hub's meta dir
+(`internal/session`) and the request gate consults it, so a session can be
+ended before its cookie expires — from `/tokens`, or by logging out, which now
+drops the record as well as clearing the cookie. A cookie copied elsewhere dies
+with the session rather than outliving it to its TTL. Only the User-Agent
+string and the timestamps are recorded; **no IP address, ever**.
+
+The cost is a piece of hub state on the authentication path, which brings its
+own failure mode: if `sessions.json` exists but cannot be read or parsed, the
+hub **fails closed** and refuses every session-authenticated request until an
+operator repairs or removes it. A *missing* file is deliberately NOT that case —
+it is an empty registry, which is exactly a hub's first boot. Getting those two
+backwards would lock every user out permanently, so the distinction carries its
+own test.
+
+- **Mitigation:** writes are atomic (temp file + rename), so a reader only ever
+  sees a whole file and a torn write can't wedge the store. The **admin push
+  token never consults the registry at all** — it resolves before the session
+  branch — so it stays usable as the recovery credential precisely when the
+  registry is broken. `--oidc-session-ttl` still bounds a session nobody signs
+  out, and rotating `--oidc-session-secret` remains the all-at-once lever
+  (every existing cookie's HMAC then fails to verify). Setting a stable secret
+  (≥32 bytes) is still what lets sessions survive a restart.

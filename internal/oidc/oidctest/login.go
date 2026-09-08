@@ -67,6 +67,7 @@ func (i *IdP) LoginCookies(t *testing.T, auth *oidc.Authenticator, returnTo stri
 	// Step 3: deliver the callback to the hub, carrying the flow cookie the
 	// browser would still hold.
 	cbReq := httptest.NewRequest(http.MethodGet, oidc.CallbackPath+"?"+callbackLocation.RawQuery, nil)
+	cbReq.Header.Set("User-Agent", i.userAgent())
 	cbReq.AddCookie(flowCookie)
 	cbRec := httptest.NewRecorder()
 	auth.HandleCallback(cbRec, cbReq)
@@ -107,6 +108,17 @@ func (i *IdP) CallbackLocation(t *testing.T, auth *oidc.Authenticator) (flow *ht
 		t.Fatalf("authorize returned no Location: %v", err)
 	}
 	return flow, loc.RawQuery
+}
+
+// DefaultUserAgent is the User-Agent the simulated browser sends when IdP.
+// UserAgent is unset.
+const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
+
+func (i *IdP) userAgent() string {
+	if i.UserAgent != "" {
+		return i.UserAgent
+	}
+	return DefaultUserAgent
 }
 
 func findCookie(cookies []*http.Cookie, name string) *http.Cookie {

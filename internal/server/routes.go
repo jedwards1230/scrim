@@ -104,6 +104,15 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("GET /api/tokens", s.handleListTokens)
 		mux.HandleFunc("DELETE /api/tokens/{id}", s.handleRevokeToken)
 
+		// Browser-session management (#145). Same plane as /api/tokens: GET
+		// lists the caller's own sign-ins, DELETE ends one of them (authorized
+		// in withHubGate for a browser session only -- a user token or the
+		// machine plane gets 403). Registered unconditionally in hub mode like
+		// the token routes; with no OIDC configured there are simply no
+		// sessions to list.
+		mux.HandleFunc("GET /api/sessions", s.handleListSessions)
+		mux.HandleFunc("DELETE /api/sessions/{id}", s.handleRevokeSession)
+
 		// Principal autocomplete (#53): the share dialog's grantee suggestions.
 		// A session-gated read (general non-canvas read at the gate), thin over
 		// the principalLister seam the Authentik directory driver (#54) layers

@@ -54,6 +54,11 @@ type IdP struct {
 	Email  string
 	Name   string
 	Groups []string
+	// UserAgent is the User-Agent header the simulated browser sends on the
+	// callback -- what the hub records for a sign-in. Defaults to a Firefox
+	// string (see DefaultUserAgent); a real browser always sends one, so the
+	// fixture does too.
+	UserAgent string
 	// ForceNonce, when non-empty, overrides the nonce echoed into the ID
 	// token, so a test can drive the callback's nonce-mismatch rejection.
 	ForceNonce string

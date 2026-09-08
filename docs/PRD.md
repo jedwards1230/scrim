@@ -930,9 +930,20 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
   about the directly connected peer. Behind a reverse proxy every request arrives from the
   proxy, so the CIDR gate cannot distinguish clients — gate reads with OIDC instead. A
   trusted-proxy layer is a later phase.
-- **OIDC sessions are stateless and non-revocable.** Logout clears one browser's cookie; a
-  stolen cookie is valid until TTL. Keep `--oidc-session-ttl` modest (12h default); rotating
-  `--oidc-session-secret` invalidates every session at once and is the deliberate kill switch.
+- **OIDC sessions are server-side and individually revocable** — *reversed 2026-09-08; this bullet
+  previously read "stateless and non-revocable", with secret rotation as the only kill switch.*
+  Each login is recorded in a registry under the hub's meta dir (`internal/session`), the request
+  gate consults it, and `/tokens` lists every browser a principal is signed in from with a sign-out
+  control per entry. Signing one out takes effect on that browser's next request, so a copied
+  cookie dies with the session rather than living out its TTL. What is recorded is the User-Agent
+  string and the timestamps — never an IP address. The costs, accepted deliberately: a fifth piece
+  of hub state to keep consistent; an unreadable-or-corrupt registry fails **closed**, refusing
+  every session-authenticated request until an operator repairs or removes the file (a *missing*
+  file is an empty registry, not a failure — that is a hub's first boot); and the upgrade
+  invalidated every pre-existing cookie, so everyone logged in once more. Rotating
+  `--oidc-session-secret` still works as the all-at-once lever, and `--oidc-session-ttl` still
+  bounds a session that is never signed out. The admin push token deliberately never consults the
+  registry, so it remains the recovery path when the registry itself is broken.
 
 **Accepted operational limits.**
 

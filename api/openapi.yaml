@@ -10,8 +10,8 @@ info:
     client with no shared disk: per-file read/write/edit, whole-canvas push and copy, snapshot
     control, and canvas CRUD.
 
-    **Mostly hub-only.** Every `push`/`files`/`copy`/`snapshots`/`grants`/`tokens`/`claim`/
-    `principals` path here, plus `GET /api/openapi.yaml` and `/healthz`, is registered ONLY when the
+    **Mostly hub-only.** Every `push`/`files`/`copy`/`snapshots`/`grants`/`tokens`/`sessions`/
+    `claim`/`principals` path here, plus `GET /api/openapi.yaml` and `/healthz`, is registered ONLY when the
     daemon is started as a hub (`NewHub`). Five are NOT: `GET /api/status`, `GET`/`POST
     /api/canvases`, `DELETE /api/canvases/{id}`, and `POST /api/stop` are registered
     unconditionally, so the default local daemon (`scrim serve`) exposes them too — gated there by a
@@ -25,9 +25,9 @@ info:
     TOKEN, which authorizes ANY method and is the sole credential `POST /api/stop` accepts; and a
     USER TOKEN, which authorizes the same API bounded to canvases its owner may write (`403`
     otherwise). Absent any valid bearer, a write (any method other than GET/HEAD) is rejected `401`
-    — except on the session plane: canvas claim, `/api/tokens*`, and mutating a canvas's own
-    `grants*` also accept a browser session cookie, and `POST /api/tokens` rejects a *user token*
-    with `403`. Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is
+    — except on the session plane: canvas claim, `/api/tokens*`, `/api/sessions*`, and mutating a
+    canvas's own `grants*` also accept a browser session cookie, and `POST /api/tokens` rejects a
+    *user token* with `403` (as does all of `/api/sessions*`, which is session-only). Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is
     configured with OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a
     browser navigation) and the CIDR/read-token path is NOT consulted at all; otherwise the client
     IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a separate read token is
@@ -77,6 +77,10 @@ tags:
     description: >-
       User-minted bearer tokens that act as their owner on the machine plane (mint, list, revoke).
       Hub-only.
+  - name: sessions
+    description: >-
+      The caller's own browser sign-ins (list, sign out one). Server-side records, so a session is
+      revocable before its cookie expires. Session-authenticated only. Hub-only.
   - name: grants
     description: >-
       Per-canvas view-only sharing grants (list, add, remove) — user/group/everyone/link. Hub-only.
@@ -833,6 +837,77 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/sessions:
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      summary: List the caller's own browser sign-ins.
+      description: >-
+        Lists the calling principal's live browser sessions, newest first, scoped by the IdP
+        subject. Each entry carries the browser's User-Agent string and the sign-in/last-seen/expiry
+        timestamps; NO IP address or location is recorded, so none is returned. A caller with no
+        subject of its own — the admin push token, or a user-token principal — correctly gets an
+        empty list rather than anyone else's devices. `503` when the hub's session registry cannot
+        be read: on this endpoint "unavailable" and "you have no sessions" must not look alike.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: The caller's live browser sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionMeta'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The session registry is unreadable; the hub is failing closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sessions/{id}:
+    delete:
+      tags: [sessions]
+      operationId: revokeSession
+      summary: Sign one of the caller's browsers out.
+      description: >-
+        Ends one of the calling principal's own browser sessions server-side; that browser's very
+        next request is no longer authenticated. Revoking the session making the request signs the
+        caller out immediately. A session that does not exist, has expired, or belongs to another
+        principal is `404` — never revealing that a session the caller can't touch exists (the same
+        semantics `DELETE /api/tokens/{id}` has). Session-authenticated only: a user token or the
+        machine plane is rejected, and the admin push token has no sessions of its own (`404`).
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The session id, as returned by GET /api/sessions.
+      responses:
+        '204':
+          description: Session ended. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The session registry is unreadable; the hub is failing closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/principals:
     get:
       tags: [principals]
@@ -1096,11 +1171,13 @@ components:
         The browser session cookie minted by the OIDC login flow (`HttpOnly`, `SameSite=Lax`), and
         therefore only ever present on a hub configured with OIDC. It authorizes machine-API READS,
         subject to the same per-canvas visibility filter a user token gets. Beyond that the session
-        plane is read-only, with three deliberate exceptions that accept it as a WRITE credential:
-        canvas claim, `/api/tokens*`, and mutating a canvas's own grants.
+        plane is read-only, with four deliberate exceptions that accept it as a WRITE credential:
+        canvas claim, `/api/tokens*`, `/api/sessions*`, and mutating a canvas's own grants.
         Those are owner actions the browser must perform natively; `SameSite=Lax` is what makes them
         CSRF-safe. `POST /api/tokens` accepts a session or the admin push token but rejects a USER
-        token with `403` — minting from a token would be privilege escalation.
+        token with `403` — minting from a token would be privilege escalation. `/api/sessions*` goes
+        further and is session-ONLY: a browser's own sign-ins are not the machine plane's business,
+        so a user token is `403` and the admin push token, having no sessions of its own, is `404`.
 
   parameters:
     LinkSecret:
@@ -1484,6 +1561,39 @@ components:
         allowed_grant_targets:
           $ref: '#/components/schemas/Allowance'
       required: [id, name, owner_email, created_at]
+
+    SessionMeta:
+      type: object
+      description: >-
+        One browser sign-in. The User-Agent string is the ONLY request-derived value recorded — no
+        IP address, no location.
+      properties:
+        id:
+          type: string
+          description: >-
+            The session id, also carried inside the signed session cookie. Not a credential on its
+            own (the cookie's HMAC is), which is why it is safe to list and to address in a URL.
+        user_agent:
+          type: string
+          description: The browser's User-Agent, verbatim, for the UI to derive a device label from.
+        created_at:
+          type: string
+          format: date-time
+          description: When this browser signed in.
+        last_seen:
+          type: string
+          format: date-time
+          description: >-
+            Last request from this session. Persisted at most once every 5 minutes (the revocation
+            check runs per request and must not write to disk each time), so it lags by up to that.
+        expires_at:
+          type: string
+          format: date-time
+          description: When the session expires on its own, per --oidc-session-ttl.
+        current:
+          type: boolean
+          description: True for the session making this very request ("This browser").
+      required: [id, created_at, last_seen, expires_at]
 
     PrincipalSuggestion:
       type: object

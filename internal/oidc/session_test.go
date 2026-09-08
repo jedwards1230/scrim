@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	s := testSigner()
 	now := time.Unix(1_000_000, 0)
 	cookie := s.encodeSession(Session{
+		ID:      "sess-abc",
 		Subject: "user-123",
 		Email:   "user@example.com",
 		Name:    "User",
@@ -64,6 +66,9 @@ func TestSessionRoundTrip(t *testing.T) {
 	sess, err := s.decodeSession(cookie, now)
 	if err != nil {
 		t.Fatalf("decodeSession error = %v, want nil", err)
+	}
+	if sess.ID != "sess-abc" {
+		t.Errorf("session id = %q, want %q", sess.ID, "sess-abc")
 	}
 	if sess.Subject != "user-123" {
 		t.Errorf("subject = %q, want %q", sess.Subject, "user-123")
@@ -98,7 +103,7 @@ func TestSignerDomainSeparation(t *testing.T) {
 func TestSessionExpiry(t *testing.T) {
 	s := testSigner()
 	issued := time.Unix(1_000_000, 0)
-	cookie := s.encodeSession(Session{Subject: "user-123"}, issued.Add(time.Hour))
+	cookie := s.encodeSession(Session{ID: "sess-abc", Subject: "user-123"}, issued.Add(time.Hour))
 
 	// Exactly at expiry is already invalid (>=), as is anything after.
 	for _, now := range []time.Time{issued.Add(time.Hour), issued.Add(2 * time.Hour)} {
@@ -115,9 +120,32 @@ func TestSessionExpiry(t *testing.T) {
 func TestSessionRejectsEmptySubject(t *testing.T) {
 	s := testSigner()
 	now := time.Unix(1_000_000, 0)
-	cookie := s.encodeSession(Session{}, now.Add(time.Hour))
+	cookie := s.encodeSession(Session{ID: "sess-abc"}, now.Add(time.Hour))
 	if _, err := s.decodeSession(cookie, now); err == nil {
 		t.Error("decodeSession with empty subject error = nil, want rejection")
+	}
+}
+
+// TestSessionRejectsMissingID pins the migration half of #145: a cookie with no
+// session id -- which is exactly the shape every cookie minted before the
+// server-side registry existed had -- must decode as invalid. If it didn't,
+// those sessions would stay alive and unrevocable, since there is no registry
+// record to revoke them through.
+func TestSessionRejectsMissingID(t *testing.T) {
+	s := testSigner()
+	now := time.Unix(1_000_000, 0)
+
+	// A correctly-signed, unexpired, subject-carrying payload in the OLD wire
+	// format (no "sid" field at all), signed under the real session domain.
+	legacy := s.sign([]byte(`{"sub":"user-123","exp":` + strconv.FormatInt(now.Add(time.Hour).Unix(), 10) + `}`))
+	if _, err := s.decodeSession(legacy, now); err == nil {
+		t.Error("decodeSession of a pre-registry cookie error = nil, want rejection")
+	}
+
+	// Same thing via the current encoder with an empty ID.
+	empty := s.encodeSession(Session{Subject: "user-123"}, now.Add(time.Hour))
+	if _, err := s.decodeSession(empty, now); err == nil {
+		t.Error("decodeSession with an empty session id error = nil, want rejection")
 	}
 }
 

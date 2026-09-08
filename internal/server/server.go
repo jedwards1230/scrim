@@ -24,6 +24,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/mdns"
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/principal"
+	"github.com/jedwards1230/scrim/internal/session"
 	"github.com/jedwards1230/scrim/internal/state"
 	"github.com/jedwards1230/scrim/internal/usertoken"
 	"github.com/jedwards1230/scrim/internal/version"
@@ -78,6 +79,14 @@ type Server struct {
 	// (owner attribution + owner-only writes). Non-nil only for a hub (set in
 	// NewHub); the default daemon leaves it nil. #52/#51 reach it via s.tokens.
 	tokens *usertoken.Store
+
+	// sessions is the hub's server-side registry of browser sign-ins: what
+	// makes an OIDC session listable on the devices page and revocable before
+	// its cookie expires. Non-nil only for a hub started WITH OIDC (set in
+	// NewHub, alongside oidcAuth) -- without OIDC there are no sessions to
+	// record. The admin push-token path deliberately never consults it, so a
+	// broken registry leaves the machine plane (and hub recovery) untouched.
+	sessions *session.Store
 }
 
 // New returns a Server configured from cfg. Call Run to start it.

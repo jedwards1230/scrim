@@ -82,9 +82,19 @@ func (s signer) verify(value string) ([]byte, error) {
 // keys on the IdP subject (the stable identity key, per the auto-registration
 // model) and additionally carries the email/name/groups claims the hub's
 // ownership + grant enforcement needs -- captured at login so enforcement is a
-// pure claims read, never an IdP round-trip. A valid, unexpired,
-// correctly-signed session cookie IS the authorization for read access.
+// pure claims read, never an IdP round-trip.
+//
+// A correctly-signed, unexpired cookie is necessary but no longer sufficient:
+// it also carries an ID naming a record in the hub's server-side session
+// registry (internal/session), which the gate consults so a sign-in can be
+// revoked before its cookie expires. A cookie with no ID -- which is every
+// cookie minted before the registry existed -- decodes as invalid, so those
+// sessions are ended by the upgrade itself rather than lingering unrevocable.
 type Session struct {
+	// ID names this sign-in in the hub's session registry. Minted at login and
+	// always present in a valid cookie; it is not a credential on its own (the
+	// cookie's HMAC is), so it is safe to list in a UI and address in a URL.
+	ID      string
 	Subject string
 	Email   string
 	Name    string
@@ -94,6 +104,7 @@ type Session struct {
 
 // session is the on-the-wire (JSON) form of a Session inside the signed cookie.
 type session struct {
+	ID      string   `json:"sid"`
 	Subject string   `json:"sub"`
 	Email   string   `json:"email,omitempty"`
 	Name    string   `json:"name,omitempty"`
@@ -104,6 +115,7 @@ type session struct {
 // encodeSession signs sess valid until expiry, carrying every claim field.
 func (s signer) encodeSession(sess Session, expiry time.Time) string {
 	payload, _ := json.Marshal(session{
+		ID:      sess.ID,
 		Subject: sess.Subject,
 		Email:   sess.Email,
 		Name:    sess.Name,
@@ -115,8 +127,11 @@ func (s signer) encodeSession(sess Session, expiry time.Time) string {
 
 // decodeSession verifies value's signature and expiry, returning the Session it
 // attests to. now is passed in so tests can drive expiry deterministically. A
-// wrong signature, wrong domain, malformed payload, empty subject, or expired
-// session all map to the single opaque errBadCookie.
+// wrong signature, wrong domain, malformed payload, empty session id, empty
+// subject, or expired session all map to the single opaque errBadCookie. The
+// empty-id rejection is what invalidates every pre-registry cookie: those were
+// signed with no `sid`, so they can no longer authenticate anything and their
+// holders log in once more.
 func (s signer) decodeSession(value string, now time.Time) (Session, error) {
 	payload, err := s.verify(value)
 	if err != nil {
@@ -126,7 +141,7 @@ func (s signer) decodeSession(value string, now time.Time) (Session, error) {
 	if err := json.Unmarshal(payload, &sess); err != nil {
 		return Session{}, errBadCookie
 	}
-	if sess.Subject == "" || now.Unix() >= sess.Expiry {
+	if sess.ID == "" || sess.Subject == "" || now.Unix() >= sess.Expiry {
 		return Session{}, errBadCookie
 	}
 	// session and Session hold the same fields (session is just the JSON-tagged

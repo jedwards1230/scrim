@@ -54,22 +54,68 @@ func TestAccessPageLeadsWithTheAccessList(t *testing.T) {
 	}
 }
 
-// TestAccessPageDisclosesSessionsAreNotListed pins the honesty note. The page
-// covers tokens only: OIDC sessions are stateless and non-revocable
-// (docs/PRD.md §12), so the page must say so rather than let a reader assume
-// "devices & access" covers their browser sign-ins too.
-func TestAccessPageDisclosesSessionsAreNotListed(t *testing.T) {
+// TestAccessPageListsBrowserSessionsFirst pins the reversal in #145: browser
+// sign-ins ARE listed now, above the tokens, each individually signable-out.
+// The old copy claiming they can't be listed must be gone -- keeping it would
+// be an outright false statement about what the page in front of the reader
+// does.
+func TestAccessPageListsBrowserSessionsFirst(t *testing.T) {
 	body := aliceAccessPage(t)
 
 	for _, want := range []string{
-		`id="session-note"`,
-		"<strong>tokens only</strong>",
+		`<section id="sessions">`,
+		`<div id="session-list">`,
+		"Browsers you're signed in from",
+		"scrim records no IP addresses",
+		`fetch("/api/sessions"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("access page's sessions section missing %q", want)
+		}
+	}
+
+	// The stale, now-false claims must not survive anywhere on the page.
+	for _, gone := range []string{
 		"Browser sign-ins are not listed here",
 		"sessions are stateless",
 		"rotate the server's session",
 	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("access page still claims %q, which is false now that sessions are listed and revocable", gone)
+		}
+	}
+
+	sessions := strings.Index(body, `<div id="session-list">`)
+	tokens := strings.Index(body, `<div id="token-list">`)
+	if sessions < 0 || tokens < 0 {
+		t.Fatalf("access page missing a list (sessions=%d tokens=%d)", sessions, tokens)
+	}
+	if sessions > tokens {
+		t.Errorf("token list precedes the session list (sessions=%d tokens=%d): sign-ins lead the page", sessions, tokens)
+	}
+}
+
+// TestAccessPageMarksAndGuardsTheCurrentSession pins the two properties that
+// keep the sign-out control safe to press: the session making the request is
+// labeled, and ending THAT one confirms first because it signs you out here.
+func TestAccessPageMarksAndGuardsTheCurrentSession(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	for _, want := range []string{
+		`badge.textContent = "This browser";`,
+		`btn.textContent = s.current ? "Sign out here" : "Sign out";`,
+		"window.confirm(",
+		"function deviceLabel(ua) {",
+		// The honest fallback: an unrecognised user agent is shown raw rather
+		// than labeled with a guess. (Asserted as the whole if/return pair --
+		// html/template strips JS comments, so the surrounding prose isn't in
+		// the rendered page to match on.)
+		`if (browser) return browser;`,
+		`if (os) return os;`,
+		`    return ua;`,
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("access page's honesty note missing %q", want)
+			t.Errorf("access page script missing %q", want)
 		}
 	}
 }
@@ -140,5 +186,25 @@ func TestTimeFormatHelpersAreShared(t *testing.T) {
 		if n := strings.Count(page.body, "function absolute(iso) {"); n != 1 {
 			t.Errorf("%s page defines absolute() %d times, want exactly 1 (the shared partial)", page.name, n)
 		}
+	}
+}
+
+// TestSessionExpiryUsesAForwardFormatter pins the fix for a bug that only
+// showed up in a browser: the expiry line was rendered with relative(), which
+// clamps a negative age to zero, so a session with ten hours left on it read
+// "expires just now" -- on a devices page that reads as "you are about to be
+// signed out". A future instant needs until(), relative()'s forward-looking
+// twin.
+func TestSessionExpiryUsesAForwardFormatter(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	if !strings.Contains(body, "until(s.expires_at)") {
+		t.Error("session expiry is not rendered with the forward-looking until() formatter")
+	}
+	if strings.Contains(body, "relative(s.expires_at)") {
+		t.Error("session expiry uses relative(), which renders every future instant as just now")
+	}
+	if !strings.Contains(body, "function until(iso)") {
+		t.Error("the shared time helpers do not define until()")
 	}
 }
