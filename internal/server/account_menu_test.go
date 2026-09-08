@@ -11,18 +11,19 @@ import (
 
 // accountMenuMarkers are the substrings that prove the shared account menu
 // rendered: a real menu button (not the old inert chip), the popover it
-// controls, and the two account actions inside it -- Tokens as a link and Log
-// out as a real POST form (never a GET).
+// controls, and the two account actions inside it -- "Devices & access" as a
+// link (the /tokens route is unchanged; only the label reframed) and Log out as
+// a real POST form (never a GET).
 var accountMenuMarkers = []string{
 	`id="account-btn"`,
 	`aria-controls="account-menu"`,
 	`id="account-menu"`,
-	`href="/tokens"`,
+	`href="/tokens">Devices &amp; access</a>`,
 	`method="POST" action="/auth/logout"`,
 }
 
 // TestAccountMenuOnGalleryAndShell proves the account menu -- the viewer's
-// identity plus Tokens and Log out -- renders identically on the gallery AND
+// identity plus Devices & access and Log out -- renders identically on the gallery AND
 // on the canvas shell. The shell is the load-bearing half: a collaborator who
 // arrives on a share link lands there, and before this it had no logout and no
 // route to /tokens at all.

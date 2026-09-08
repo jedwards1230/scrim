@@ -175,26 +175,7 @@
   var versionsLoaded = false;
   var CANVAS_ID = document.body.getAttribute("data-canvas-id") || "";
 
-  function relative(iso) {
-    var then = Date.parse(iso);
-    if (isNaN(then)) return "";
-    var secs = Math.max(0, Math.round((Date.now() - then) / 1000));
-    if (secs < 60) return "just now";
-    var mins = Math.round(secs / 60);
-    if (mins < 60) return mins + "m ago";
-    var hours = Math.round(mins / 60);
-    if (hours < 24) return hours + "h ago";
-    return Math.round(hours / 24) + "d ago";
-  }
-
-  function absolute(iso) {
-    var then = new Date(iso);
-    if (isNaN(then.getTime())) return "";
-    // Locale-formatted, in the viewer's own timezone: the point is telling two
-    // same-day versions apart, which needs a real date and clock time.
-    return then.toLocaleString();
-  }
-
+{{template "timefmt-js" .}}
   function renderVersions(entries) {
     versionsBox.replaceChildren();
     var list = document.createElement("ul");

@@ -4,7 +4,7 @@ import "github.com/jedwards1230/scrim/internal/identity"
 
 // accountData is the render context of the account menu -- the shared header
 // control (see the "account-menu" partial) that carries the viewer's identity
-// plus the two account-level actions, Tokens and Log out.
+// plus the two account-level actions, Devices & access and Log out.
 //
 // It exists so the gallery, the canvas shell, and the my-tokens page render one
 // menu from one template instead of three hand-rolled header variants that can
