@@ -11,6 +11,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/oidc/oidctest"
+	"github.com/jedwards1230/scrim/internal/session"
 )
 
 // oidcTestSecret is shared between the hub's own authenticator and the
@@ -37,6 +38,21 @@ func newOIDCHub(t *testing.T) (*Server, *oidc.Authenticator, *oidctest.IdP) {
 	if err != nil {
 		t.Fatalf("NewHub with OIDC error = %v", err)
 	}
+	// The parallel authenticator must register its logins in the HUB's session
+	// registry, exactly as the hub's own does: since #145 the gate rejects a
+	// session cookie whose id has no live record, so a cookie minted against an
+	// unregistered authenticator would authenticate nothing.
+	oidcCfg.RegisterSession = func(sess oidc.Session, userAgent string, expiry time.Time) error {
+		return s.sessions.Create(session.Record{
+			ID:        sess.ID,
+			Subject:   sess.Subject,
+			Email:     sess.Email,
+			UserAgent: userAgent,
+			ExpiresAt: expiry,
+		})
+	}
+	oidcCfg.EndSession = func(id string) { _ = s.sessions.End(id) }
+
 	auth, err := oidc.New(context.Background(), oidcCfg)
 	if err != nil {
 		t.Fatalf("parallel oidc.New error = %v", err)

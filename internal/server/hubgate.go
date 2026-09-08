@@ -218,9 +218,13 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 		}
 	}
 
-	// 3. A valid OIDC session cookie.
+	// 3. A valid OIDC session cookie whose id is still live in the server-side
+	// session registry. The cookie proves the login happened; the registry is
+	// what makes that login revocable before the cookie expires (a signed-out
+	// device, or one signed out remotely from the devices page, has no record
+	// left and authenticates nothing).
 	if s.oidcAuth != nil {
-		if sess, ok := s.oidcAuth.SessionFromRequest(r); ok {
+		if sess, ok := s.oidcAuth.SessionFromRequest(r); ok && s.sessionLive(sess.ID) {
 			return identity.Claims{
 				Subject: sess.Subject,
 				Email:   sess.Email,
@@ -232,6 +236,30 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 
 	// 4. Anonymous.
 	return identity.Claims{}, nil
+}
+
+// sessionLive reports whether id names a live (unrevoked, unexpired) sign-in in
+// the hub's session registry. It is FAIL-CLOSED in both directions a caller
+// might get wrong:
+//
+//   - a registry that could not be read or parsed (a corrupt file, not a
+//     missing one -- see internal/session) makes every session-authenticated
+//     request anonymous, rather than falling back to trusting the cookie alone
+//     and silently un-revoking every session someone had signed out;
+//   - a nil store (which OIDC is never configured without) is likewise a "no".
+//
+// The lookup is an in-memory map read, so it costs nothing per request; the
+// store persists a LastSeen bump only when the recorded one has gone stale.
+//
+// Nothing here is on the admin push token's path: that credential resolves in
+// branch 1 of resolveClaims and never reaches this function, which is what
+// keeps it usable as the recovery path when the registry itself is broken.
+func (s *Server) sessionLive(id string) bool {
+	if s.sessions == nil {
+		return false
+	}
+	_, ok, err := s.sessions.Lookup(id)
+	return err == nil && ok
 }
 
 // splitActorGroups parses the comma-separated X-Scrim-Actor-Groups header into a
@@ -297,6 +325,25 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// A user-token principal may not mint further tokens (no privilege
 	// escalation); nor may the machine plane (admin bearer / forwarded actor)
 	// or an anonymous caller.
+	// Session management: a logged-in OIDC session ends its OWN browser
+	// sign-ins. Keyed on Subject rather than Email because a session record is
+	// keyed on the IdP subject -- and because that is exactly what excludes the
+	// two credentials that must not reach here: a user token and the machine
+	// plane carry no subject of their own, so they get the same 403 they get on
+	// /api/tokens.
+	if isSessionPath(r.URL.Path) {
+		if c.Subject != "" && tok == nil && !machineActor {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c.Authenticated() {
+			http.Error(w, "forbidden: session management requires a browser session", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "unauthorized: login required", http.StatusUnauthorized)
+		return
+	}
+
 	if isTokenPath(r.URL.Path) {
 		if c.Email != "" && tok == nil && !machineActor {
 			next.ServeHTTP(w, r)
@@ -450,6 +497,13 @@ func (s *Server) userTokenMayWrite(r *http.Request, c identity.Claims) bool {
 // isTokenPath reports whether path addresses the token-management endpoints.
 func isTokenPath(path string) bool {
 	return path == "/api/tokens" || strings.HasPrefix(path, "/api/tokens/")
+}
+
+// isSessionPath reports whether path addresses the browser-session endpoints
+// (GET /api/sessions, DELETE /api/sessions/{id}). They sit on the same plane as
+// /api/tokens: a logged-in browser session listing and ending its OWN sign-ins.
+func isSessionPath(path string) bool {
+	return path == "/api/sessions" || strings.HasPrefix(path, "/api/sessions/")
 }
 
 // isClaimPath reports whether path is a canvas-claim request

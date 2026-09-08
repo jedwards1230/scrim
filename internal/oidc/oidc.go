@@ -121,6 +121,25 @@ type Config struct {
 	// contain tokens, URLs, claim values, or any request-derived text -- the
 	// caller wires this to the hub's scrubbed logging surface.
 	LogAuthFailure func(reason string)
+	// RegisterSession, if non-nil, records a completed login in the hub's
+	// server-side session registry (internal/session) so it can be listed on
+	// the devices page and revoked before its cookie expires. It is called
+	// with the minted Session (its ID already set), the browser's User-Agent
+	// string, and the cookie's expiry -- BEFORE the session cookie is set, and
+	// FAIL-CLOSED: an error aborts the login rather than issuing a cookie no
+	// registry knows about (which would be unrevocable by construction). The
+	// User-Agent is the only request-derived value passed; no IP address is
+	// ever handed over.
+	//
+	// Nil leaves sessions unregistered: the cookie still carries an id, and
+	// there is simply nothing to consult. That is the standalone-oidc case
+	// (this package's own tests); the hub always wires it.
+	RegisterSession func(sess Session, userAgent string, expiry time.Time) error
+	// EndSession, if non-nil, is called on logout with the session id being
+	// signed out, so the registry entry goes away at the same moment the
+	// cookie does. Best-effort by contract: logout has already cleared the
+	// cookie and must still reach the IdP.
+	EndSession func(id string)
 	// OnLogin, if non-nil, is called after a successful login with the
 	// authenticated principal's email, display name, and groups, so the hub can
 	// feed its principal registry. It keeps oidc decoupled from the registry (a
@@ -163,10 +182,12 @@ type Authenticator struct {
 	// the retained-ID-token cookie can never verify as a session or flow cookie.
 	idTokenSigner signer
 
-	sessionTTL time.Duration
-	secure     bool
-	logFailure func(reason string)
-	onLogin    func(email, name string, groups []string)
+	sessionTTL      time.Duration
+	secure          bool
+	logFailure      func(reason string)
+	onLogin         func(email, name string, groups []string)
+	registerSession func(sess Session, userAgent string, expiry time.Time) error
+	endSession      func(id string)
 
 	// now is time.Now in production; overridable in tests for deterministic
 	// expiry.
@@ -293,6 +314,8 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		secure:                cfg.SecureCookies,
 		logFailure:            cfg.LogAuthFailure,
 		onLogin:               cfg.OnLogin,
+		registerSession:       cfg.RegisterSession,
+		endSession:            cfg.EndSession,
 		now:                   time.Now,
 	}, nil
 }
@@ -444,13 +467,37 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// fall back to an empty profile rather than rejecting an authenticated user.
 	_ = idToken.Claims(&claims)
 
+	// Mint the session id the cookie will carry and the registry will key on.
+	// It is generated here, alongside the cookie it lives in, so there is
+	// exactly one place a session comes into existence.
+	sid, err := randToken()
+	if err != nil {
+		a.fail(w, r, http.StatusInternalServerError, "callback: generating session id")
+		return
+	}
 	sess := Session{
+		ID:      sid,
 		Subject: idToken.Subject,
 		Email:   claims.Email,
 		Name:    claims.Name,
 		Groups:  claims.Groups,
 	}
-	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, a.now().Add(a.sessionTTL)), a.sessionTTL)
+
+	expiry := a.now().Add(a.sessionTTL)
+
+	// Record the sign-in BEFORE handing out the cookie, and fail the login if
+	// that fails. A cookie whose id no registry knows about authenticates
+	// nothing (the gate rejects it), so issuing one anyway would look like a
+	// successful login that immediately bounces back to /auth/login -- far
+	// worse than a plain, honest failure.
+	if a.registerSession != nil {
+		if err := a.registerSession(sess, r.UserAgent(), expiry); err != nil {
+			a.fail(w, r, http.StatusInternalServerError, "callback: recording session failed")
+			return
+		}
+	}
+
+	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, expiry), a.sessionTTL)
 
 	// Retain the raw ID token for logout's id_token_hint. Deliberately AFTER
 	// the session cookie and deliberately non-fatal: the user is authenticated
@@ -491,11 +538,20 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 //     it owns rather than guessing a provider-shaped URL.
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	// Read both cookies before clearing, so the hint survives the clear.
-	_, hadSession := a.SessionFromRequest(r)
+	sess, hadSession := a.SessionFromRequest(r)
 	hint := a.idTokenHint(r)
 
 	a.clearCookie(w, SessionCookieName)
 	a.clearCookie(w, idTokenCookieName)
+
+	// Revoke server-side too. Clearing the cookie only ends the session in the
+	// browser that asked; dropping the registry entry ends it for a copy of
+	// that cookie taken anywhere else, which is the whole point of keeping a
+	// registry. Best-effort by contract (the hook swallows its own errors):
+	// logout must still reach the IdP either way.
+	if hadSession && a.endSession != nil {
+		a.endSession(sess.ID)
+	}
 
 	if !hadSession || a.endSessionEndpoint == "" {
 		http.Redirect(w, r, "/", http.StatusFound)

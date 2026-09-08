@@ -2,11 +2,13 @@ package oidc_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/oidc/oidctest"
@@ -689,4 +691,171 @@ func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
 		}
 	}
 	return nil
+}
+
+// TestCallbackRegistersSessionWithUserAgent proves the login records itself in
+// the server-side registry BEFORE the cookie is handed out, carrying the same
+// session id the cookie will present, the browser's User-Agent, and the
+// cookie's expiry -- and nothing else. No IP address is passed, by design (#145
+// decision 2); the hook's signature is the enforcement of that.
+func TestCallbackRegistersSessionWithUserAgent(t *testing.T) {
+	idp := oidctest.New(t)
+	idp.Subject = "sub-registered"
+
+	var gotSession oidc.Session
+	var gotUA string
+	var gotExpiry time.Time
+	calls := 0
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		RegisterSession: func(sess oidc.Session, userAgent string, expiry time.Time) error {
+			calls++
+			gotSession, gotUA, gotExpiry = sess, userAgent, expiry
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	flow, query := idp.CallbackLocation(t, auth)
+	req := httptest.NewRequest(http.MethodGet, oidc.CallbackPath+"?"+query, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) Firefox/135.0")
+	req.AddCookie(flow)
+	rec := httptest.NewRecorder()
+	auth.HandleCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("HandleCallback status = %d, want 302 (body %q)", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("RegisterSession called %d times, want exactly 1", calls)
+	}
+	if gotSession.ID == "" {
+		t.Error("registered session has no id, want the id the cookie carries")
+	}
+	if gotSession.Subject != "sub-registered" {
+		t.Errorf("registered subject = %q, want %q", gotSession.Subject, "sub-registered")
+	}
+	if gotUA != "Mozilla/5.0 (X11; Linux x86_64) Firefox/135.0" {
+		t.Errorf("registered user agent = %q, want the request's User-Agent", gotUA)
+	}
+	if gotExpiry.IsZero() || !gotExpiry.After(time.Now()) {
+		t.Errorf("registered expiry = %v, want a future session expiry", gotExpiry)
+	}
+
+	// The cookie the browser gets carries that very id, so the gate's registry
+	// lookup can find the record this login just wrote.
+	cookie := findCookie(rec.Result().Cookies(), "scrim_session")
+	if cookie == nil {
+		t.Fatal("HandleCallback minted no session cookie")
+	}
+	verify := httptest.NewRequest(http.MethodGet, "/", nil)
+	verify.AddCookie(cookie)
+	sess, ok := auth.SessionFromRequest(verify)
+	if !ok {
+		t.Fatal("SessionFromRequest with the minted cookie = not ok, want ok")
+	}
+	if sess.ID != gotSession.ID {
+		t.Errorf("cookie session id = %q, registry got %q -- they must be the same session", sess.ID, gotSession.ID)
+	}
+}
+
+// TestCallbackFailsClosedWhenRegistrationFails pins the fail-closed half: if the
+// session can't be recorded, no cookie is issued at all. Issuing one anyway
+// would mint a session the gate rejects on the next request -- a "successful"
+// login that bounces straight back to the login page.
+func TestCallbackFailsClosedWhenRegistrationFails(t *testing.T) {
+	idp := oidctest.New(t)
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		RegisterSession: func(oidc.Session, string, time.Time) error {
+			return errors.New("registry unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	flow, query := idp.CallbackLocation(t, auth)
+	req := httptest.NewRequest(http.MethodGet, oidc.CallbackPath+"?"+query, nil)
+	req.AddCookie(flow)
+	rec := httptest.NewRecorder()
+	auth.HandleCallback(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("HandleCallback with a failing registry status = %d, want 500", rec.Code)
+	}
+	if c := findCookie(rec.Result().Cookies(), "scrim_session"); c != nil {
+		t.Error("HandleCallback set a session cookie despite the registration failing, want none")
+	}
+}
+
+// TestLogoutEndsSessionServerSide proves logout revokes the record too, not
+// just the cookie: a cookie copied elsewhere must stop working the moment its
+// owner signs out, which is the entire reason the registry exists.
+func TestLogoutEndsSessionServerSide(t *testing.T) {
+	idp := oidctest.New(t)
+	registered := ""
+	ended := ""
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		RegisterSession: func(sess oidc.Session, _ string, _ time.Time) error {
+			registered = sess.ID
+			return nil
+		},
+		EndSession: func(id string) { ended = id },
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	_, all := idp.LoginCookies(t, auth, "")
+	logout(t, auth, all...)
+
+	if registered == "" {
+		t.Fatal("login registered no session id")
+	}
+	if ended != registered {
+		t.Errorf("logout ended session %q, want the logged-in session %q", ended, registered)
+	}
+}
+
+// TestLogoutWithoutSessionEndsNothing pins that a session-less logout (what a
+// forged cross-site POST produces, since SameSite=Lax withholds the cookie)
+// revokes nobody -- the registry is not a scrim-wide sign-out lever for an
+// unauthenticated caller.
+func TestLogoutWithoutSessionEndsNothing(t *testing.T) {
+	idp := oidctest.New(t)
+	called := false
+	auth, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     idp.Issuer(),
+		ClientID:      idp.ClientID(),
+		ClientSecret:  idp.ClientSecret(),
+		RedirectURL:   testRedirectURL,
+		SessionSecret: []byte("deterministic-test-session-secret"),
+		EndSession:    func(string) { called = true },
+	})
+	if err != nil {
+		t.Fatalf("oidc.New error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, oidc.LogoutPath, nil)
+	auth.HandleLogout(httptest.NewRecorder(), req)
+
+	if called {
+		t.Error("EndSession was called for a session-less logout, want no revocation")
+	}
 }

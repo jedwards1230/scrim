@@ -65,6 +65,10 @@ func TestDefaultServerHasNoHubSurface(t *testing.T) {
 		{http.MethodPost, "/api/canvases/foo/copy"},
 		{http.MethodGet, "/api/canvases/foo/snapshots"},
 		{http.MethodGet, "/api/openapi.yaml"},
+		// The browser-session registry endpoints are hub-only too: the local
+		// daemon has no OIDC, no sessions, and must gain no surface from #145.
+		{http.MethodGet, "/api/sessions"},
+		{http.MethodDelete, "/api/sessions/abc"},
 	} {
 		req := httptest.NewRequest(mr.method, mr.path, nil)
 		rec := httptest.NewRecorder()

@@ -83,14 +83,22 @@
   </div>
 </header>
 <main>
+  <section id="sessions">
+    <h2>Browsers you're signed in from</h2>
+    <p class="muted note" id="session-note">
+      Every browser signed in to this hub with your account. Signing one out takes effect on its
+      next request &mdash; it doesn't wait for the session to expire on its own. A device is
+      identified only by the browser it reports; scrim records no IP addresses and no location.
+      Sessions that have already expired drop off this list by themselves.
+    </p>
+    <div id="session-list"><p class="muted">Loading&hellip;</p></div>
+    <div id="session-error" class="error" hidden></div>
+  </section>
   <section id="access">
     <h2>What has access to your canvases</h2>
-    <p class="muted note" id="session-note">
-      This list covers <strong>tokens only</strong> &mdash; the credentials you hand to a CLI,
-      an agent, or an MCP client. Browser sign-ins are not listed here and cannot be signed out
-      one at a time: scrim's sessions are stateless and simply expire on their own (12 hours by
-      default). The only way to end them is for the operator to rotate the server's session
-      secret, which signs <em>everyone</em> out at once.
+    <p class="muted note">
+      Tokens are the credentials you hand to a CLI, an agent, or an MCP client &mdash; separate
+      from the browser sign-ins above, and unaffected by signing a browser out.
     </p>
     <div id="token-list"><p class="muted">Loading&hellip;</p></div>
     <div class="disclosure" id="revoked-wrap" hidden>
@@ -134,6 +142,8 @@
   //
   // Every principal-supplied value (name, owner email, allowance targets) is
   // written via textContent / .value, never innerHTML.
+  var sessionListEl = document.getElementById("session-list");
+  var sessionErrEl = document.getElementById("session-error");
   var listEl = document.getElementById("token-list");
   var revokedWrap = document.getElementById("revoked-wrap");
   var revokedToggle = document.getElementById("revoked-toggle");
@@ -371,6 +381,140 @@
       .catch(function () { showError("Couldn't revoke that token."); });
   }
 
+  // ---- Browser sessions (#145) -------------------------------------------
+  //
+  // Sign-ins are server-side records now, so this section is a real device
+  // list: each entry can be ended remotely and stops working on that browser's
+  // very next request.
+
+  // Deliberately CRUDE user-agent parsing. A UA string cannot be parsed
+  // reliably -- every browser lies about being every other browser -- so this
+  // recognises a handful of common tokens in a specific order and otherwise
+  // shows the raw string. An honest "Mozilla/5.0 (…)" beats a confidently
+  // wrong "Safari on Windows": the point is for a person to recognise their
+  // own device, not for scrim to claim it identified one.
+  function deviceLabel(ua) {
+    if (!ua) return "Unknown device";
+    var browser = "";
+    // Order matters: Edge/Opera/Chrome all carry "Chrome", and Chrome carries
+    // "Safari", so the most specific token has to win first.
+    if (/\bEdg\//.test(ua)) browser = "Edge";
+    else if (/\bOPR\/|\bOpera\b/.test(ua)) browser = "Opera";
+    else if (/\bFirefox\//.test(ua)) browser = "Firefox";
+    else if (/\bChrome\//.test(ua)) browser = "Chrome";
+    else if (/\bSafari\//.test(ua)) browser = "Safari";
+
+    var os = "";
+    if (/\biPhone\b|\biPad\b|\biPod\b/.test(ua)) os = "iOS";
+    else if (/\bAndroid\b/.test(ua)) os = "Android";
+    else if (/\bWindows\b/.test(ua)) os = "Windows";
+    else if (/\bMac OS X\b|\bMacintosh\b/.test(ua)) os = "macOS";
+    else if (/\bCrOS\b/.test(ua)) os = "ChromeOS";
+    else if (/\bLinux\b/.test(ua)) os = "Linux";
+
+    if (browser && os) return browser + " on " + os;
+    if (browser) return browser;
+    if (os) return os;
+    return ua; // no guess to make -- show what the browser actually sent
+  }
+
+  function showSessionError(msg) { sessionErrEl.textContent = msg; sessionErrEl.hidden = false; }
+  function clearSessionError() { sessionErrEl.textContent = ""; sessionErrEl.hidden = true; }
+
+  function sessionCard(s) {
+    var card = document.createElement("div");
+    card.className = "card token";
+
+    var left = document.createElement("div");
+    var name = document.createElement("div");
+    name.className = "name";
+    // textContent throughout: a user agent is client-supplied text.
+    name.textContent = deviceLabel(s.user_agent);
+    if (s.current) {
+      var badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "This browser";
+      name.appendChild(badge);
+    }
+    left.appendChild(name);
+
+    var lead = document.createElement("div");
+    lead.className = "lead";
+    lead.textContent = "Last seen " + relative(s.last_seen);
+    var seen = absolute(s.last_seen);
+    if (seen) lead.title = seen;
+    left.appendChild(lead);
+
+    var detail = document.createElement("div");
+    detail.className = "detail";
+    detail.textContent = "signed in " + relative(s.created_at) + " · expires " + until(s.expires_at);
+    var created = absolute(s.created_at);
+    if (created) detail.title = "Signed in " + created;
+    left.appendChild(detail);
+
+    // The raw string stays available on hover: the label above is a guess, this
+    // is what the browser actually sent.
+    if (s.user_agent) name.title = s.user_agent;
+    card.appendChild(left);
+
+    var btn = document.createElement("button");
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = s.current ? "Sign out here" : "Sign out";
+    btn.addEventListener("click", function () { revokeSession(s); });
+    card.appendChild(btn);
+    return card;
+  }
+
+  function renderSessions(sessions) {
+    sessionListEl.replaceChildren();
+    var all = sessions || [];
+    if (all.length === 0) {
+      var p = document.createElement("p");
+      p.className = "muted";
+      // Reachable when the hub runs without OIDC login, where there are no
+      // browser sessions to record in the first place.
+      p.textContent = "No browser sign-ins are recorded for your account.";
+      sessionListEl.appendChild(p);
+      return;
+    }
+    all.forEach(function (s) { sessionListEl.appendChild(sessionCard(s)); });
+  }
+
+  function loadSessions() {
+    fetch("/api/sessions", { credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(renderSessions)
+      .catch(function () {
+        sessionListEl.replaceChildren();
+        var p = document.createElement("p");
+        p.className = "muted";
+        // Never say "no other sessions" when the truth is "couldn't ask" -- on
+        // this page those two read identically and mean opposite things.
+        p.textContent = "Couldn't load your browser sign-ins.";
+        sessionListEl.appendChild(p);
+      });
+  }
+
+  function revokeSession(s) {
+    // Signing yourself out of the browser you're using is a legitimate action
+    // (a shared machine), but it must never be a surprise.
+    if (s.current && !window.confirm("Sign out of this browser? You'll be signed out here immediately and will need to log in again.")) return;
+    clearSessionError();
+    fetch("/api/sessions/" + encodeURIComponent(s.id), { method: "DELETE", credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok && resp.status !== 404) throw new Error("HTTP " + resp.status);
+        // Ending the current session invalidates this page's own cookie, so
+        // reload into the login flow rather than leaving a dead page up.
+        if (s.current) { window.location.reload(); return; }
+        loadSessions();
+      })
+      .catch(function () { showSessionError("Couldn't sign that browser out."); });
+  }
+
   revokedToggle.addEventListener("click", function () { setRevokedOpen(revokedList.hidden); });
   mintBtn.addEventListener("click", mint);
   secretCopy.addEventListener("click", function () {
@@ -378,6 +522,7 @@
     if (navigator.clipboard) navigator.clipboard.writeText(secretVal.value).catch(function () {});
     else document.execCommand("copy");
   });
+  loadSessions();
   load();
 })();
 </script>

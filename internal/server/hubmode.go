@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jedwards1230/scrim/internal/authentik"
 	"github.com/jedwards1230/scrim/internal/canvas"
@@ -14,6 +15,7 @@ import (
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/principal"
+	"github.com/jedwards1230/scrim/internal/session"
 	"github.com/jedwards1230/scrim/internal/usertoken"
 )
 
@@ -230,6 +232,42 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 				}
 			}
 		}
+		// The server-side session registry exists only alongside OIDC (there are
+		// no browser sessions without it). It loads here so a corrupt registry
+		// is reported ONCE at startup rather than on every request; the hub
+		// still starts, because the admin push token -- which never consults
+		// this store -- is the recovery path for exactly that situation.
+		sessions := session.New(s.metaDir)
+		if err := sessions.Err(); err != nil {
+			logging.Error(logging.CategoryAuth, err)
+		}
+		s.sessions = sessions
+
+		// Record every completed login, and drop the record on logout. Both are
+		// wired here rather than in the CLI so the server package owns the
+		// store. Registration is FAIL-CLOSED inside oidc (an error aborts the
+		// login); ending a session is best-effort, so its error is logged and
+		// swallowed -- the cookie is already cleared and logout must still
+		// reach the IdP.
+		if oc.RegisterSession == nil {
+			oc.RegisterSession = func(sess oidc.Session, userAgent string, expiry time.Time) error {
+				return sessions.Create(session.Record{
+					ID:        sess.ID,
+					Subject:   sess.Subject,
+					Email:     sess.Email,
+					UserAgent: userAgent,
+					ExpiresAt: expiry,
+				})
+			}
+		}
+		if oc.EndSession == nil {
+			oc.EndSession = func(id string) {
+				if err := sessions.End(id); err != nil {
+					logging.Error(logging.CategoryAuth, fmt.Errorf("session registry: %w", err))
+				}
+			}
+		}
+
 		auth, err := oidc.New(context.Background(), oc)
 		if err != nil {
 			return nil, err
