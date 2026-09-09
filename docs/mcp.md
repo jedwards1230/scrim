@@ -135,3 +135,14 @@ scrim mcp --http 0.0.0.0:9797 \
   request (honoring `X-Forwarded-Proto`) when unset; set it explicitly when that
   can't be derived correctly (e.g. behind a TLS-terminating proxy scrim can't
   see through).
+
+On the validated-JWT path `scrim mcp` also forwards the OAuth **client id**
+(`azp`, falling back to `client_id`) and the token's **`iat`** to the hub, as
+`X-Scrim-Actor-Client-Id` and `X-Scrim-Actor-Token-Issued-At` (Unix seconds),
+alongside the existing `X-Scrim-Actor-*` attribution. That is what lets the hub
+list this agent on its owner's "Devices & access" page and revoke it there: see
+[identity.md § Agent connections](identity.md#agent-connections). `scrim mcp`
+itself stays stateless — it holds no denylist and asks the hub nothing; the hub
+owns both the records and the enforcement. The HMAC forwarded-identity plane has
+no JWT, so it forwards neither header, and the hub treats their absence as
+fail-closed rather than as an exemption.

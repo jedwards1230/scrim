@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/identity"
@@ -121,6 +123,15 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(ctx)
 
+		// A verified gateway/OAuth-forwarded actor is an AGENT CONNECTION, and a
+		// principal may cut one off from the devices page. Enforced here, before
+		// any read or write branch, so a revoked agent is blocked on its very
+		// next request whatever it asks for. The bare admin push token resolves
+		// to Admin:true with no actor and never reaches this check.
+		if !s.admitAgentConn(w, r, c, tok) {
+			return
+		}
+
 		// The admin push token is the machine/bootstrap credential: it
 		// authorizes ANY method, reads included, and is a visibility superuser
 		// (see identity.CanView). It is distinct from the browser read gate
@@ -181,6 +192,14 @@ const (
 	actorHeaderID     = "X-Scrim-Actor-Id"
 	actorHeaderEmail  = "X-Scrim-Actor-Email"
 	actorHeaderGroups = "X-Scrim-Actor-Groups"
+	// The OAuth-only pair, read from the SAME trusted plane as the three above
+	// (scrim mcp sets them from an already-validated bearer JWT): the client the
+	// token was minted for and its `iat` as decimal Unix seconds. They name and
+	// date an agent connection; both are absent on the HMAC forwarded-identity
+	// plane, which has no JWT, and their absence is handled fail-closed by
+	// agentconn.Admit rather than by trusting the request.
+	actorHeaderClientID = "X-Scrim-Actor-Client-Id"
+	actorHeaderIssuedAt = "X-Scrim-Actor-Token-Issued-At"
 )
 
 // resolveClaims determines the identity a hub request carries, in precedence
@@ -262,6 +281,60 @@ func (s *Server) sessionLive(id string) bool {
 	return err == nil && ok
 }
 
+// admitAgentConn enforces (and records) agent connections on the
+// forwarded-actor path, and ONLY there. It reports whether the request may
+// proceed, having already written the response when it may not.
+//
+// The path is identified exactly as serveWrite identifies its machine actor: a
+// non-admin, authenticated caller with no user token that nonetheless presents
+// a valid admin push bearer -- i.e. scrim mcp asserting a verified actor. Three
+// callers are deliberately untouched by every revocation in the registry:
+//
+//   - the BARE admin push token (no actor headers), which resolves to Admin:true
+//     and is the machine/recovery credential CI pushes and `scrim push` use;
+//   - a user-token bearer, which is revoked from the tokens list instead;
+//   - a browser session, which is revoked from the sessions list instead.
+//
+// A registry that cannot be read answers 503 rather than admitting the call:
+// "we can't tell whether this agent was cut off" must not resolve to "let it
+// in". That is the same fail-closed rule internal/session applies, and the bare
+// admin token remains the way out of it.
+func (s *Server) admitAgentConn(w http.ResponseWriter, r *http.Request, c identity.Claims, tok *usertoken.Token) bool {
+	if s.agents == nil || c.Admin || tok != nil || !c.Authenticated() || !s.hasValidPushToken(r) {
+		return true
+	}
+	ok, err := s.agents.Admit(c.Subject, r.Header.Get(actorHeaderClientID), c.Email, actorIssuedAt(r))
+	if err != nil {
+		http.Error(w, "service unavailable: agent connection registry unreadable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !ok {
+		// 403, not 404: the caller is an authenticated agent acting for a known
+		// principal, and being told its access was revoked leaks nothing --
+		// it is exactly what the principal chose to tell it.
+		http.Error(w, "forbidden: this agent connection was revoked", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// actorIssuedAt parses the forwarded token's `iat` (decimal Unix seconds) from
+// the actor headers. Anything missing or unparseable yields the zero time,
+// which agentconn.Admit reads as "cannot prove this token postdates a
+// revocation" and treats fail-closed -- so a malformed value can never widen
+// access, only narrow it.
+func actorIssuedAt(r *http.Request) time.Time {
+	raw := strings.TrimSpace(r.Header.Get(actorHeaderIssuedAt))
+	if raw == "" {
+		return time.Time{}
+	}
+	secs, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0)
+}
+
 // splitActorGroups parses the comma-separated X-Scrim-Actor-Groups header into a
 // trimmed, empty-free slice (nil when there are none).
 func splitActorGroups(raw string) []string {
@@ -331,7 +404,12 @@ func (s *Server) serveWrite(w http.ResponseWriter, r *http.Request, next http.Ha
 	// two credentials that must not reach here: a user token and the machine
 	// plane carry no subject of their own, so they get the same 403 they get on
 	// /api/tokens.
-	if isSessionPath(r.URL.Path) {
+	// Agent-connection management sits on that same session-only plane, for the
+	// same reason: revoking an agent is an account action, and the two
+	// credentials that must not reach it -- a user token and the machine plane
+	// (an agent revoking its own revocation, or someone else's) -- carry no
+	// subject of their own.
+	if isSessionPath(r.URL.Path) || isAgentConnPath(r.URL.Path) {
 		if c.Subject != "" && tok == nil && !machineActor {
 			next.ServeHTTP(w, r)
 			return
@@ -504,6 +582,14 @@ func isTokenPath(path string) bool {
 // /api/tokens: a logged-in browser session listing and ending its OWN sign-ins.
 func isSessionPath(path string) bool {
 	return path == "/api/sessions" || strings.HasPrefix(path, "/api/sessions/")
+}
+
+// isAgentConnPath reports whether path addresses the agent-connection endpoints
+// (GET /api/agent-connections, DELETE /api/agent-connections/{id}). Same plane
+// as /api/sessions: a logged-in browser session listing and cutting off its OWN
+// agent connections.
+func isAgentConnPath(path string) bool {
+	return path == agentConnsPath || strings.HasPrefix(path, agentConnsPath+"/")
 }
 
 // isClaimPath reports whether path is a canvas-claim request

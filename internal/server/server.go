@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jedwards1230/scrim/internal/agentconn"
 	"github.com/jedwards1230/scrim/internal/config"
 	"github.com/jedwards1230/scrim/internal/logging"
 	"github.com/jedwards1230/scrim/internal/mdns"
@@ -87,6 +88,15 @@ type Server struct {
 	// record. The admin push-token path deliberately never consults it, so a
 	// broken registry leaves the machine plane (and hub recovery) untouched.
 	sessions *session.Store
+
+	// agents is the hub's registry of agent connections: the OAuth-authenticated
+	// MCP clients that reach a principal's canvases through scrim mcp's
+	// forwarded-actor plane. It is what makes such a connection listable on the
+	// devices page and blockable at the gate, since those requests carry no
+	// session and no user token. Non-nil only for a hub (set in NewHub) -- the
+	// default daemon has no forwarded actors at all. The BARE admin push token
+	// (no actor headers) never consults it, so it stays the recovery path.
+	agents *agentconn.Store
 }
 
 // New returns a Server configured from cfg. Call Run to start it.

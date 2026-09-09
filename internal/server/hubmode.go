@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jedwards1230/scrim/internal/agentconn"
 	"github.com/jedwards1230/scrim/internal/authentik"
 	"github.com/jedwards1230/scrim/internal/canvas"
 	"github.com/jedwards1230/scrim/internal/config"
@@ -183,6 +184,17 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 	// The user-token store backs the direct (machine) plane's per-principal
 	// credentials: a bearer that isn't the admin push token is resolved here.
 	s.tokens = usertoken.New(s.metaDir)
+
+	// The agent-connection registry records (and enforces revocation of) the
+	// OAuth-authenticated MCP clients arriving on the forwarded-actor plane.
+	// Unconditional in hub mode -- unlike browser sessions, a forwarded actor
+	// does not need OIDC configured to reach the hub. A corrupt registry is
+	// reported ONCE here rather than per request; the hub still starts, because
+	// the bare admin push token never consults it and is the recovery path.
+	s.agents = agentconn.New(s.metaDir)
+	if err := s.agents.Err(); err != nil {
+		logging.Error(logging.CategoryAuth, err)
+	}
 
 	// Optional read-only Authentik directory feeder (#54). Built only when
 	// configured; a malformed URL fails startup here (like a bad CIDR), but at

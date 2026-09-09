@@ -11,7 +11,7 @@ info:
     control, and canvas CRUD.
 
     **Mostly hub-only.** Every `push`/`files`/`copy`/`snapshots`/`grants`/`tokens`/`sessions`/
-    `claim`/`principals` path here, plus `GET /api/openapi.yaml` and `/healthz`, is registered ONLY when the
+    `agent-connections`/`claim`/`principals` path here, plus `GET /api/openapi.yaml` and `/healthz`, is registered ONLY when the
     daemon is started as a hub (`NewHub`). Five are NOT: `GET /api/status`, `GET`/`POST
     /api/canvases`, `DELETE /api/canvases/{id}`, and `POST /api/stop` are registered
     unconditionally, so the default local daemon (`scrim serve`) exposes them too — gated there by a
@@ -25,9 +25,11 @@ info:
     TOKEN, which authorizes ANY method and is the sole credential `POST /api/stop` accepts; and a
     USER TOKEN, which authorizes the same API bounded to canvases its owner may write (`403`
     otherwise). Absent any valid bearer, a write (any method other than GET/HEAD) is rejected `401`
-    — except on the session plane: canvas claim, `/api/tokens*`, `/api/sessions*`, and mutating a
+    — except on the session plane: canvas claim, `/api/tokens*`, `/api/sessions*`,
+    `/api/agent-connections*`, and mutating a
     canvas's own `grants*` also accept a browser session cookie, and `POST /api/tokens` rejects a
-    *user token* with `403` (as does all of `/api/sessions*`, which is session-only). Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is
+    *user token* with `403` (as does all of `/api/sessions*` and `/api/agent-connections*`, which
+    are session-only). Reads (GET/HEAD) without a bearer fall to the browser gate: when the hub is
     configured with OIDC, an unauthenticated read is `401` (or a `302` into the login flow for a
     browser navigation) and the CIDR/read-token path is NOT consulted at all; otherwise the client
     IP must fall inside the hub's CIDR allowlist (`403` if not) and, if a separate read token is
@@ -81,6 +83,11 @@ tags:
     description: >-
       The caller's own browser sign-ins (list, sign out one). Server-side records, so a session is
       revocable before its cookie expires. Session-authenticated only. Hub-only.
+  - name: agent-connections
+    description: >-
+      The caller's own agent connections (list, revoke) — OAuth-authenticated MCP clients that have
+      acted as the caller through scrim mcp's forwarded-actor plane. Session-authenticated only.
+      Hub-only.
   - name: grants
     description: >-
       Per-canvas view-only sharing grants (list, add, remove) — user/group/everyone/link. Hub-only.
@@ -908,6 +915,81 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/agent-connections:
+    get:
+      tags: [agent-connections]
+      operationId: listAgentConnections
+      summary: List the caller's own agent connections.
+      description: >-
+        Lists the OAuth-authenticated MCP clients that have reached the calling principal's canvases
+        through `scrim mcp`'s forwarded-actor plane, newest first, scoped by the IdP subject. One
+        entry per (subject, OAuth client id) pair; revoked entries stay listed, carrying
+        `revoked_at`, the way a revoked token does. No IP address or location is recorded, so none
+        is returned. A caller with no subject of its own — the admin push token, or a user-token
+        principal — gets an empty list. `503` when the registry cannot be read: "unavailable" and
+        "nothing has access" must not look alike on this endpoint.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: The caller's agent connections.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentConnection'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The agent-connection registry is unreadable; the hub is failing closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/agent-connections/{id}:
+    delete:
+      tags: [agent-connections]
+      operationId: revokeAgentConnection
+      summary: Block one of the caller's agent connections.
+      description: >-
+        Revokes one of the calling principal's own agent connections: that client's very next
+        request to the hub is refused (`403`). It does **not** delete anything at the identity
+        provider — the client keeps its refresh token, and authorizing scrim again mints a token
+        whose `iat` postdates the revocation, which the hub admits (that is how re-authorizing
+        restores access). A connection that does not exist, is already revoked, or belongs to
+        another principal is `404` — never revealing that one the caller can't touch exists (the
+        same semantics `DELETE /api/sessions/{id}` has). Session-authenticated only: a user token or
+        the machine plane is rejected, and the admin push token has no agent connections of its own
+        (`404`).
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The connection id, as returned by GET /api/agent-connections.
+      responses:
+        '204':
+          description: Connection revoked. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The agent-connection registry is unreadable; the hub is failing closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/principals:
     get:
       tags: [principals]
@@ -1172,12 +1254,14 @@ components:
         therefore only ever present on a hub configured with OIDC. It authorizes machine-API READS,
         subject to the same per-canvas visibility filter a user token gets. Beyond that the session
         plane is read-only, with four deliberate exceptions that accept it as a WRITE credential:
-        canvas claim, `/api/tokens*`, `/api/sessions*`, and mutating a canvas's own grants.
+        canvas claim, `/api/tokens*`, `/api/sessions*`, `/api/agent-connections*`, and mutating a
+        canvas's own grants.
         Those are owner actions the browser must perform natively; `SameSite=Lax` is what makes them
         CSRF-safe. `POST /api/tokens` accepts a session or the admin push token but rejects a USER
         token with `403` — minting from a token would be privilege escalation. `/api/sessions*` goes
         further and is session-ONLY: a browser's own sign-ins are not the machine plane's business,
         so a user token is `403` and the admin push token, having no sessions of its own, is `404`.
+        `/api/agent-connections*` sits on that same session-only plane, for the same reason.
 
   parameters:
     LinkSecret:
@@ -1594,6 +1678,42 @@ components:
           type: boolean
           description: True for the session making this very request ("This browser").
       required: [id, created_at, last_seen, expires_at]
+
+    AgentConnection:
+      type: object
+      description: >-
+        One agent connection: an OAuth client that has acted as the principal on the
+        forwarded-actor plane. Carries no token material and, like SessionMeta, no network
+        information.
+      properties:
+        id:
+          type: string
+          description: >-
+            Opaque, stable id for this (principal, OAuth client) pair. Derived deterministically,
+            not a credential, and safe to address in a URL.
+        client_id:
+          type: string
+          description: >-
+            The OAuth client the connection is named by (the token's `azp`, falling back to
+            `client_id`). Absent for a connection that reached the hub without one — the
+            gateway-forwarded HMAC identity plane, which carries no JWT.
+        first_seen:
+          type: string
+          format: date-time
+          description: When this client first acted as the principal.
+        last_seen:
+          type: string
+          format: date-time
+          description: >-
+            Its most recent request. Persisted at most once every 5 minutes (the revocation check
+            runs per request and must not write to disk each time), so it lags by up to that.
+        revoked_at:
+          type: string
+          format: date-time
+          description: >-
+            When the principal revoked this connection; absent while it is live. A token issued
+            after this instant is admitted (re-authorization), which also clears the field.
+      required: [id, first_seen, last_seen]
 
     PrincipalSuggestion:
       type: object

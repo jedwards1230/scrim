@@ -94,6 +94,23 @@
     <div id="session-list"><p class="muted">Loading&hellip;</p></div>
     <div id="session-error" class="error" hidden></div>
   </section>
+  <section id="agents">
+    <h2>Agents connected to your account</h2>
+    <p class="muted note" id="agent-note">
+      MCP clients that have reached your canvases by signing in as you &mdash; an agent you
+      authorized, not a token you created. Each one is named by the OAuth client it identified
+      itself as.
+    </p>
+    <p class="muted note">
+      <strong>Revoking blocks that client here, immediately</strong> &mdash; its very next request to
+      scrim is refused. It does <strong>not</strong> remove anything at your identity provider: the
+      client keeps the access it was granted there, and authorizing scrim again re-establishes the
+      connection. To cut it off for good, remove scrim's authorization for that application at your
+      identity provider as well.
+    </p>
+    <div id="agent-list"><p class="muted">Loading&hellip;</p></div>
+    <div id="agent-error" class="error" hidden></div>
+  </section>
   <section id="access">
     <h2>What has access to your canvases</h2>
     <p class="muted note">
@@ -144,6 +161,8 @@
   // written via textContent / .value, never innerHTML.
   var sessionListEl = document.getElementById("session-list");
   var sessionErrEl = document.getElementById("session-error");
+  var agentListEl = document.getElementById("agent-list");
+  var agentErrEl = document.getElementById("agent-error");
   var listEl = document.getElementById("token-list");
   var revokedWrap = document.getElementById("revoked-wrap");
   var revokedToggle = document.getElementById("revoked-toggle");
@@ -540,6 +559,110 @@
     form.submit();
   }
 
+  // ---- Agent connections --------------------------------------------------
+  //
+  // The third thing that can reach these canvases, after a browser sign-in and
+  // a token: an MCP client that authenticated as this principal over OAuth.
+  // Those requests arrive on the machine plane carrying a verified actor, so
+  // they are neither a session nor a token -- before this section existed they
+  // appeared nowhere on the page whose whole job is "what has access".
+
+  function showAgentError(msg) { agentErrEl.textContent = msg; agentErrEl.hidden = false; }
+  function clearAgentError() { agentErrEl.textContent = ""; agentErrEl.hidden = true; }
+
+  function agentCard(a) {
+    var card = document.createElement("div");
+    card.className = "card token" + (a.revoked_at ? " revoked" : "");
+
+    var left = document.createElement("div");
+    var name = document.createElement("div");
+    name.className = "name";
+    // textContent: the client id comes from the agent's own token.
+    name.textContent = a.client_id || "Unnamed client";
+    left.appendChild(name);
+
+    // Both timestamps are in the PAST, so both use relative(); until() is for
+    // a forward-looking instant (a session expiry) and would read as nonsense
+    // here. Exact times hang off the title, as everywhere else on this page.
+    var lead = document.createElement("div");
+    lead.className = "lead";
+    lead.textContent = "Last used " + relative(a.last_seen);
+    var seen = absolute(a.last_seen);
+    if (seen) lead.title = seen;
+    left.appendChild(lead);
+
+    var detail = document.createElement("div");
+    detail.className = "detail";
+    var bits = ["first connected " + relative(a.first_seen)];
+    if (a.revoked_at) bits.push("revoked " + relative(a.revoked_at));
+    detail.textContent = bits.join(" · ");
+    var first = absolute(a.first_seen);
+    if (first) detail.title = "First connected " + first;
+    left.appendChild(detail);
+    card.appendChild(left);
+
+    if (a.revoked_at) {
+      var pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = "revoked";
+      card.appendChild(pill);
+    } else {
+      var btn = document.createElement("button");
+      btn.className = "btn";
+      btn.type = "button";
+      btn.textContent = "Revoke";
+      btn.addEventListener("click", function () { revokeAgent(a); });
+      card.appendChild(btn);
+    }
+    return card;
+  }
+
+  function renderAgents(agents) {
+    agentListEl.replaceChildren();
+    var all = agents || [];
+    if (all.length === 0) {
+      var p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No agents have connected to your account.";
+      agentListEl.appendChild(p);
+      return;
+    }
+    all.forEach(function (a) { agentListEl.appendChild(agentCard(a)); });
+  }
+
+  function loadAgents() {
+    fetch("/api/agent-connections", { credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(renderAgents)
+      .catch(function () {
+        agentListEl.replaceChildren();
+        var p = document.createElement("p");
+        p.className = "muted";
+        // Same rule as the sessions list: never say "nothing is connected" when
+        // the truth is "couldn't ask".
+        p.textContent = "Couldn't load your agent connections.";
+        agentListEl.appendChild(p);
+      });
+  }
+
+  function revokeAgent(a) {
+    // Say what it does and what it doesn't before doing it -- the same promise
+    // the section text makes, at the moment it matters.
+    if (!window.confirm("Block " + (a.client_id || "this client") +
+      " from your canvases? It stops working here immediately. This does NOT remove scrim's " +
+      "authorization at your identity provider, so authorizing it again will reconnect it.")) return;
+    clearAgentError();
+    fetch("/api/agent-connections/" + encodeURIComponent(a.id), { method: "DELETE", credentials: "same-origin" })
+      .then(function (resp) {
+        if (!resp.ok && resp.status !== 404) throw new Error("HTTP " + resp.status);
+        loadAgents();
+      })
+      .catch(function () { showAgentError("Couldn't revoke that agent connection."); });
+  }
+
   revokedToggle.addEventListener("click", function () { setRevokedOpen(revokedList.hidden); });
   mintBtn.addEventListener("click", mint);
   secretCopy.addEventListener("click", function () {
@@ -548,6 +671,7 @@
     else document.execCommand("copy");
   });
   loadSessions();
+  loadAgents();
   load();
 })();
 </script>

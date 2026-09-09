@@ -328,7 +328,34 @@ func actorFromToken(idt *coreoidc.IDToken) actor {
 		a.Email = ec.Email
 	}
 	a.Groups = tokenGroupsClaim(idt)
+	a.ClientID = tokenClientIDClaim(idt)
+	// IssuedAt comes from the verified IDToken's own exported field (never
+	// re-decoded). A token with no `iat` leaves it zero -- coreoidc verifies
+	// sig/iss/aud/exp but does not require `iat` -- and the hub reads a zero
+	// issued-at as "unprovable age", which fails closed against a revocation.
+	a.IssuedAt = idt.IssuedAt
 	return a
+}
+
+// tokenClientIDClaim reads the OAuth client a validated token was minted for.
+// `azp` (authorized party) is the standard OIDC claim naming it and is
+// preferred; `client_id` is the fallback for authorization servers that emit
+// only that (it is the JWT-access-token profile's spelling, RFC 9068). A
+// claims-decode failure or neither claim present yields "" -- attribution
+// degrades to an unnamed connection rather than failing the request, and the
+// hub's revocation check treats an empty client id as fail-closed.
+func tokenClientIDClaim(idt *coreoidc.IDToken) string {
+	var c struct {
+		AZP      string `json:"azp"`
+		ClientID string `json:"client_id"`
+	}
+	if err := idt.Claims(&c); err != nil {
+		return ""
+	}
+	if c.AZP != "" {
+		return c.AZP
+	}
+	return c.ClientID
 }
 
 // tokenGroupsClaim extracts the `groups` claim from a validated token. The
