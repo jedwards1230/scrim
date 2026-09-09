@@ -112,6 +112,11 @@ func (c OAuthConfig) Validate() error {
 type oauthValidator struct {
 	cfg      OAuthConfig
 	verifier *coreoidc.IDTokenVerifier
+	// registrar registers a newly-seen agent connection with the hub as soon as
+	// its token validates, rather than waiting for the first tool call to reach
+	// the hub's gate (see agentreg.go). It is set by newHTTPHandler ONLY in hub
+	// mode; nil everywhere else, and a nil registrar registers nothing.
+	registrar *agentRegistrar
 }
 
 // newOAuthValidator validates cfg and performs OIDC discovery against the issuer
@@ -248,6 +253,12 @@ func (o *oauthValidator) middleware(next http.Handler) http.Handler {
 		// token falls through to the HMAC plane (or anonymous), fail-closed.
 		if a := actorFromToken(idt); a.ID != "" {
 			r = r.WithContext(ctxWithOAuthActor(r.Context(), a))
+			// Register the connection at CONNECT time (this runs on every
+			// request, `initialize` included) so a client that has authorized
+			// but not yet called a tool is already listed -- and revocable --
+			// on the hub's devices page. Fire-and-forget by construction: it
+			// returns immediately and a hub failure never touches this request.
+			o.registrar.Register(a)
 		}
 
 		// Scope gate: derive the single scope this request requires -- the

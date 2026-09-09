@@ -141,8 +141,35 @@ On the validated-JWT path `scrim mcp` also forwards the OAuth **client id**
 `X-Scrim-Actor-Client-Id` and `X-Scrim-Actor-Token-Issued-At` (Unix seconds),
 alongside the existing `X-Scrim-Actor-*` attribution. That is what lets the hub
 list this agent on its owner's "Devices & access" page and revoke it there: see
-[identity.md § Agent connections](identity.md#agent-connections). `scrim mcp`
-itself stays stateless — it holds no denylist and asks the hub nothing; the hub
-owns both the records and the enforcement. The HMAC forwarded-identity plane has
-no JWT, so it forwards neither header, and the hub treats their absence as
-fail-closed rather than as an exemption.
+[identity.md § Agent connections](identity.md#agent-connections). The hub owns
+both the records and the enforcement — `scrim mcp` holds no denylist and asks
+the hub nothing about revocations. The HMAC forwarded-identity plane has no JWT,
+so it forwards neither header, and the hub treats their absence as fail-closed
+rather than as an exemption.
+
+The connection is registered **at connect, not at first use**. The hub records a
+connection inside its own request gate, so before this it only appeared once a
+tool call actually reached it — a client that had authorized but not yet called
+anything was on no list and could not be pre-emptively revoked, which is exactly
+the window in which you would want to cut it off. So the first time the OAuth
+gate validates a token for a connection this process hasn't seen (an
+`initialize` is enough), `scrim mcp` fires **one** cheap read-only hub call
+(`GET /api/status`) carrying the same actor headers a real tool call would, and
+the hub's existing gate records it. No new endpoint on either side.
+
+Two properties are load-bearing, and are pinned by tests:
+
+- **It never blocks or fails authentication.** The call runs on its own
+  goroutine with its own context and its error is discarded: a hub that is down,
+  slow, or erroring must never turn a valid token into a `401`/`503`. A failed
+  registration is not retried per request either — the connection is still
+  recorded on the first real tool call, exactly as before.
+- **One call per connection, not per request.** A bounded in-process set (1024
+  entries, oldest-inserted evicted) keys on (subject, client id, token `iat`).
+  The `iat` is part of the key on purpose: a re-authorized token must be able to
+  register again and clear a stale revocation, which keying on
+  (subject, client) alone would suppress. Eviction costs at most one redundant,
+  idempotent registration.
+
+It is inert everywhere else: local mode has no remote hub, and stdio and an
+OAuth-off transport never run the gate at all.

@@ -107,13 +107,25 @@ var resolveDaemon = func(cfg config.Config, selfStart bool) (client *apiclient.C
 // = local mode (localBackend), non-nil = hub mode (hubBackend). A blank ver is
 // reported as "dev" in the implementation handshake.
 func NewServer(cfg config.Config, ver string, hub *HubTarget) *mcp.Server {
+	srv, _ := newServerWithBackend(cfg, ver, hub)
+	return srv
+}
+
+// newServerWithBackend is NewServer plus the backend the server drives. The
+// streamable-HTTP transport needs that handle: in hub mode it registers a
+// newly-authenticated agent connection through the SAME hubBackend the tools
+// use (agentreg.go), so the registration carries identical bearer + actor
+// headers and no second HTTP client is constructed.
+func newServerWithBackend(cfg config.Config, ver string, hub *HubTarget) (*mcp.Server, backend) {
 	if ver == "" {
 		ver = "dev"
 	}
 	if hub != nil {
-		return newServer(newHubBackend(hub.BaseURL, hub.PublicBaseURL, hub.Token), cfg, ver, false)
+		b := newHubBackend(hub.BaseURL, hub.PublicBaseURL, hub.Token)
+		return newServer(b, cfg, ver, false), b
 	}
-	return newServer(newLocalBackend(cfg), cfg, ver, true)
+	b := newLocalBackend(cfg)
+	return newServer(b, cfg, ver, true), b
 }
 
 // boolPtr returns a pointer to v. ToolAnnotations.DestructiveHint and
