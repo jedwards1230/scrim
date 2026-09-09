@@ -208,3 +208,28 @@ func TestSessionExpiryUsesAForwardFormatter(t *testing.T) {
 		t.Error("the shared time helpers do not define until()")
 	}
 }
+
+// TestSignOutHereUsesTheLogoutFlow pins a fix for a bug that shipped: signing
+// the CURRENT browser out revoked the registry record and reloaded the page.
+// That looks correct and is not -- the reload is a browser navigation, so the
+// read gate sends it into /auth/login, where the IdP's own session cookie
+// (which scrim never touched) authenticates it again and mints a fresh
+// session. The user saw a page that never signed them out.
+//
+// Ending this browser's session has to go through POST /auth/logout, which
+// clears scrim's cookies, drops the registry entry, AND redirects to the
+// IdP's end_session_endpoint. It is the same trap RP-initiated logout exists
+// to avoid.
+func TestSignOutHereUsesTheLogoutFlow(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	if !strings.Contains(body, `form.action = "/auth/logout"`) {
+		t.Error("signing out the current browser does not go through the logout flow")
+	}
+	if !strings.Contains(body, "if (s.current) { signOutHere(); return; }") {
+		t.Error("the current session is not routed to the logout flow before the DELETE")
+	}
+	if strings.Contains(body, "window.location.reload()") {
+		t.Error("the current session is still ended with a reload, which the IdP silently re-authenticates")
+	}
+}

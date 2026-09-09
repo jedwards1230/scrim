@@ -504,15 +504,40 @@
     // (a shared machine), but it must never be a surprise.
     if (s.current && !window.confirm("Sign out of this browser? You'll be signed out here immediately and will need to log in again.")) return;
     clearSessionError();
+
+    // THIS browser goes through the real logout flow, not DELETE + reload.
+    // Revoking the record and reloading looks like it works and does not: the
+    // reload is a browser navigation, so the read gate sends it into
+    // /auth/login, where the IdP's OWN session cookie -- untouched by anything
+    // scrim did -- authenticates it again immediately and mints a fresh
+    // session. The visible result is a page that never signed you out.
+    //
+    // POST /auth/logout is the flow that actually ends it: it clears scrim's
+    // cookies, drops the registry entry (so a copy of the cookie taken
+    // elsewhere dies too), and then redirects to the IdP's end_session_endpoint
+    // so the SSO session ends as well. This is the same trap RP-initiated
+    // logout was built for; the sign-out control has to use it rather than
+    // reinvent half of it.
+    if (s.current) { signOutHere(); return; }
+
     fetch("/api/sessions/" + encodeURIComponent(s.id), { method: "DELETE", credentials: "same-origin" })
       .then(function (resp) {
         if (!resp.ok && resp.status !== 404) throw new Error("HTTP " + resp.status);
-        // Ending the current session invalidates this page's own cookie, so
-        // reload into the login flow rather than leaving a dead page up.
-        if (s.current) { window.location.reload(); return; }
         loadSessions();
       })
       .catch(function () { showSessionError("Couldn't sign that browser out."); });
+  }
+
+  // Submit a real POST to /auth/logout. Logout is POST-only on purpose (a GET
+  // logout is CSRF-able), so this builds the same form submission the account
+  // menu's Log out button performs.
+  function signOutHere() {
+    var form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/auth/logout";
+    form.hidden = true;
+    document.body.appendChild(form);
+    form.submit();
   }
 
   revokedToggle.addEventListener("click", function () { setRevokedOpen(revokedList.hidden); });
