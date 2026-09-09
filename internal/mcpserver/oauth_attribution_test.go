@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -26,7 +28,8 @@ func verifyToken(t *testing.T, v *oauthValidator, token string) actor {
 	return actorFromToken(idt)
 }
 
-// TestActorFromToken maps a validated JWT's sub/email/groups onto an actor.
+// TestActorFromToken maps a validated JWT's sub/email/groups (and the
+// agent-connection pair, client id + issued-at) onto an actor.
 func TestActorFromToken(t *testing.T) {
 	as := newFakeAS(t)
 	v := newTestValidator(t, as, "https://scrim-mcp.example")
@@ -80,14 +83,68 @@ func TestActorFromToken(t *testing.T) {
 			}},
 			want: actor{ID: "u-6", Email: "erin@example.com"}, // email recovered, groups nil
 		},
+		{
+			name: "azp names the OAuth client the connection is listed as",
+			opts: mintOpts{aud: testAudience, sub: "u-7", extra: map[string]any{
+				"azp": "claude-desktop",
+			}},
+			want: actor{ID: "u-7", ClientID: "claude-desktop"},
+		},
+		{
+			name: "client_id is the fallback when azp is absent",
+			opts: mintOpts{aud: testAudience, sub: "u-8", extra: map[string]any{
+				"client_id": "some-agent",
+			}},
+			want: actor{ID: "u-8", ClientID: "some-agent"},
+		},
+		{
+			name: "azp wins over client_id when both are present",
+			opts: mintOpts{aud: testAudience, sub: "u-9", extra: map[string]any{
+				"azp":       "claude-desktop",
+				"client_id": "some-agent",
+			}},
+			want: actor{ID: "u-9", ClientID: "claude-desktop"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := verifyToken(t, v, as.mint(t, tc.opts))
+			// Every minted token carries an `iat`, so the derived actor must be
+			// dated -- that timestamp is what lets a re-authorized client past a
+			// revocation, so an actor with no IssuedAt is a real defect.
+			if got.IssuedAt.IsZero() {
+				t.Error("actor.IssuedAt is zero, want the token's iat")
+			}
+			if d := time.Since(got.IssuedAt); d < -time.Minute || d > time.Minute {
+				t.Errorf("actor.IssuedAt = %v, want ~now (the minted iat)", got.IssuedAt)
+			}
+			got.IssuedAt = time.Time{} // compared above; the rest is exact
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("actorFromToken = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestActorFromTokenWithoutIat pins the fail-closed half: a token carrying no
+// `iat` still validates (coreoidc does not require the claim), and yields an
+// actor with a ZERO IssuedAt rather than a fabricated one. The hub reads that
+// zero as "cannot prove this token postdates a revocation" -- see
+// agentconn.Admit -- so inventing a timestamp here would silently defeat a
+// revocation.
+func TestActorFromTokenWithoutIat(t *testing.T) {
+	as := newFakeAS(t)
+	v := newTestValidator(t, as, "https://scrim-mcp.example")
+
+	token := as.mint(t, mintOpts{aud: testAudience, sub: "u-noiat", noIat: true, extra: map[string]any{
+		"azp": "claude-desktop",
+	}})
+	got := verifyToken(t, v, token)
+	if !got.IssuedAt.IsZero() {
+		t.Errorf("actor.IssuedAt = %v for a token with no iat, want the zero time", got.IssuedAt)
+	}
+	if got.ClientID != "claude-desktop" {
+		t.Errorf("actor.ClientID = %q, want claude-desktop", got.ClientID)
 	}
 }
 
@@ -164,6 +221,9 @@ func (rt bearerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 // on a hubBackend request, plus the bearer it rode.
 type capturedActor struct {
 	auth, id, email, groups string
+	// The agent-connection pair: the OAuth client the token was minted for and
+	// its iat, as the hub receives them. Both are empty on the HMAC plane.
+	clientID, issuedAt string
 }
 
 // runListOverHTTP stands up the full streamable-HTTP stack (newHTTPHandler with
@@ -187,6 +247,9 @@ func runListOverHTTP(t *testing.T, as *fakeAS, v *oauthValidator, hmacSecret, to
 			id:     r.Header.Get(hdrActorID),
 			email:  r.Header.Get(hdrActorEmail),
 			groups: r.Header.Get(hdrActorGroups),
+
+			clientID: r.Header.Get(hdrActorClientID),
+			issuedAt: r.Header.Get(hdrActorIssuedAt),
 		}
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -238,6 +301,7 @@ func TestOAuthAttributionEndToEnd(t *testing.T) {
 	token := as.mint(t, mintOpts{aud: testAudience, sub: "jwt-user", scope: scopeRead, extra: map[string]any{
 		"email":  "jwt@example.com",
 		"groups": []string{"eng", "sre"},
+		"azp":    "claude-desktop",
 	}})
 	// Validly-signed HMAC headers for a DIFFERENT principal; the JWT actor must win.
 	spoof := signedHeaders("hmac-user", "hmac@example.com", "hmac-group", hmacSecret)
@@ -257,6 +321,19 @@ func TestOAuthAttributionEndToEnd(t *testing.T) {
 	}
 	if got.groups != "eng,sre" {
 		t.Errorf("X-Scrim-Actor-Groups = %q, want eng,sre", got.groups)
+	}
+	// The agent-connection pair: without the client id reaching the hub there is
+	// nothing to name a connection by, and without the iat a revocation could
+	// never be lifted by re-authorizing.
+	if got.clientID != "claude-desktop" {
+		t.Errorf("X-Scrim-Actor-Client-Id = %q, want claude-desktop (from the token azp)", got.clientID)
+	}
+	secs, err := strconv.ParseInt(got.issuedAt, 10, 64)
+	if err != nil {
+		t.Fatalf("X-Scrim-Actor-Token-Issued-At = %q, want the token iat as Unix seconds: %v", got.issuedAt, err)
+	}
+	if d := time.Since(time.Unix(secs, 0)); d < -time.Minute || d > time.Minute {
+		t.Errorf("forwarded iat = %v, want ~now", time.Unix(secs, 0))
 	}
 }
 
@@ -281,5 +358,12 @@ func TestOAuthEmptySubDoesNotShadowHMAC(t *testing.T) {
 	}
 	if got.groups != "hmac-group" {
 		t.Errorf("X-Scrim-Actor-Groups = %q, want hmac-group", got.groups)
+	}
+	// The HMAC plane has no JWT, so it asserts neither half of the
+	// agent-connection pair. Sending an EMPTY client id header would be an
+	// assertion ("this connection has no client") rather than an absence; the
+	// hub reads absence as fail-closed, so the headers must simply not be set.
+	if got.clientID != "" || got.issuedAt != "" {
+		t.Errorf("HMAC-plane actor forwarded client=%q iat=%q, want both absent", got.clientID, got.issuedAt)
 	}
 }

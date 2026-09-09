@@ -373,6 +373,8 @@ Hub-only additions — the **machine API**, documented as a hand-authored OpenAP
 | grants | `GET`/`POST .../grants`, `DELETE .../grants/{grantRef}` |
 | ownership | `POST /api/canvases/{id}/claim` |
 | tokens | `GET`/`POST /api/tokens`, `DELETE /api/tokens/{id}`, `GET /tokens` (HTML †) |
+| sessions | `GET /api/sessions`, `DELETE /api/sessions/{id}` (session-only) |
+| agent connections | `GET /api/agent-connections`, `DELETE /api/agent-connections/{id}` (session-only) |
 | principals | `GET /api/principals?q=` (autocomplete; display-only, never an authorization source) |
 | ops | `GET /healthz` (gate-exempt), `GET /api/openapi.yaml` (gate-exempt) |
 | auth | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` (RP-initiated: clears local cookies, then redirects to the IdP's discovered `end_session_endpoint`), `GET /logged-out` (HTML †) — present only under OIDC. `/logged-out` is gate-exempt by exact match and renders no identity, and it is currently the **only** page an anonymous visitor can reach at all, which is exactly §13.9's problem statement. |
@@ -470,6 +472,14 @@ CIDR gate replacing the local capability token.
   `X-Forwarded-User-*` headers that `scrim mcp` verifies and re-emits as `X-Scrim-Actor-*`. The
   hub trusts those re-emitted headers only when they ride a valid admin push token. An
   OAuth-validated JWT actor is authoritative and takes precedence over the HMAC plane.
+- **Agent connections.** The forwarded plane is also *listed and revocable*, so all three ways
+  something reaches a canvas appear on one page. On the OAuth path `scrim mcp` forwards the
+  token's client id and `iat` alongside the actor; the hub keeps one record per (subject, client)
+  in `internal/agentconn` and refuses a revoked one at the gate. Revocation is scrim-side only —
+  it blocks the client here immediately and does **not** delete the IdP grant, so re-authorizing
+  (a token issued after the revocation) restores access by design. The page states that bound
+  rather than implying more. `scrim mcp` stays stateless: the hub owns the state and the
+  enforcement.
 - **Roles (not built).** Three roles — `admin`, `member`, `guest` — derived from an IdP claim on
   each request, never stored as a scrim-side user list (§6). `member` is today's behavior and the
   default for anyone the IdP authenticates. `admin` is a *principal* who can see every canvas,
@@ -479,7 +489,8 @@ CIDR gate replacing the local capability token.
   principal may do; ownership and grants still decide which canvas it may do it to, so this adds a
   ceiling rather than a second ACL.
 - **Storage layout** under the data dir: `canvases/<id>/`, `meta/<id>.json`, `meta/tokens.json`
-  (0600), `meta/principals.json`, `versions/<id>/<timestamp>[-label]/`, `push-staging/`. Comments
+  (0600), `meta/sessions.json` (0600), `meta/agent-connections.json` (0600),
+  `meta/principals.json`, `versions/<id>/<timestamp>[-label]/`, `push-staging/`. Comments
   would add `meta/comments/<id>.json` (§7.9).
 
 **Collaboration end state.** Sharing is finished when a canvas can be handed to another person
@@ -944,6 +955,15 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
   `--oidc-session-secret` still works as the all-at-once lever, and `--oidc-session-ttl` still
   bounds a session that is never signed out. The admin push token deliberately never consults the
   registry, so it remains the recovery path when the registry itself is broken.
+- **An OAuth agent connection is revocable at scrim, and only at scrim.** The MCP clients that
+  reach a hub through `scrim mcp`'s OAuth plane are recorded per (principal, OAuth client) and
+  listed on `/tokens` with a Revoke control, which blocks that client on its very next request.
+  What it deliberately does not do is touch the IdP: the client keeps its refresh token, and a
+  token issued after the revocation is admitted — that is how re-authorizing restores access. The
+  page says so in as many words rather than implying an IdP-side kill. The same fail-closed rules
+  as the session registry apply (corrupt registry refuses the plane, missing registry is empty),
+  and the bare admin push token — which carries no forwarded actor — is untouched by every
+  revocation, keeping it the recovery path here too.
 
 **Accepted operational limits.**
 

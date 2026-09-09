@@ -113,6 +113,14 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("GET /api/sessions", s.handleListSessions)
 		mux.HandleFunc("DELETE /api/sessions/{id}", s.handleRevokeSession)
 
+		// Agent-connection management: the third thing that can reach a
+		// principal's canvases (after a browser session and a user token) -- an
+		// OAuth-authenticated MCP client arriving on the forwarded-actor plane.
+		// Same session-only plane as the two routes above; revoking one blocks
+		// that client at the hub gate on its very next request.
+		mux.HandleFunc("GET "+agentConnsPath, s.handleListAgentConns)
+		mux.HandleFunc("DELETE "+agentConnsPath+"/{id}", s.handleRevokeAgentConn)
+
 		// Principal autocomplete (#53): the share dialog's grantee suggestions.
 		// A session-gated read (general non-canvas read at the gate), thin over
 		// the principalLister seam the Authentik directory driver (#54) layers

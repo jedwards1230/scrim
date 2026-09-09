@@ -233,3 +233,81 @@ func TestSignOutHereUsesTheLogoutFlow(t *testing.T) {
 		t.Error("the current session is still ended with a reload, which the IdP silently re-authenticates")
 	}
 }
+
+// TestAccessPageListsAgentConnections pins the third section: agents sit
+// between the browser sign-ins and the tokens, are named by their OAuth client
+// id, and are driven by the agent-connection endpoints.
+func TestAccessPageListsAgentConnections(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	for _, want := range []string{
+		`<section id="agents">`,
+		`<div id="agent-list">`,
+		"Agents connected to your account",
+		`fetch("/api/agent-connections"`,
+		`name.textContent = a.client_id || "Unnamed client";`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("access page's agents section missing %q", want)
+		}
+	}
+
+	sessions := strings.Index(body, `<div id="session-list">`)
+	agents := strings.Index(body, `<div id="agent-list">`)
+	tokens := strings.Index(body, `<div id="token-list">`)
+	if sessions < 0 || agents < 0 || tokens < 0 {
+		t.Fatalf("access page missing a list (sessions=%d agents=%d tokens=%d)", sessions, agents, tokens)
+	}
+	if sessions > agents || agents > tokens {
+		t.Errorf("section order = sessions %d, agents %d, tokens %d; want agents between the two", sessions, agents, tokens)
+	}
+}
+
+// TestAgentConnTimestampsUseThePastFormatter pins the same distinction
+// TestSessionExpiryUsesAForwardFormatter pins, from the other side: an agent's
+// first-seen and last-seen are both in the PAST, so they take relative(). Using
+// until() there would render every one of them as "expired".
+func TestAgentConnTimestampsUseThePastFormatter(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	for _, want := range []string{`relative(a.last_seen)`, `relative(a.first_seen)`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agent timestamps missing %q, want the past-tense formatter", want)
+		}
+	}
+	for _, gone := range []string{`until(a.last_seen)`, `until(a.first_seen)`} {
+		if strings.Contains(body, gone) {
+			t.Errorf("agent timestamp uses %q; until() is for a future instant and reads as expired here", gone)
+		}
+	}
+}
+
+// TestAgentRevokeStatesItsBounds is the honesty requirement, and it is the
+// specific bug this project already shipped and fixed once (#146): a control
+// that looks like it did more than it did. Revoking an agent blocks it AT SCRIM
+// and does not touch the identity provider's grant, so the page must say so --
+// in the section copy and again in the confirmation, at the moment it matters.
+func TestAgentRevokeStatesItsBounds(t *testing.T) {
+	body := aliceAccessPage(t)
+
+	for _, want := range []string{
+		"Revoking blocks that client here, immediately",
+		"does <strong>not</strong> remove anything at your identity provider",
+		"authorizing scrim again re-establishes the", // line-wrapped in the template
+		"This does NOT remove scrim's ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agent section does not state what Revoke does and does not do: missing %q", want)
+		}
+	}
+	if !strings.Contains(body, "function revokeAgent(a) {") {
+		t.Fatal("no agent revoke handler on the page")
+	}
+	// The confirmation must precede the request: a dialog shown after the fact
+	// would be describing something already done.
+	confirm := strings.Index(body, `"Block " + (a.client_id`)
+	del := strings.Index(body, `fetch("/api/agent-connections/"`)
+	if confirm < 0 || del < 0 || confirm > del {
+		t.Errorf("agent revoke does not confirm before the DELETE (confirm=%d, delete=%d)", confirm, del)
+	}
+}

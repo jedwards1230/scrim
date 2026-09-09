@@ -97,6 +97,60 @@ Three properties are load-bearing:
   outright. That is intended: a cookie no record backs is a session nothing can
   revoke.
 
+### Agent connections
+
+A third thing can reach a principal's canvases, and until recently it appeared on
+no list at all: an **MCP client authenticated by OAuth**. When an agent connects
+to `scrim mcp --http` with `--oauth-issuer` set, its calls arrive at the hub as
+the admin push token plus verified `X-Scrim-Actor-*` headers (see [the
+forwarded-identity plane](#the-forwarded-identity-plane) below) — neither a
+browser session nor a user token, so an agent holding a live refresh token had
+ongoing access that nothing on the devices page mentioned.
+
+`scrim mcp` therefore forwards two more verified values off the *already
+validated* JWT, on that same trusted plane: the OAuth client (`azp`, falling
+back to `client_id`) as `X-Scrim-Actor-Client-Id`, and the token's `iat` as
+`X-Scrim-Actor-Token-Issued-At` (Unix seconds). The hub keeps one record per
+**(IdP subject, client id)** pair in `agent-connections.json` under its meta dir
+— the `internal/agentconn` package, shaped exactly like `internal/session`,
+in-memory with a throttled `last_seen` write — and the gate consults it on every
+forwarded-actor request. `GET /api/agent-connections` and
+`DELETE /api/agent-connections/{id}` list and revoke them from the same
+session-only plane `/api/sessions*` uses; the devices page renders them between
+the browser sign-ins and the tokens.
+
+What revoking does, exactly:
+
+- **It blocks that client at scrim, on its very next request** (`403`). That
+  half is immediate and unconditional.
+- **It does not touch the identity provider.** The client keeps the grant and
+  the refresh token it already holds. Authorizing scrim again mints a token
+  whose `iat` postdates the revocation, and the hub admits that one — clearing
+  the revocation, so the page stops calling a working connection revoked. That
+  is deliberate and the page says so outright, because a control that looks like
+  it did more than it did is precisely the bug
+  [#146](https://github.com/jedwards1230/scrim/pull/146) had to fix. Cutting an
+  agent off for good means removing scrim's authorization at the IdP too.
+
+The same three properties the session registry has hold here, for the same
+reasons:
+
+- **Session-only plane.** A user token and the machine plane (including the
+  agent itself) get `403`; the admin push token, which has no agent connections
+  of its own, gets an empty list and `404`. Another principal's connection id
+  is `404`, never `403`.
+- **Fail closed, but only on a real failure.** An unreadable or corrupt registry
+  refuses every forwarded-actor request (`503`) until an operator fixes it; a
+  *missing* file is an empty registry. The bare admin push token — no actor
+  headers — never consults the store and is unaffected by every revocation in
+  it, which is what keeps `scrim push` and CI working while the rest fails
+  closed.
+- **A revocation is never silently unenforceable.** A caller with no client id
+  (the HMAC forwarded-identity plane, which carries no JWT) or no `iat` cannot
+  satisfy the re-authorization exemption, so a matching revocation blocks it
+  unconditionally. A client-id-less caller keys on the principal's empty-client
+  row, so revoking that row cuts off that whole plane for the principal.
+
 ### Logout
 
 Logging out performs **RP-initiated logout** ([OIDC RP-Initiated Logout 1.0][rpl]):
@@ -228,6 +282,12 @@ token](#ownership-sharing--tokens) with an `auto_share` grant to that human's
 email or group — the agent's calls own their own canvases under its own service
 identity, auto-shared to the human, rather than depending on per-request
 forwarded identity.
+
+On the OAuth path the same handoff additionally carries the OAuth client id and
+the token's `iat` (`X-Scrim-Actor-Client-Id` / `X-Scrim-Actor-Token-Issued-At`),
+which is what makes the connection listable and revocable — see [Agent
+connections](#agent-connections). The HMAC plane has no JWT, so it sets neither
+header, and the hub reads that absence fail-closed rather than as consent.
 
 The hub trusts the re-emitted `X-Scrim-Actor-*` headers ONLY when they ride a
 valid admin push token; a spoofed header on any other request is ignored by

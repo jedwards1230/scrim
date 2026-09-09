@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -477,6 +478,17 @@ func (b *hubBackend) newRequest(ctx context.Context, method, rawURL string, body
 		req.Header.Set(hdrActorID, a.ID)
 		req.Header.Set(hdrActorEmail, a.Email)
 		req.Header.Set(hdrActorGroups, strings.Join(a.Groups, ","))
+		// The OAuth-only pair: the client the token was minted for and when it
+		// was issued, which together let the hub list this agent connection and
+		// enforce a revocation of it. Set only when populated -- the HMAC plane
+		// has no JWT, and an empty header must stay absent rather than assert an
+		// empty client id.
+		if a.ClientID != "" {
+			req.Header.Set(hdrActorClientID, a.ClientID)
+		}
+		if !a.IssuedAt.IsZero() {
+			req.Header.Set(hdrActorIssuedAt, strconv.FormatInt(a.IssuedAt.Unix(), 10))
+		}
 	}
 	return req, nil
 }

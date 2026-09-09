@@ -12,10 +12,11 @@ var tokensTemplateSrc string
 
 var tokensTemplate = mustPageTemplate("tokens", tokensTemplateSrc)
 
-// tokensPageData is the devices-and-access page's render context. Both lists --
-// browser sign-ins (GET /api/sessions) and tokens (GET /api/tokens) -- are
-// fetched client-side so sign-out/mint/revoke update in place without a full
-// reload, the same fetch-driven pattern the gallery uses.
+// tokensPageData is the devices-and-access page's render context. All three
+// lists -- browser sign-ins (GET /api/sessions), agent connections
+// (GET /api/agent-connections), and tokens (GET /api/tokens) -- are fetched
+// client-side so sign-out/revoke/mint update in place without a full reload,
+// the same fetch-driven pattern the gallery uses.
 type tokensPageData struct {
 	Version string
 	// Account carries the header account menu (identity + Devices & access /
@@ -35,7 +36,11 @@ type tokensPageData struct {
 // unchanged). Browser sign-ins lead the page and are individually revocable
 // (#145): they are server-side records now, so listing them promises a sign-out
 // the server can actually honor -- which is the reverse of what this page said
-// before the session registry existed.
+// before the session registry existed. Agent connections (OAuth-authenticated
+// MCP clients) sit between the sign-ins and the tokens, completing the set:
+// every way something can reach these canvases is now on one page, and each is
+// revocable there. What the agent section deliberately does NOT claim is
+// IdP-side revocation -- see handleRevokeAgentConn.
 func (s *Server) handleTokensPage(w http.ResponseWriter, r *http.Request) {
 	data := tokensPageData{Version: version.Short(), Account: accountFrom(claimsFrom(r.Context()))}
 

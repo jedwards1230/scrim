@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -43,6 +44,15 @@ const (
 	hdrActorID     = "X-Scrim-Actor-Id"
 	hdrActorEmail  = "X-Scrim-Actor-Email"
 	hdrActorGroups = "X-Scrim-Actor-Groups"
+	// The two OAuth-only additions. They ride the SAME trusted plane as the
+	// three above -- verified here, re-emitted on top of the admin bearer -- and
+	// carry no second trust mechanism: the client id the token was minted for,
+	// and the token's issued-at as decimal Unix seconds. Both are empty on the
+	// HMAC forwarded-identity plane, which has no JWT to read them from; the hub
+	// treats their absence as "cannot prove this credential postdates a
+	// revocation" and fails closed (see internal/agentconn.Admit).
+	hdrActorClientID = "X-Scrim-Actor-Client-Id"
+	hdrActorIssuedAt = "X-Scrim-Actor-Token-Issued-At"
 )
 
 // actor is the verified principal a single tool call acts as -- forwarded by a
@@ -54,6 +64,15 @@ type actor struct {
 	ID     string
 	Email  string
 	Groups []string
+	// ClientID is the OAuth client the token was minted for (`azp`, falling back
+	// to `client_id`), and IssuedAt is its `iat`. Both are populated ONLY on the
+	// OAuth path -- a gateway-forwarded HMAC identity carries no token, so it has
+	// neither. Together they make an agent connection nameable on the hub's
+	// devices page and revocable there: the pair (ID, ClientID) IS the
+	// connection, and IssuedAt is how re-authorizing gets a revoked client back
+	// in.
+	ClientID string
+	IssuedAt time.Time
 }
 
 // actorCtxKey is the private context key under which a handler stashes the

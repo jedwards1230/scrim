@@ -78,7 +78,8 @@ type mintOpts struct {
 	sub   string
 	exp   time.Time      // defaults to now+1h when zero
 	kid   string         // defaults to the AS kid when empty
-	extra map[string]any // additional claims (e.g. email, groups) merged verbatim
+	extra map[string]any // additional claims (e.g. email, groups, azp) merged verbatim
+	noIat bool           // omit the iat claim entirely (a token whose age cannot be proven)
 }
 
 func (as *fakeAS) mint(t *testing.T, o mintOpts) string {
@@ -105,6 +106,9 @@ func (as *fakeAS) mint(t *testing.T, o mintOpts) string {
 	}
 	if o.scope != "" {
 		claims["scope"] = o.scope
+	}
+	if o.noIat {
+		delete(claims, "iat")
 	}
 	for k, v := range o.extra {
 		claims[k] = v
