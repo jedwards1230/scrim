@@ -114,7 +114,18 @@ back to `client_id`) as `X-Scrim-Actor-Client-Id`, and the token's `iat` as
 **(IdP subject, client id)** pair in `agent-connections.json` under its meta dir
 — the `internal/agentconn` package, shaped exactly like `internal/session`,
 in-memory with a throttled `last_seen` write — and the gate consults it on every
-forwarded-actor request. `GET /api/agent-connections` and
+forwarded-actor request.
+
+Because the gate is where recording happens, a record used to appear only once a
+tool call actually reached the hub: a client that had authorized but not yet
+called anything was still on no list, and so could not be pre-emptively revoked.
+`scrim mcp` closes that window from its side — the first time it validates a
+token for a connection it hasn't seen, it makes one cheap read-only hub call in
+the background so the gate records the connection at connect. See
+[mcp.md § OAuth 2.0 resource mode](mcp.md#oauth-20-resource-mode---http-only) for the dedupe and
+fail-open rules; nothing about the hub's records or enforcement changes.
+
+`GET /api/agent-connections` and
 `DELETE /api/agent-connections/{id}` list and revoke them from the same
 session-only plane `/api/sessions*` uses; the devices page renders them between
 the browser sign-ins and the tokens.

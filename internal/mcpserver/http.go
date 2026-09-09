@@ -51,8 +51,8 @@ func IsLoopbackAddr(addr string) bool {
 
 // newHTTPHandler builds the scrim MCP server and returns an http.Handler
 // exposing it as a streamable-HTTP MCP endpoint at /mcp plus a GET /healthz
-// liveness probe. It reuses NewServer, so the tool set (and thus behaviour) is
-// identical to the stdio transport.
+// liveness probe. It builds the server through the same seam NewServer uses, so
+// the tool set (and thus behaviour) is identical to the stdio transport.
 //
 // When oauth is non-nil the endpoint becomes an RFC 9728 OAuth 2.0 protected
 // resource: /mcp is wrapped with bearer validation + per-tool scope enforcement
@@ -61,14 +61,26 @@ func IsLoopbackAddr(addr string) bool {
 // bearer requirement, no metadata endpoint). Either way the forwarded-identity
 // header-trust plane (identity.go) is unchanged -- the two identity layers are
 // orthogonal.
+//
+// In hub mode the OAuth gate additionally gets an agentRegistrar, so a client
+// whose token validates is registered with the hub AT CONNECT rather than on
+// its first tool call (agentreg.go). Local mode has no remote hub and gets none.
 func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthValidator) http.Handler {
-	srv := NewServer(cfg, ver, hub)
+	srv, b := newServerWithBackend(cfg, ver, hub)
 	mux := http.NewServeMux()
 	var mcpHandler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		nil,
 	)
 	if oauth != nil {
+		// Hub mode only: let the OAuth gate register a newly-seen agent
+		// connection with the hub the moment its token validates, instead of
+		// leaving it invisible (and unrevokable) until its first tool call. In
+		// local mode there is no remote hub, so the registrar stays nil and the
+		// gate registers nothing.
+		if hb, ok := b.(*hubBackend); ok {
+			oauth.registrar = newAgentRegistrar(hb)
+		}
 		// The metadata endpoint is deliberately mounted OUTSIDE the bearer gate:
 		// a client fetches it precisely because it holds no token yet.
 		mux.HandleFunc("GET "+protectedResourceMetadataPath, oauth.handleMetadata)
