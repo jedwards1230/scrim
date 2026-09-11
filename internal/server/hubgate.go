@@ -116,12 +116,27 @@ func (s *Server) withHubGate(next http.Handler) http.Handler {
 		// user token, if any) in the context so every downstream handler
 		// (gallery/list filtering, owner attribution, auto-share) reads the same
 		// claims without re-deriving them.
-		c, tok := s.resolveClaims(r)
+		c, tok, sess := s.resolveClaims(r)
 		ctx := withClaims(r.Context(), c)
 		if tok != nil {
 			ctx = withToken(ctx, tok)
 		}
 		r = r.WithContext(ctx)
+
+		// A browser session that just authenticated slides forward: its idle
+		// deadline is pushed out and its cookie re-issued to match. This lives
+		// here, not in resolveClaims, for one reason -- resolveClaims takes
+		// only the request, and re-issuing a cookie needs the writer. Keeping
+		// it here also keeps resolveClaims a pure identity decision, with the
+		// one mutation the gate performs in the gate. It runs before any
+		// read/write branch so a session is kept alive by whatever the
+		// request turns out to be, including one the authorization check
+		// later refuses. Sessions only: the admin push token resolves in
+		// branch 1 and never reaches here (sess is nil), and the user-token
+		// and forwarded-actor planes are renewed by nothing.
+		if sess != nil {
+			s.renewSession(w, r, *sess)
+		}
 
 		// A verified gateway/OAuth-forwarded actor is an AGENT CONNECTION, and a
 		// principal may cut one off from the devices page. Enforced here, before
@@ -204,11 +219,13 @@ const (
 
 // resolveClaims determines the identity a hub request carries, in precedence
 // order, returning the resolving user token too (nil unless a user bearer token
-// matched). It never calls out to the IdP -- it reads the presented credential
-// only. Its one side effect is feeding the display-only principal registry when
-// a forwarded actor is resolved (best-effort; enforcement never reads that
-// registry).
-func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Token) {
+// matched) and the browser session that resolved it (nil unless branch 3
+// matched -- the caller renews that session, which needs a ResponseWriter this
+// function deliberately does not take). It never calls out to the IdP -- it
+// reads the presented credential only. Its one side effect is feeding the
+// display-only principal registry when a forwarded actor is resolved
+// (best-effort; enforcement never reads that registry).
+func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Token, *oidc.Session) {
 	// 1. The global admin push token: the machine/bootstrap credential.
 	if s.hasValidPushToken(r) {
 		// A gateway-forwarded actor rides the admin push token: when scrim-mcp
@@ -223,9 +240,9 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 				Groups:  splitActorGroups(r.Header.Get(actorHeaderGroups)),
 			}
 			s.observeCFActor(c)
-			return c, nil
+			return c, nil, nil
 		}
-		return identity.Claims{Admin: true}, nil
+		return identity.Claims{Admin: true}, nil, nil
 	}
 
 	// 2. A valid user bearer token acts AS its owner. Looked up ABOVE the
@@ -233,7 +250,7 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 	// that token's owner, not to any session cookie it also happens to carry.
 	if raw, ok := bearerToken(r); ok && s.tokens != nil {
 		if tok, ok := s.tokens.Lookup(raw); ok {
-			return identity.Claims{Email: tok.OwnerEmail}, tok
+			return identity.Claims{Email: tok.OwnerEmail}, tok, nil
 		}
 	}
 
@@ -249,12 +266,40 @@ func (s *Server) resolveClaims(r *http.Request) (identity.Claims, *usertoken.Tok
 				Email:   sess.Email,
 				Name:    sess.Name,
 				Groups:  sess.Groups,
-			}, nil
+			}, nil, &sess
 		}
 	}
 
 	// 4. Anonymous.
-	return identity.Claims{}, nil
+	return identity.Claims{}, nil, nil
+}
+
+// renewSession slides a just-authenticated browser session forward: the
+// registry record's idle deadline moves out to now+idleTTL (clamped to the
+// absolute cap), and when that actually moves the cookie is re-issued to
+// match, so the cookie's own signed expiry never becomes the binding
+// constraint on a session the registry considers live.
+//
+// Both halves are governed by the SAME throttle inside session.Renew
+// (TouchInterval): inside that window there is no registry write and no
+// Set-Cookie, which is what keeps this off the per-request cost of an
+// authenticated browsing session.
+//
+// It is best-effort. The request has already authenticated -- Lookup said the
+// session is live -- so a registry write that fails, or a store that has
+// since gone fail-closed, must not turn a good request into an error; the
+// session simply isn't extended this time. And Renew cannot resurrect: a
+// record that expired or was revoked between Lookup and here is a miss, and
+// nothing is written or re-issued.
+func (s *Server) renewSession(w http.ResponseWriter, r *http.Request, sess oidc.Session) {
+	if s.sessions == nil || s.oidcAuth == nil {
+		return
+	}
+	rec, extended, err := s.sessions.Renew(sess.ID)
+	if err != nil || !extended {
+		return
+	}
+	s.oidcAuth.RenewSession(w, r, sess, rec.ExpiresAt)
 }
 
 // sessionLive reports whether id names a live (unrevoked, unexpired) sign-in in

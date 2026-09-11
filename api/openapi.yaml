@@ -1673,7 +1673,11 @@ components:
         expires_at:
           type: string
           format: date-time
-          description: When the session expires on its own, per --oidc-session-ttl.
+          description: >-
+            When the session expires on its own. It is an IDLE deadline, not a fixed lifetime:
+            using the session slides it out to now + --oidc-session-ttl (throttled to at most
+            once every 5 minutes), capped at login time + --oidc-session-max-lifetime. So this
+            value moves forward as the session is used, and stops moving once it reaches the cap.
         current:
           type: boolean
           description: True for the session making this very request ("This browser").

@@ -326,8 +326,13 @@ Common to every local verb:
 `--read-token`/`SCRIM_READ_TOKEN`, `--allow`/`SCRIM_HUB_ALLOW` (`127.0.0.0/8,::1/128`),
 `--idle-timeout` (disabled), `--no-mdns` (on), the `--oidc-*` family (`issuer`, `client-id`,
 `client-secret`, `redirect-url`, `post-logout-redirect-url`, `scopes`, `session-secret`,
-`session-ttl`, `secure-cookies`), and `--authentik-{url,token,cache-ttl}` for the optional
-directory feeder.
+`session-ttl`, `session-max-lifetime`, `secure-cookies`), and
+`--authentik-{url,token,cache-ttl}` for the optional directory feeder.
+
+`--oidc-session-ttl` (default `168h`) is an **idle** window, not an absolute lifetime: using a
+session slides its deadline forward, so an active user is never signed out mid-use.
+`--oidc-session-max-lifetime` (default `720h`) is the absolute cap from login that renewal can
+never cross.
 
 `--oidc-post-logout-redirect-url` is optional and off by default. Set it only to a URL the IdP
 has registered as a valid post-logout redirect — an unregistered value is rejected by the
@@ -953,7 +958,10 @@ the product as scoped on 2026-08-22 and is not true of the product as scoped now
   file is an empty registry, not a failure — that is a hub's first boot); and the upgrade
   invalidated every pre-existing cookie, so everyone logged in once more. Rotating
   `--oidc-session-secret` still works as the all-at-once lever, and `--oidc-session-ttl` still
-  bounds a session that is never signed out. The admin push token deliberately never consults the
+  bounds a session that is never signed out — as an **idle** window, with
+  `--oidc-session-max-lifetime` as the absolute cap on one that is used continuously. The
+  registry is also what makes that sliding window possible: it owns the `created_at` the cap is
+  measured from. The admin push token deliberately never consults the
   registry, so it remains the recovery path when the registry itself is broken.
 - **An OAuth agent connection is revocable at scrim, and only at scrim.** The MCP clients that
   reach a hub through `scrim mcp`'s OAuth plane are recorded per (principal, OAuth client) and

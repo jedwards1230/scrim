@@ -6,6 +6,13 @@
 // session-authenticated request, so revoking a record ends that browser's
 // access on its very next request.
 //
+// Expiry SLIDES. A record's ExpiresAt is an idle deadline, not a fixed
+// lifetime: Renew pushes it out to now+idleTTL as the session is used,
+// clamped to CreatedAt+maxLifetime so a session that is merely kept warm
+// still ends. Renewal is throttled by TouchInterval for the same reason the
+// LastSeen bump it subsumes always was -- the check runs on every request and
+// must not write the file each time.
+//
 // Shape and storage mirror internal/usertoken deliberately: a whole-file JSON
 // document under the meta directory, written atomically (temp file + rename)
 // under a mutex. The hub is single-replica by design (an RWO volume, a
@@ -42,10 +49,12 @@ import (
 // fileName is the sessions document under the meta directory.
 const fileName = "sessions.json"
 
-// TouchInterval is how stale a record's LastSeen must be before Lookup
-// persists a fresh one. Bumping it on every request would mean a disk write
-// per request; a five-minute floor keeps "last seen" honest enough for a
-// devices list while leaving the hot path allocation-cheap and write-free.
+// TouchInterval is how stale a record's LastSeen must be before Renew
+// persists a fresh one -- and, with it, the slid expiry. Doing either on every
+// request would mean a disk write (and a Set-Cookie) per request; a
+// five-minute floor keeps "last seen" honest enough for a devices list, and an
+// idle window measured in days is not meaningfully coarsened by rounding its
+// renewals to five minutes. Lookup itself never writes at all.
 const TouchInterval = 5 * time.Minute
 
 // errUnreadable / errCorrupt are the two fail-closed states. They are
@@ -79,6 +88,17 @@ type Store struct {
 	path string
 	now  func() time.Time
 
+	// idleTTL is the SLIDING window: a session that goes unused for this long
+	// expires. Renew pushes ExpiresAt out to now+idleTTL as the session is
+	// used. maxLifetime is the absolute cap, measured from CreatedAt: renewal
+	// can never push a record past it, so a session merely kept warm still
+	// ends and its holder re-authenticates. A non-positive maxLifetime means
+	// no cap; a non-positive idleTTL disables renewal entirely (expiry stays
+	// whatever Create recorded), which is what a Store built by a caller with
+	// no policy of its own gets.
+	idleTTL     time.Duration
+	maxLifetime time.Duration
+
 	// records is the authoritative in-memory view, keyed by session id, valid
 	// only while loadErr is nil.
 	records map[string]Record
@@ -93,10 +113,16 @@ type Store struct {
 // one puts the store in its fail-closed error state (see Err). Expired records
 // are pruned as part of the load, and the pruned set is written back
 // best-effort. The file is not created until the first Create.
-func New(metaDir string) *Store {
+//
+// idleTTL and maxLifetime are the renewal policy (see the Store fields): the
+// sliding idle window, and the absolute cap from CreatedAt that renewal may
+// never cross.
+func New(metaDir string, idleTTL, maxLifetime time.Duration) *Store {
 	s := &Store{
-		path: filepath.Join(metaDir, fileName),
-		now:  time.Now,
+		path:        filepath.Join(metaDir, fileName),
+		now:         time.Now,
+		idleTTL:     idleTTL,
+		maxLifetime: maxLifetime,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -146,17 +172,68 @@ func (s *Store) Create(rec Record) error {
 	if rec.LastSeen.IsZero() {
 		rec.LastSeen = rec.CreatedAt
 	}
+	// The absolute cap binds from the very first moment, not just at renewal:
+	// an operator who sets an idle window longer than the cap gets the cap,
+	// rather than one initial session that outlives every renewed one.
+	if limit, ok := s.hardExpiry(rec); ok && rec.ExpiresAt.After(limit) {
+		rec.ExpiresAt = limit
+	}
 	s.prune()
 	s.records[rec.ID] = rec
 	return s.save()
 }
 
-// Lookup returns the live record for id, throttling a LastSeen bump through
-// TouchInterval so the common case is a map read and nothing else. An unknown
-// or expired id returns (Record{}, false, nil); the fail-closed state returns
-// the load error, which callers must treat as "not authenticated" rather than
-// as "unknown session".
+// Lookup returns the live record for id. It is a pure read -- a map lookup and
+// nothing else, no disk write -- because it is the revocation check on the hot
+// path of every authenticated browser request. An unknown or expired id
+// returns (Record{}, false, nil); the fail-closed state returns the load
+// error, which callers must treat as "not authenticated" rather than as
+// "unknown session". Marking a session used (and sliding its expiry) is
+// Renew's job, not Lookup's.
 func (s *Store) Lookup(id string) (Record, bool, error) {
+	if id == "" {
+		return Record{}, false, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return Record{}, false, s.loadErr
+	}
+
+	rec, ok := s.records[id]
+	if !ok {
+		return Record{}, false, nil
+	}
+	if !s.now().Before(rec.ExpiresAt) {
+		return Record{}, false, nil
+	}
+	return rec, true, nil
+}
+
+// Renew marks a live session used and slides its expiry out to now+idleTTL,
+// clamped to CreatedAt+maxLifetime. It returns the resulting record, whether
+// THIS call moved the expiry (the caller must then re-issue the session cookie
+// so the cookie's own signed expiry can't become the binding constraint), and
+// the fail-closed error.
+//
+// Three properties it is required to hold, each with a test:
+//
+//   - It never resurrects. An id that is unknown, already expired, or revoked
+//     is a miss (Record{}, false, nil) and nothing is written -- the liveness
+//     check runs BEFORE any extension, so a lapsed session cannot be renewed
+//     back into existence.
+//   - It never shrinks an expiry, and never pushes one past the absolute cap.
+//     A session sitting at the cap keeps being used but stops being extended,
+//     and then expires for real.
+//   - It is throttled by TouchInterval, exactly like the LastSeen bump it
+//     subsumes: inside the window it writes nothing and reports extended=false,
+//     so neither the registry file nor a Set-Cookie lands on every request.
+//
+// The write is best-effort, like usertoken's LastUsed bump: the in-memory view
+// is already correct, and the session is valid whether or not the new
+// timestamps reached the disk.
+func (s *Store) Renew(id string) (Record, bool, error) {
 	if id == "" {
 		return Record{}, false, nil
 	}
@@ -175,14 +252,35 @@ func (s *Store) Lookup(id string) (Record, bool, error) {
 	if !now.Before(rec.ExpiresAt) {
 		return Record{}, false, nil
 	}
-	if now.Sub(rec.LastSeen) >= TouchInterval {
-		rec.LastSeen = now
-		s.records[id] = rec
-		// Best-effort, exactly like usertoken's LastUsed bump: the session is
-		// valid whether or not the timestamp reached the disk.
-		_ = s.save()
+	if now.Sub(rec.LastSeen) < TouchInterval {
+		return rec, false, nil
 	}
-	return rec, true, nil
+
+	rec.LastSeen = now
+	extended := false
+	if s.idleTTL > 0 {
+		want := now.Add(s.idleTTL)
+		if limit, capped := s.hardExpiry(rec); capped && want.After(limit) {
+			want = limit
+		}
+		if want.After(rec.ExpiresAt) {
+			rec.ExpiresAt = want
+			extended = true
+		}
+	}
+	s.records[id] = rec
+	_ = s.save()
+	return rec, extended, nil
+}
+
+// hardExpiry returns the latest instant rec may ever expire at -- CreatedAt
+// plus the absolute cap -- and whether a cap is configured at all. Callers
+// hold s.mu.
+func (s *Store) hardExpiry(rec Record) (time.Time, bool) {
+	if s.maxLifetime <= 0 || rec.CreatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return rec.CreatedAt.Add(s.maxLifetime), true
 }
 
 // List returns subject's live (unexpired) sessions, newest first. An empty

@@ -46,9 +46,29 @@ scrim hub \
   session cookie; if empty a random one is generated (sessions then reset on
   restart). Set a stable value (**at least 32 bytes**, else the hub refuses to
   start) to persist sessions across restarts/replicas.
-- `--oidc-session-ttl` (env `SCRIM_OIDC_SESSION_TTL`, default `12h`) — how long
-  a session lives if nobody signs it out. Sessions are **server-side records**
-  and individually revocable; see [Browser sessions](#browser-sessions-devices)
+- `--oidc-session-ttl` (env `SCRIM_OIDC_SESSION_TTL`, default `168h` = 7 days) — the
+  **idle window**, not an absolute lifetime. A session expires once it has gone
+  unused for this long; every request that authenticates with it slides the
+  deadline out again (and re-issues the cookie to match), so an active user is
+  never signed out mid-use. *This flag's meaning changed*: it used to be a fixed
+  12h lifetime from login, which signed people out every 12 hours regardless of
+  activity.
+- `--oidc-session-max-lifetime` (env `SCRIM_OIDC_SESSION_MAX_LIFETIME`, default
+  `720h` = 30 days) — the **absolute cap**, measured from login. Renewal never
+  pushes a session past it, so a session in continuous use still ends here and
+  its holder re-authenticates. A negative value disables the cap.
+
+  Both are Go durations (`time.ParseDuration`), which has **no day unit** —
+  write `168h`, not `7d`. An unparseable env value silently falls back to the
+  default.
+
+  Renewal is throttled to at most one registry write and one `Set-Cookie` every
+  5 minutes (`session.TouchInterval`), the same throttle the `last_seen` bump
+  has always used — the revocation check is on the hot path of every
+  authenticated request and must not write per request. Sessions are
+  **server-side records** and individually revocable; renewal only ever extends
+  a record that is still live, so a revoked or lapsed session is never renewed
+  back into existence. See [Browser sessions](#browser-sessions-devices)
   below and the [threat model](threat-model.md#revocable-oidc-sessions-at-the-cost-of-a-piece-of-state).
 - `--oidc-secure-cookies` (env `SCRIM_OIDC_SECURE_COOKIES`, default `true`) —
   leave on in production; pass `=false` only for a plain-HTTP local test hub.

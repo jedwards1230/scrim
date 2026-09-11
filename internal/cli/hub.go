@@ -74,7 +74,8 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 	oidcPostLogoutURL := fs.String("oidc-post-logout-redirect-url", os.Getenv("SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL"), "optional URL the IdP returns to after logout; leave unset unless it is registered with the IdP as a valid post-logout redirect, otherwise the IdP shows its own logged-out page (env SCRIM_OIDC_POST_LOGOUT_REDIRECT_URL)")
 	oidcScopes := fs.String("oidc-scopes", envOr("SCRIM_OIDC_SCOPES", "openid,profile,email"), "comma-separated OIDC scopes (env SCRIM_OIDC_SCOPES)")
 	sessionSecret := fs.String("oidc-session-secret", os.Getenv("SCRIM_OIDC_SESSION_SECRET"), "HMAC secret for session cookies; if empty a random one is generated (sessions then reset on restart) (env SCRIM_OIDC_SESSION_SECRET)")
-	sessionTTL := fs.Duration("oidc-session-ttl", envDurationOr("SCRIM_OIDC_SESSION_TTL", oidc.DefaultSessionTTL), "how long an OIDC session cookie stays valid (env SCRIM_OIDC_SESSION_TTL)")
+	sessionTTL := fs.Duration("oidc-session-ttl", envDurationOr("SCRIM_OIDC_SESSION_TTL", oidc.DefaultSessionTTL), "IDLE window for an OIDC session: it expires once unused for this long, and every request slides it forward (env SCRIM_OIDC_SESSION_TTL)")
+	sessionMaxLifetime := fs.Duration("oidc-session-max-lifetime", envDurationOr("SCRIM_OIDC_SESSION_MAX_LIFETIME", oidc.DefaultSessionMaxLifetime), "absolute cap on an OIDC session measured from login; renewal never pushes past it, so a session in continuous use still ends here (env SCRIM_OIDC_SESSION_MAX_LIFETIME)")
 	secureCookies := fs.Bool("oidc-secure-cookies", envBoolOr("SCRIM_OIDC_SECURE_COOKIES", true), "set the Secure attribute on every cookie the hub sets (the OIDC cookies and the read-token cookie alike); leave true in production, pass =false only for a plain-HTTP local test hub (env SCRIM_OIDC_SECURE_COOKIES)")
 
 	// Authentik directory feeder (all optional): setting BOTH --authentik-url
@@ -139,6 +140,7 @@ func cmdHub(args []string, _, stderr io.Writer) int {
 			Scopes:                splitCSV(*oidcScopes),
 			SessionSecret:         []byte(*sessionSecret),
 			SessionTTL:            *sessionTTL,
+			SessionMaxLifetime:    *sessionMaxLifetime,
 			SecureCookies:         *secureCookies,
 		}
 	}

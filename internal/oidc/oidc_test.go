@@ -859,3 +859,176 @@ func TestLogoutWithoutSessionEndsNothing(t *testing.T) {
 		t.Error("EndSession was called for a session-less logout, want no revocation")
 	}
 }
+
+// TestSessionPolicyDefaults pins the resolved policy -- the idle window and
+// the absolute cap -- since both are now behavior an operator configures and
+// two packages (the Authenticator and the hub's session registry) must read
+// identically.
+func TestSessionPolicyDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       oidc.Config
+		wantIdle  time.Duration
+		wantMax   time.Duration
+		wantUncap bool
+	}{
+		{
+			name:     "unset takes both defaults",
+			cfg:      oidc.Config{},
+			wantIdle: 7 * 24 * time.Hour,
+			wantMax:  30 * 24 * time.Hour,
+		},
+		{
+			name:     "explicit values win",
+			cfg:      oidc.Config{SessionTTL: 2 * time.Hour, SessionMaxLifetime: 9 * time.Hour},
+			wantIdle: 2 * time.Hour,
+			wantMax:  9 * time.Hour,
+		},
+		{
+			name:     "a zero idle window still takes the default",
+			cfg:      oidc.Config{SessionMaxLifetime: 9 * time.Hour},
+			wantIdle: 7 * 24 * time.Hour,
+			wantMax:  9 * time.Hour,
+		},
+		{
+			name:      "a negative cap means uncapped",
+			cfg:       oidc.Config{SessionTTL: time.Hour, SessionMaxLifetime: -1},
+			wantIdle:  time.Hour,
+			wantUncap: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			idle, maxLife := tc.cfg.SessionPolicy()
+			if idle != tc.wantIdle {
+				t.Errorf("idle = %v, want %v", idle, tc.wantIdle)
+			}
+			if tc.wantUncap {
+				if maxLife > 0 {
+					t.Errorf("max = %v, want a non-positive (uncapped) value", maxLife)
+				}
+				return
+			}
+			if maxLife != tc.wantMax {
+				t.Errorf("max = %v, want %v", maxLife, tc.wantMax)
+			}
+		})
+	}
+}
+
+// TestDefaultSessionTTLIsAnIdleWindow guards the semantic change itself: the
+// default is a week, not the old 12-hour absolute lifetime. A revert to a
+// short default would silently reintroduce the mid-use sign-out this replaced.
+func TestDefaultSessionTTLIsAnIdleWindow(t *testing.T) {
+	if oidc.DefaultSessionTTL != 7*24*time.Hour {
+		t.Errorf("DefaultSessionTTL = %v, want 7d", oidc.DefaultSessionTTL)
+	}
+	if oidc.DefaultSessionMaxLifetime != 30*24*time.Hour {
+		t.Errorf("DefaultSessionMaxLifetime = %v, want 30d", oidc.DefaultSessionMaxLifetime)
+	}
+	if oidc.DefaultSessionMaxLifetime <= oidc.DefaultSessionTTL {
+		t.Error("the absolute cap must be longer than the idle window, else no session ever slides")
+	}
+}
+
+// TestRenewSessionReissuesBothCookies pins the cookie half of renewal: the
+// session cookie is re-signed with the later expiry and still verifies with
+// the same claims, and the retained id_token cookie slides with it so a
+// long-lived session does not silently lose its logout hint.
+func TestRenewSessionReissuesBothCookies(t *testing.T) {
+	auth, idp := newAuth(t)
+	sessionCookie, all := idp.LoginCookies(t, auth, "")
+
+	probe := httptest.NewRequest(http.MethodGet, "/", nil)
+	probe.AddCookie(sessionCookie)
+	sess, ok := auth.SessionFromRequest(probe)
+	if !ok {
+		t.Fatal("the minted session cookie does not verify")
+	}
+
+	renewReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	for _, c := range all {
+		if c != nil {
+			renewReq.AddCookie(c)
+		}
+	}
+	newExpiry := time.Now().Add(14 * 24 * time.Hour).Truncate(time.Second)
+	rec := httptest.NewRecorder()
+	auth.RenewSession(rec, renewReq, sess, newExpiry)
+
+	issued := findCookie(rec.Result().Cookies(), "scrim_session")
+	if issued == nil {
+		t.Fatal("RenewSession set no session cookie")
+	}
+	if issued.MaxAge <= 0 {
+		t.Errorf("re-issued session cookie MaxAge = %d, want a positive lifetime", issued.MaxAge)
+	}
+	verify := httptest.NewRequest(http.MethodGet, "/", nil)
+	verify.AddCookie(issued)
+	got, ok := auth.SessionFromRequest(verify)
+	if !ok {
+		t.Fatal("the re-issued session cookie does not verify")
+	}
+	if got.ID != sess.ID || got.Subject != sess.Subject || got.Email != sess.Email {
+		t.Errorf("re-issued session = %+v, want the same identity as %+v", got, sess)
+	}
+	if got.Expiry != newExpiry.Unix() {
+		t.Errorf("re-issued session expiry = %d, want %d", got.Expiry, newExpiry.Unix())
+	}
+
+	// The id_token cookie slid too -- proven where it matters, at logout:
+	// carrying the renewed pair still yields an id_token_hint.
+	renewedIDT := findCookie(rec.Result().Cookies(), "scrim_oidc_idt")
+	if renewedIDT == nil {
+		t.Fatal("RenewSession did not re-issue the retained id_token cookie")
+	}
+	_, loc := logout(t, auth, issued, renewedIDT)
+	if hint := loc.Query().Get("id_token_hint"); hint == "" {
+		t.Error("logout after renewal has no id_token_hint, want the slid ID token")
+	}
+}
+
+// TestRenewSessionWithNoRetainedIDTokenIsHarmless: a session whose id_token
+// cookie is gone (dropped, expired, oversized at login) still renews -- the
+// hint is best-effort and its absence must never block the extension.
+func TestRenewSessionWithNoRetainedIDTokenIsHarmless(t *testing.T) {
+	auth, idp := newAuth(t)
+	sessionCookie := idp.Login(t, auth, "")
+
+	probe := httptest.NewRequest(http.MethodGet, "/", nil)
+	probe.AddCookie(sessionCookie)
+	sess, ok := auth.SessionFromRequest(probe)
+	if !ok {
+		t.Fatal("the minted session cookie does not verify")
+	}
+
+	// Only the session cookie is presented.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(sessionCookie)
+	rec := httptest.NewRecorder()
+	auth.RenewSession(rec, req, sess, time.Now().Add(48*time.Hour))
+
+	if findCookie(rec.Result().Cookies(), "scrim_session") == nil {
+		t.Error("RenewSession set no session cookie when the id_token cookie was absent")
+	}
+	if c := findCookie(rec.Result().Cookies(), "scrim_oidc_idt"); c != nil {
+		t.Errorf("RenewSession invented an id_token cookie (%+v), want none -- there was nothing to slide", c)
+	}
+}
+
+// TestRenewSessionRefusesAPastExpiry: renewal never issues an already-dead
+// cookie, which would read to a browser as an instruction to delete it.
+func TestRenewSessionRefusesAPastExpiry(t *testing.T) {
+	auth, idp := newAuth(t)
+	sessionCookie := idp.Login(t, auth, "")
+
+	probe := httptest.NewRequest(http.MethodGet, "/", nil)
+	probe.AddCookie(sessionCookie)
+	sess, _ := auth.SessionFromRequest(probe)
+
+	rec := httptest.NewRecorder()
+	auth.RenewSession(rec, probe, sess, time.Now().Add(-time.Minute))
+	if got := rec.Result().Cookies(); len(got) != 0 {
+		t.Errorf("RenewSession with a past expiry set cookies %v, want none", got)
+	}
+}

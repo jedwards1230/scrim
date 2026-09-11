@@ -109,9 +109,18 @@ type Config struct {
 	// a persistent one. Provide a stable secret to persist sessions across
 	// restarts / replicas.
 	SessionSecret []byte //nolint:gosec // G117: operator-supplied config field, not a hardcoded secret
-	// SessionTTL is how long a minted session cookie stays valid. Defaults to
-	// DefaultSessionTTL.
+	// SessionTTL is the session's IDLE window, not an absolute lifetime: a
+	// session expires once it has gone unused for this long, and every
+	// authenticated request slides the deadline out again (see the hub's
+	// renewal path, which re-issues this cookie alongside the registry
+	// record). Defaults to DefaultSessionTTL.
 	SessionTTL time.Duration
+	// SessionMaxLifetime is the absolute cap on a session, measured from the
+	// moment it was created: renewal may never push a session past it, so a
+	// session kept continuously warm still ends and its holder
+	// re-authenticates. Defaults to DefaultSessionMaxLifetime; a negative
+	// value disables the cap.
+	SessionMaxLifetime time.Duration
 	// SecureCookies sets the Secure attribute on issued cookies. It should be
 	// true in production (the hub is served over TLS by its proxy); it exists
 	// as a knob only so a plain-HTTP local test deployment can turn it off.
@@ -148,9 +157,34 @@ type Config struct {
 	OnLogin func(email, name string, groups []string)
 }
 
-// DefaultSessionTTL is the session lifetime used when Config.SessionTTL is
-// zero.
-const DefaultSessionTTL = 12 * time.Hour
+// DefaultSessionTTL is the IDLE window used when Config.SessionTTL is zero: a
+// week of inactivity ends a session. It is deliberately generous because it is
+// no longer an absolute lifetime -- an active user is never signed out by it,
+// and DefaultSessionMaxLifetime is what bounds a session that never goes idle.
+const DefaultSessionTTL = 7 * 24 * time.Hour
+
+// DefaultSessionMaxLifetime is the absolute cap used when
+// Config.SessionMaxLifetime is zero: however continuously a session is used,
+// thirty days after it was created its holder authenticates again.
+const DefaultSessionMaxLifetime = 30 * 24 * time.Hour
+
+// SessionPolicy resolves the idle window and the absolute cap from cfg,
+// applying the defaults. A negative SessionMaxLifetime means "no cap" and is
+// returned as a non-positive duration, which every consumer reads that way.
+// It is exported because the hub builds its session registry (which owns
+// CreatedAt, and therefore the cap) before it builds the Authenticator, and
+// the two must resolve the same policy from the same config.
+func (c Config) SessionPolicy() (idle, max time.Duration) {
+	idle = c.SessionTTL
+	if idle <= 0 {
+		idle = DefaultSessionTTL
+	}
+	max = c.SessionMaxLifetime
+	if max == 0 {
+		max = DefaultSessionMaxLifetime
+	}
+	return idle, max
+}
 
 // minSessionSecretLen is the smallest operator-supplied SessionSecret New
 // accepts; it matches the size of the key New generates when none is given.
@@ -182,7 +216,10 @@ type Authenticator struct {
 	// the retained-ID-token cookie can never verify as a session or flow cookie.
 	idTokenSigner signer
 
+	// sessionTTL is the idle window and sessionMax the absolute cap from
+	// creation (non-positive = uncapped); see Config.SessionPolicy.
 	sessionTTL      time.Duration
+	sessionMax      time.Duration
 	secure          bool
 	logFailure      func(reason string)
 	onLogin         func(email, name string, groups []string)
@@ -291,10 +328,7 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		return nil, fmt.Errorf("oidc: session secret must be at least %d bytes when provided (got %d)", minSessionSecretLen, len(secret))
 	}
 
-	ttl := cfg.SessionTTL
-	if ttl <= 0 {
-		ttl = DefaultSessionTTL
-	}
+	ttl, maxLife := cfg.SessionPolicy()
 
 	return &Authenticator{
 		oauth2: oauth2.Config{
@@ -311,6 +345,7 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		flowSigner:            signer{key: secret, domain: "flow"},
 		idTokenSigner:         signer{key: secret, domain: "idtoken"},
 		sessionTTL:            ttl,
+		sessionMax:            maxLife,
 		secure:                cfg.SecureCookies,
 		logFailure:            cfg.LogAuthFailure,
 		onLogin:               cfg.OnLogin,
@@ -483,7 +518,16 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		Groups:  claims.Groups,
 	}
 
-	expiry := a.now().Add(a.sessionTTL)
+	// The initial deadline is one idle window out, but never beyond the
+	// absolute cap -- an operator who configures an idle window longer than
+	// the cap gets the cap, rather than a first session that outlives every
+	// renewed one. (session.Store applies the same clamp on its own record,
+	// from the same resolved policy.)
+	now := a.now()
+	expiry := now.Add(a.sessionTTL)
+	if a.sessionMax > 0 && a.sessionTTL > a.sessionMax {
+		expiry = now.Add(a.sessionMax)
+	}
 
 	// Record the sign-in BEFORE handing out the cookie, and fail the login if
 	// that fails. A cookie whose id no registry knows about authenticates
@@ -497,13 +541,13 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, expiry), a.sessionTTL)
+	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, expiry), expiry.Sub(now))
 
 	// Retain the raw ID token for logout's id_token_hint. Deliberately AFTER
 	// the session cookie and deliberately non-fatal: the user is authenticated
 	// either way, and an unretained token only costs the IdP an extra logout
 	// confirmation prompt.
-	a.setIDTokenCookie(w, rawIDToken)
+	a.setIDTokenCookie(w, rawIDToken, expiry)
 
 	// Feed the principal registry (display/autocomplete only; never consulted
 	// by enforcement). Nil-safe and best-effort by contract -- a registry write
@@ -593,24 +637,51 @@ func (a *Authenticator) endSessionURL(hint string) string {
 }
 
 // setIDTokenCookie stores raw for later use as an id_token_hint, signed under
-// the idtoken domain and expiring with the session it belongs to. An empty
-// token, or one whose signed cookie would exceed maxIDTokenCookieBytes, is
-// skipped: browsers drop an oversized cookie silently, so declining to set it
-// is the difference between a logout without a hint (fine -- the IdP prompts
-// instead) and a mystery. The skip is reported through the coarse failure log
-// so it stays diagnosable.
-func (a *Authenticator) setIDTokenCookie(w http.ResponseWriter, raw string) {
+// the idtoken domain and expiring with the session it belongs to -- expiry is
+// passed in rather than recomputed so it tracks the session's SLID deadline,
+// not a fresh idle window. An empty token, or one whose signed cookie would
+// exceed maxIDTokenCookieBytes, is skipped: browsers drop an oversized cookie
+// silently, so declining to set it is the difference between a logout without
+// a hint (fine -- the IdP prompts instead) and a mystery. The skip is reported
+// through the coarse failure log so it stays diagnosable.
+func (a *Authenticator) setIDTokenCookie(w http.ResponseWriter, raw string, expiry time.Time) {
 	if raw == "" {
 		return
 	}
-	value := a.idTokenSigner.encodeIDToken(raw, a.now().Add(a.sessionTTL))
+	value := a.idTokenSigner.encodeIDToken(raw, expiry)
 	if len(value) > maxIDTokenCookieBytes {
 		if a.logFailure != nil {
 			a.logFailure("login: id_token too large to retain for logout hint")
 		}
 		return
 	}
-	a.setCookie(w, idTokenCookieName, value, a.sessionTTL)
+	a.setCookie(w, idTokenCookieName, value, expiry.Sub(a.now()))
+}
+
+// RenewSession re-issues the session cookie for sess with a later expiry, so
+// the cookie's own signed deadline never becomes the binding constraint once
+// the hub's registry has slid the session's. It re-signs the SAME claims --
+// renewal extends a session, it never re-authenticates or re-reads the IdP --
+// and slides the retained id_token cookie alongside it, by re-encoding the
+// raw token already held in r under the new expiry.
+//
+// The id_token half is best-effort by construction: if that cookie is absent,
+// tampered with, or already lapsed there is simply nothing to re-encode, and
+// a session that outlives its hint costs only an extra IdP confirmation
+// prompt at logout. It is slid rather than dropped precisely so that cost is
+// not paid on every long-lived session.
+//
+// The caller decides WHEN to renew (the hub throttles it through
+// session.TouchInterval); this method only writes the cookies.
+func (a *Authenticator) RenewSession(w http.ResponseWriter, r *http.Request, sess Session, expiry time.Time) {
+	maxAge := expiry.Sub(a.now())
+	if maxAge <= 0 {
+		return
+	}
+	a.setCookie(w, SessionCookieName, a.sessionSigner.encodeSession(sess, expiry), maxAge)
+	if raw := a.idTokenHint(r); raw != "" {
+		a.setIDTokenCookie(w, raw, expiry)
+	}
 }
 
 // idTokenHint returns the retained raw ID token from r, or "" if the cookie is
