@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jedwards1230/scrim/internal/oidc"
 	"github.com/jedwards1230/scrim/internal/session"
 	"github.com/jedwards1230/scrim/internal/usertoken"
 )
@@ -260,7 +261,7 @@ func TestCorruptSessionStoreFailsClosedButAdminStillWorks(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{ this is not the registry"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s.sessions = session.New(s.metaDir)
+	s.sessions = session.New(s.metaDir, oidc.DefaultSessionTTL, oidc.DefaultSessionMaxLifetime)
 
 	if code := authedRead(t, s, cookie); code == http.StatusOK {
 		t.Error("a session cookie authenticated against a corrupt registry, want it rejected (fail closed)")

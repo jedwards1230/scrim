@@ -249,7 +249,12 @@ func NewHub(cfg config.Config, opts HubOptions) (*Server, error) {
 		// is reported ONCE at startup rather than on every request; the hub
 		// still starts, because the admin push token -- which never consults
 		// this store -- is the recovery path for exactly that situation.
-		sessions := session.New(s.metaDir)
+		// The registry owns CreatedAt, and therefore the absolute cap, so it
+		// resolves the SAME session policy the Authenticator will (one
+		// resolver, one config -- see oidc.Config.SessionPolicy) rather than
+		// reading the raw, possibly-zero fields itself.
+		idleTTL, maxLifetime := oc.SessionPolicy()
+		sessions := session.New(s.metaDir, idleTTL, maxLifetime)
 		if err := sessions.Err(); err != nil {
 			logging.Error(logging.CategoryAuth, err)
 		}

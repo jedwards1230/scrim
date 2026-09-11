@@ -71,6 +71,12 @@ own test.
   token never consults the registry at all** — it resolves before the session
   branch — so it stays usable as the recovery credential precisely when the
   registry is broken. `--oidc-session-ttl` still bounds a session nobody signs
-  out, and rotating `--oidc-session-secret` remains the all-at-once lever
+  out — but it is now an **idle** window (default 168h), so it bounds an *unused*
+  session, not a used one; the bound on a session in continuous use is
+  `--oidc-session-max-lifetime` (default 720h), an absolute cap from login that
+  renewal can never cross. An attacker holding a stolen cookie therefore keeps
+  it alive by using it, up to that cap — which is why the revocable registry,
+  not the TTL, is the real answer to a compromised session. Rotating
+  `--oidc-session-secret` remains the all-at-once lever
   (every existing cookie's HMAC then fails to verify). Setting a stable secret
   (≥32 bytes) is still what lets sessions survive a restart.
