@@ -222,6 +222,26 @@ func TestScheduleReloadConcurrentSameID(t *testing.T) {
 	}
 	wg.Wait()
 
+	// Wait for a reload to actually land BEFORE closing. Asserting on
+	// reloadCount after Close() would be racy: scheduleReload debounces with
+	// Stop()+Reset, so a call that preempts a still-pending timer produces no
+	// callback at all, and Close() then deliberately cancels whatever timer is
+	// left pending ("Successfully canceled before it fired: its callback ...
+	// will never run"). A burst in which every call preempted its predecessor
+	// and Close() cancelled the survivor is a permitted outcome -- the watcher
+	// behaving exactly as designed. Now that the bursts have stopped, nothing
+	// preempts the last timer, so its 1us debounce fires promptly and this
+	// wait is deterministic rather than a race.
+	reloadDeadline := time.After(30 * time.Second)
+	for atomic.LoadInt64(&reloadCount) == 0 {
+		select {
+		case <-reloadDeadline:
+			t.Fatal("expected at least one onReload call from the concurrent bursts")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
 	// Close must still be a clean quiescence barrier afterward: no panic,
 	// no deadlock, and every in-flight/pending callback accounted for.
 	closeDone := make(chan struct{})
@@ -233,10 +253,6 @@ func TestScheduleReloadConcurrentSameID(t *testing.T) {
 	case <-closeDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close() did not return (deadlock)")
-	}
-
-	if atomic.LoadInt64(&reloadCount) == 0 {
-		t.Fatal("expected at least one onReload call from the concurrent bursts")
 	}
 }
 
