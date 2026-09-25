@@ -1,6 +1,6 @@
 module github.com/jedwards1230/scrim
 
-go 1.26.0
+go 1.26.8
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
