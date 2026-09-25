@@ -3,6 +3,10 @@
 # Opt-in, per-repo. Only the ecosystems this repo actually has manifests for:
 # Go modules (go.mod), GitHub Actions (.github/workflows/*.yml), and the
 # hub-image Dockerfile at the repo root (base-image bumps).
+#
+# Each ecosystem carries a semver:* label so the "Release intent declared"
+# check passes: actions are CI-only (semver:none); gomod and docker change
+# the shipped binary/image (semver:patch).
 version: 2
 updates:
   # --- CI actions ---
@@ -12,7 +16,7 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    labels: ["dependency", "chore"]
+    labels: ["dependency", "chore", "semver:none"]
     commit-message:
       prefix: "deps(actions)"
     groups:
@@ -26,7 +30,7 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    labels: ["dependency", "chore"]
+    labels: ["dependency", "chore", "semver:patch"]
     commit-message:
       prefix: "deps(gomod)"
     groups:
@@ -40,7 +44,7 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    labels: ["dependency", "chore"]
+    labels: ["dependency", "chore", "semver:patch"]
     commit-message:
       prefix: "deps(docker)"
     groups:
