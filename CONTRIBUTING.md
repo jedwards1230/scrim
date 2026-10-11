@@ -80,15 +80,16 @@ A PR may declare what it does to the version with one label:
 
 An explicit label always wins. Without one, `release.yml` lists the merged PR's
 changed files (including the old path of a rename) and skips the release only
-when every one matches the dev-only list: `.github/`, `.claude/`, `CLAUDE.md` /
-`AGENTS.md`, `CONTRIBUTING*`, `docs/`, `*_test.go` and `testdata/`, `Makefile`,
-`scripts/e2e.sh`, `scripts/check-plugin-versions.sh`, and linter / formatter /
-git config. Everything else is product, including Go source, `go.mod` / `go.sum`,
-the `Dockerfile`, `deploy/` (the Helm chart), `api/`, `README.md`, and `plugins/`
-(the published Claude plugin). The list is the `DEV_ONLY` array in
-`release.yml`'s detect step, duplicated in `semver-label.yml` (keep them in
-sync). A PR with no associated merged PR (a direct push) or whose changed files
-can't be listed does not release and logs a `::warning::`.
+when every one matches [`.github/.releaseignore`](.github/.releaseignore). That
+file is the single dev-only list, in gitignore syntax, matched by git's own
+engine (`git check-ignore`) in `release.yml` and `semver-label.yml`. Anything it
+doesn't match is product, including Go source, `go.mod` / `go.sum`, the
+`Dockerfile`, `deploy/` (the Helm chart), `api/`, `README.md`, and `plugins/`
+(the published Claude plugin). Mind git's rule that a file can't be re-included
+once a parent *directory* is excluded (`docs/` + `!docs/x.md` does not work).
+A missing or empty file means nothing is dev-only. A PR with no associated
+merged PR (a direct push) or whose changed files can't be listed does not
+release and logs a `::warning::`.
 
 The `Semver label` check never requires a label; it fails only on more than one
 `semver:*` label, and warns (without failing) when a `semver:major|minor|patch`

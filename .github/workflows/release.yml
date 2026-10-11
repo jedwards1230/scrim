@@ -5,8 +5,9 @@
 #   1. An explicit semver:major|minor|patch label always wins (that bump);
 #      semver:none always means no release -- even if the diff is dev-only.
 #   2. No label: the PR's changed files decide. If EVERY changed file is
-#      dev-only (CI, tests, linter config, docs, agent instructions -- see the
-#      DEV_ONLY list in the detect step) there is no release; otherwise patch.
+#      dev-only (CI, tests, linter config, docs, agent instructions -- see
+#      .github/.releaseignore, gitignore syntax) there is no release; otherwise
+#      patch.
 #   3. No associated PR (direct push) or the changed-files lookup fails: no
 #      release, with a ::warning:: -- never a silent skip.
 #   4. workflow_dispatch always releases.
@@ -73,6 +74,14 @@ jobs:
       dry_run: ${{ steps.bump.outputs.dry_run }}
       release: ${{ steps.bump.outputs.release }}
     steps:
+      # Only the dev-only path list is needed; sparse so detect stays cheap.
+      - name: Checkout release ignore list
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/.releaseignore
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Determine bump type
         id: bump
         env:
@@ -85,47 +94,6 @@ jobs:
             DRY="${{ inputs.dry_run }}"
             RELEASE="true"
           else
-            # Dev-only paths. With no semver:* label, a merged PR releases as
-            # patch UNLESS every changed file matches one of these. Patterns are
-            # bash [[ == ]] globs, where `*` also matches `/` -- so 'docs/*'
-            # covers the whole subtree and '*_test.go' matches at any depth.
-            # Anything not listed counts as product. Keep in sync with the same
-            # list in semver-label.yml.
-            #
-            # Deliberately NOT listed (product): Go source, go.mod/go.sum,
-            # Dockerfile + .dockerignore, deploy/ (the Helm chart), api/,
-            # README.md, LICENSE, plugins/ + .claude-plugin/ (the published
-            # Claude plugin/skill users install), internal/**/templates|assets
-            # (go:embed'd). docs/* is dev-only: it is not embedded in the
-            # binary, not copied into the final image, and not served.
-            DEV_ONLY=(
-              '.github/*'
-              '.claude/*'
-              'CLAUDE.md'
-              'AGENTS.md'
-              '*/CLAUDE.md'
-              '*/AGENTS.md'
-              'CONTRIBUTING*'
-              'docs/*'
-              '*_test.go'
-              '*/testdata/*'
-              'scripts/e2e.sh'
-              'scripts/check-plugin-versions.sh'
-              'Makefile'
-              '.golangci*'
-              '.pre-commit-config.yaml'
-              '.editorconfig'
-              '.gitignore'
-            )
-            is_dev_only() {
-              local p
-              for p in "${DEV_ONLY[@]}"; do
-                # shellcheck disable=SC2053 # unquoted on purpose: $p is a glob
-                [[ $1 == $p ]] && return 0
-              done
-              return 1
-            }
-
             # Look up the PR associated with this exact commit directly (a
             # targeted commit->PR lookup, not a list+client-side-filter), so the
             # merged PR can never fall outside a paginated window. The PR may not
@@ -173,20 +141,43 @@ jobs:
               TYPE="none"; RELEASE="false"
               echo "::warning::no semver:* label on PR #${PR_NUMBER} and its changed files could not be listed — skipping release rather than guessing."
             else
-              # No label: the changed files decide. previous_filename is included
-              # above so a rename OUT of a product path still counts as product.
-              TOTAL=0
-              FIRST_PRODUCT=""
-              while IFS= read -r f; do
-                TOTAL=$((TOTAL + 1))
-                if [ -z "$FIRST_PRODUCT" ] && ! is_dev_only "$f"; then FIRST_PRODUCT="$f"; fi
-              done <<< "$FILES"
-              if [ -n "$FIRST_PRODUCT" ]; then
-                TYPE="patch"; RELEASE="true"
-                echo "::notice::no semver:* label on PR #${PR_NUMBER} — releasing as patch; first non-dev-only file: ${FIRST_PRODUCT}"
+              # No label: the changed files decide (previous_filename is included
+              # above so a rename OUT of a product path still counts as product).
+              # Dev-only paths live in .github/.releaseignore (gitignore syntax),
+              # matched by git's own engine in a throwaway empty repo so no other
+              # ignore source leaks in. Missing/empty file => nothing is dev-only.
+              RELEASEIGNORE="${GITHUB_WORKSPACE}/.github/.releaseignore"
+              mapfile -t FILE_LIST < <(printf '%s\n' "$FILES" | sort -u)
+              MATCHED=()
+              CHECK_RC=0
+              if [ -s "$RELEASEIGNORE" ]; then
+                SCRATCH=$(mktemp -d)
+                git init -q "$SCRATCH"
+                printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths"
+                git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
+                  check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || CHECK_RC=$?
+                # rc: 0 = some matched, 1 = none matched, anything else = error
+                if [ "$CHECK_RC" -le 1 ]; then mapfile -d '' MATCHED < "${SCRATCH}.matched"; fi
               else
+                echo "::notice::.github/.releaseignore is missing or empty -- no path counts as dev-only"
+              fi
+              if [ "$CHECK_RC" -gt 1 ]; then
                 TYPE="none"; RELEASE="false"
-                echo "::notice::dev-only rule fired on PR #${PR_NUMBER} — no release (${TOTAL} changed path(s), all dev-only; first: $(printf '%s\n' "$FILES" | head -n 3 | paste -sd, -))"
+                echo "::warning::git check-ignore failed (rc=${CHECK_RC}) on PR #${PR_NUMBER} -- skipping release rather than guessing."
+              else
+                declare -A IS_DEV=()
+                for f in "${MATCHED[@]}"; do IS_DEV["$f"]=1; done
+                FIRST_PRODUCT=""
+                for f in "${FILE_LIST[@]}"; do
+                  if [ -z "${IS_DEV[$f]+x}" ]; then FIRST_PRODUCT="$f"; break; fi
+                done
+                if [ -n "$FIRST_PRODUCT" ]; then
+                  TYPE="patch"; RELEASE="true"
+                  echo "::notice::no semver:* label on PR #${PR_NUMBER} — releasing as patch; first non-dev-only file: ${FIRST_PRODUCT}"
+                else
+                  TYPE="none"; RELEASE="false"
+                  echo "::notice::dev-only rule fired on PR #${PR_NUMBER} — no release (${#FILE_LIST[@]} changed path(s), all dev-only; first: $(printf '%s\n' "${FILE_LIST[@]}" | head -n 3 | paste -sd, -))"
+                fi
               fi
             fi
           fi

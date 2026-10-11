@@ -39,6 +39,13 @@ jobs:
     name: Release intent declared
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release ignore list
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/.releaseignore
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Validate semver:* labels
         env:
           # Rendered from the event payload rather than fetched, so the check
@@ -50,37 +57,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-
-          # Dev-only paths -- KEEP IN SYNC with the DEV_ONLY list in the
-          # `detect` step of release.yml. Patterns are bash [[ == ]] globs, where
-          # `*` also matches `/`. Anything not listed counts as product.
-          DEV_ONLY=(
-            '.github/*'
-            '.claude/*'
-            'CLAUDE.md'
-            'AGENTS.md'
-            '*/CLAUDE.md'
-            '*/AGENTS.md'
-            'CONTRIBUTING*'
-            'docs/*'
-            '*_test.go'
-            '*/testdata/*'
-            'scripts/e2e.sh'
-            'scripts/check-plugin-versions.sh'
-            'Makefile'
-            '.golangci*'
-            '.pre-commit-config.yaml'
-            '.editorconfig'
-            '.gitignore'
-          )
-          is_dev_only() {
-            local p
-            for p in "${DEV_ONLY[@]}"; do
-              # shellcheck disable=SC2053 # unquoted on purpose: $p is a glob
-              [[ $1 == $p ]] && return 0
-            done
-            return 1
-          }
 
           echo "Labels on this PR: ${LABELS:-<none>}"
 
@@ -119,9 +95,25 @@ jobs:
             echo "::warning::could not list changed files -- skipped the dev-only check"
             exit 0
           fi
-          while IFS= read -r f; do
-            if ! is_dev_only "$f"; then exit 0; fi
-          done <<< "$FILES"
+          # Same list and mechanism as release.yml: .github/.releaseignore matched
+          # by git's own engine in a throwaway empty repo. Missing/empty file =>
+          # nothing is dev-only => no warning.
+          RELEASEIGNORE="${GITHUB_WORKSPACE}/.github/.releaseignore"
+          if [ ! -s "$RELEASEIGNORE" ]; then exit 0; fi
+          mapfile -t FILE_LIST < <(printf '%s\n' "$FILES" | sort -u)
+          SCRATCH=$(mktemp -d)
+          git init -q "$SCRATCH"
+          printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths"
+          rc=0
+          git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
+            check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::warning::git check-ignore failed (rc=${rc}) -- skipped the dev-only check"
+            exit 0
+          fi
+          MATCHED=()
+          if [ "$rc" -eq 0 ]; then mapfile -d '' MATCHED < "${SCRATCH}.matched"; fi
+          [ "${#MATCHED[@]}" -eq "${#FILE_LIST[@]}" ] || exit 0
           msg="this diff is dev-only; semver:none (or no label) would skip the release (${matched} forces one)"
           echo "::warning::${msg}"
           echo "**Warning:** ${msg}" >> "$GITHUB_STEP_SUMMARY"
