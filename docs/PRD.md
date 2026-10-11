@@ -789,7 +789,7 @@ shipped: the goal was met, the mechanism was not the one originally sketched.
 ## 9. Deployment & operations
 
 - **Install:** `go install github.com/jedwards1230/scrim@latest`, or a signed release binary.
-- **Releases:** opt-in per PR via a `semver:patch|minor|major` label — no label, no release.
+- **Releases:** an explicit `semver:patch|minor|major` label releases that bump and `semver:none` never releases; with no label, a merged PR releases as patch unless every changed file is dev-only (CI, tests, docs, linter config).
   Each release publishes an immutable tag, cross-built binaries for linux/amd64, linux/arm64,
   darwin/amd64, darwin/arm64, windows/amd64, a `SHA256SUMS` manifest keyless-signed with cosign
   (Sigstore/Fulcio, logged to Rekor), a multi-arch GHCR image, and the Helm chart at

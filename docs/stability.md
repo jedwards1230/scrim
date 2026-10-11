@@ -1,6 +1,6 @@
 # Stability & versioning (pre-1.0)
 
-scrim is pre-1.0. Releases are opt-in and each publishes a single immutable
+scrim is pre-1.0. Releases are label- or diff-driven (dev-only merges skip them) and each publishes a single immutable
 `vX.Y.Z` tag (see [CONTRIBUTING.md](../CONTRIBUTING.md#releases)). Until 1.0,
 treat the surface as still-settling: verbs, flags, and on-disk layout can change
 between minor versions. This page says what "breaking" means and how upgrades

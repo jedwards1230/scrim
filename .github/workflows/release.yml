@@ -1,9 +1,19 @@
 # Single-file release pipeline (modeled on jedwards1230/deck's release.yml).
 #
-# Triggered on push to main (or manual dispatch). A `detect` job reads the merged
-# PR's semver label — releases are OPT-IN: the merged PR must carry a
-# semver:patch|minor|major label. No matching label → no release (no patch
-# default). When a release is warranted it delegates version compute, tag
+# Triggered on push to main (or manual dispatch). A `detect` job decides whether
+# the merged PR warrants a release:
+#   1. An explicit semver:major|minor|patch label always wins (that bump);
+#      semver:none always means no release -- even if the diff is dev-only.
+#   2. No label: the PR's changed files decide. If EVERY changed file is
+#      dev-only (CI, tests, linter config, docs, agent instructions -- see
+#      .github/.releaseignore, gitignore syntax) there is no release; otherwise
+#      patch.
+#   3. No usable file classification (no associated PR / direct push, the
+#      changed-files lookup fails or is empty, or the matcher errors): release
+#      as patch with a ::warning:: -- a missed release is invisible, an extra
+#      one is harmless. (semver:none still wins whenever labels were read.)
+#   4. workflow_dispatch always releases.
+# When a release is warranted it delegates version compute, tag
 # creation, and AI release notes to the shared
 # jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1, then
 # cross-builds the Go binaries (5 platforms), builds and pushes a multi-arch
@@ -66,6 +76,14 @@ jobs:
       dry_run: ${{ steps.bump.outputs.dry_run }}
       release: ${{ steps.bump.outputs.release }}
     steps:
+      # Only the dev-only path list is needed; sparse so detect stays cheap.
+      - name: Checkout release ignore list
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/.releaseignore
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Determine bump type
         id: bump
         env:
@@ -78,38 +96,100 @@ jobs:
             DRY="${{ inputs.dry_run }}"
             RELEASE="true"
           else
-            # Look up the PR(s) associated with this exact commit directly
-            # (a targeted commit->PR lookup, not a list+client-side-filter),
-            # so the merged PR can never fall outside a paginated window
-            # regardless of how many other PRs merge around the same time.
+            # Look up the PR associated with this exact commit directly (a
+            # targeted commit->PR lookup, not a list+client-side-filter), so the
+            # merged PR can never fall outside a paginated window. The PR may not
+            # be indexed yet right after the push, so retry only while it is
+            # still missing; labels are read from the same response.
+            PR_NUMBER=""
             LABELS=""
             for attempt in 1 2 3; do
+              # One call yields both the PR number and its labels, so a failed
+              # second lookup can never leave a found PR looking label-less
+              # (which would let an explicit semver:none fall through to the
+              # files rule). Output: first line = number, rest = label names.
               # shellcheck disable=SC2016 # $ENV.GITHUB_SHA is jq's own env-var
               # syntax, not a bash variable -- must stay single-quoted so bash
               # doesn't expand it before jq sees it.
-              LABELS=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
-                --jq '.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA) | .labels[].name' 2>/dev/null || echo "")
-              if [ -n "$LABELS" ]; then break; fi
-              echo "Attempt ${attempt}: no labels for ${GITHUB_SHA} yet, retrying in 5s..."
+              PR_INFO=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
+                --jq '[.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA)] | first | select(. != null) | (.number | tostring), (.labels[].name)' 2>/dev/null || echo "")
+              if [ -n "$PR_INFO" ]; then
+                PR_NUMBER=$(printf '%s\n' "$PR_INFO" | head -n 1)
+                LABELS=$(printf '%s\n' "$PR_INFO" | tail -n +2)
+                break
+              fi
+              echo "Attempt ${attempt}: no PR for ${GITHUB_SHA} yet, retrying in 5s..."
               sleep 5
             done
-            echo "Labels for ${GITHUB_SHA}: ${LABELS:-<none>}"
+            echo "PR for ${GITHUB_SHA}: ${PR_NUMBER:-<none>}; labels: ${LABELS:-<none>}"
             DRY="false"
-            if echo "$LABELS" | grep -q 'semver:major'; then
-              TYPE="major"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:minor'; then
-              TYPE="minor"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:patch'; then
+            if [ -z "$PR_NUMBER" ]; then
               TYPE="patch"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:none'; then
+              echo "::warning::no merged PR found for ${GITHUB_SHA} (direct push, or the lookup failed) — cannot classify the diff, releasing as patch."
+            elif echo "$LABELS" | grep -qx 'semver:major'; then
+              TYPE="major"; RELEASE="true"
+            elif echo "$LABELS" | grep -qx 'semver:minor'; then
+              TYPE="minor"; RELEASE="true"
+            elif echo "$LABELS" | grep -qx 'semver:patch'; then
+              TYPE="patch"; RELEASE="true"
+            elif echo "$LABELS" | grep -qx 'semver:none'; then
               # An explicit "no release" is a different fact from a missing
               # label, even though both skip. Distinguishing them means a
               # skipped run's log says whether that was intended.
               TYPE="none"; RELEASE="false"
-              echo "::notice::semver:none on the merged PR — no release, as declared"
+              echo "::notice::semver:none on PR #${PR_NUMBER} — no release, as declared"
+            elif ! FILES=$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" --paginate \
+                --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || [ -z "$FILES" ]; then
+              TYPE="patch"; RELEASE="true"
+              echo "::warning::no semver:* label on PR #${PR_NUMBER} and its changed files could not be listed (or the list is empty) — cannot classify the diff, releasing as patch."
             else
-              TYPE="none"; RELEASE="false"
-              echo "::warning::no semver:* label on the merged PR — skipping release. The semver-label PR check should have prevented this; if it did not run, the branch ruleset may not require it."
+              # No label: the changed files decide (previous_filename is included
+              # above so a rename OUT of a product path still counts as product).
+              # Dev-only paths live in .github/.releaseignore (gitignore syntax),
+              # matched by git's own engine in a throwaway empty repo so no other
+              # ignore source leaks in. Missing/empty file => nothing is dev-only.
+              RELEASEIGNORE="${GITHUB_WORKSPACE}/.github/.releaseignore"
+              mapfile -t FILE_LIST < <(printf '%s\n' "$FILES" | sort -u)
+              MATCHED=()
+              CHECK_RC=0
+              if [ -s "$RELEASEIGNORE" ]; then
+                # Any setup failure counts as a matcher error (CHECK_RC > 1).
+                SCRATCH=$(mktemp -d) || CHECK_RC=99
+                if [ "$CHECK_RC" -le 1 ]; then
+                  git init -q "$SCRATCH" || CHECK_RC=99
+                fi
+                if [ "$CHECK_RC" -le 1 ]; then
+                  printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths" || CHECK_RC=99
+                fi
+                if [ "$CHECK_RC" -le 1 ]; then
+                  git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
+                    check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || CHECK_RC=$?
+                fi
+                # rc: 0 = some matched, 1 = none matched, anything else = error
+                if [ "$CHECK_RC" -le 1 ]; then
+                  mapfile -d '' MATCHED < "${SCRATCH}.matched" || CHECK_RC=99
+                fi
+              else
+                echo "::notice::.github/.releaseignore is missing or empty -- no path counts as dev-only"
+              fi
+              if [ "$CHECK_RC" -gt 1 ]; then
+                TYPE="patch"; RELEASE="true"
+                echo "::warning::git check-ignore failed (rc=${CHECK_RC}) on PR #${PR_NUMBER} -- cannot classify the diff, releasing as patch."
+              else
+                declare -A IS_DEV=()
+                for f in "${MATCHED[@]}"; do IS_DEV["$f"]=1; done
+                FIRST_PRODUCT=""
+                for f in "${FILE_LIST[@]}"; do
+                  if [ -z "${IS_DEV[$f]+x}" ]; then FIRST_PRODUCT="$f"; break; fi
+                done
+                if [ -n "$FIRST_PRODUCT" ]; then
+                  TYPE="patch"; RELEASE="true"
+                  echo "::notice::no semver:* label on PR #${PR_NUMBER} — releasing as patch; first non-dev-only file: ${FIRST_PRODUCT}"
+                else
+                  TYPE="none"; RELEASE="false"
+                  echo "::notice::dev-only rule fired on PR #${PR_NUMBER} — no release (${#FILE_LIST[@]} changed path(s), all dev-only; first: $(printf '%s\n' "${FILE_LIST[@]}" | head -n 3 | paste -sd, -))"
+                fi
+              fi
             fi
           fi
           # Defensive: make sure a future label-parsing bug can't silently
