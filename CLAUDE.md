@@ -115,7 +115,7 @@ one clean filesystem event, one SSE reload, never a partial-serve. A
 `Dockerfile` at the repo root packages `scrim hub` as a container
 (`gcr.io/distroless/static-debian12:nonroot`, `/data` volume);
 `release.yml` publishes it multi-arch (amd64/arm64) to
-`ghcr.io/jedwards1230/scrim` on every semver-labeled release. The Kubernetes
+`ghcr.io/jedwards1230/scrim` on every release (a `semver:*` label, or a merged PR with at least one non-dev-only changed file). The Kubernetes
 deployment surface is the Helm chart at `deploy/charts/scrim` (see the
 documentation map above) -- CI-gated by the `chart-lint` job and pushed to
 `oci://ghcr.io/jedwards1230/charts` by the same release. What deliberately

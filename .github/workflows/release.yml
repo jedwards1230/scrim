@@ -1,9 +1,16 @@
 # Single-file release pipeline (modeled on jedwards1230/deck's release.yml).
 #
-# Triggered on push to main (or manual dispatch). A `detect` job reads the merged
-# PR's semver label — releases are OPT-IN: the merged PR must carry a
-# semver:patch|minor|major label. No matching label → no release (no patch
-# default). When a release is warranted it delegates version compute, tag
+# Triggered on push to main (or manual dispatch). A `detect` job decides whether
+# the merged PR warrants a release:
+#   1. An explicit semver:major|minor|patch label always wins (that bump);
+#      semver:none always means no release -- even if the diff is dev-only.
+#   2. No label: the PR's changed files decide. If EVERY changed file is
+#      dev-only (CI, tests, linter config, docs, agent instructions -- see the
+#      DEV_ONLY list in the detect step) there is no release; otherwise patch.
+#   3. No associated PR (direct push) or the changed-files lookup fails: no
+#      release, with a ::warning:: -- never a silent skip.
+#   4. workflow_dispatch always releases.
+# When a release is warranted it delegates version compute, tag
 # creation, and AI release notes to the shared
 # jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1, then
 # cross-builds the Go binaries (5 platforms), builds and pushes a multi-arch
@@ -78,38 +85,104 @@ jobs:
             DRY="${{ inputs.dry_run }}"
             RELEASE="true"
           else
-            # Look up the PR(s) associated with this exact commit directly
-            # (a targeted commit->PR lookup, not a list+client-side-filter),
-            # so the merged PR can never fall outside a paginated window
-            # regardless of how many other PRs merge around the same time.
+            # Dev-only paths. With no semver:* label, a merged PR releases as
+            # patch UNLESS every changed file matches one of these. Patterns are
+            # bash [[ == ]] globs, where `*` also matches `/` -- so 'docs/*'
+            # covers the whole subtree and '*_test.go' matches at any depth.
+            # Anything not listed counts as product. Keep in sync with the same
+            # list in semver-label.yml.
+            #
+            # Deliberately NOT listed (product): Go source, go.mod/go.sum,
+            # Dockerfile + .dockerignore, deploy/ (the Helm chart), api/,
+            # README.md, LICENSE, plugins/ + .claude-plugin/ (the published
+            # Claude plugin/skill users install), internal/**/templates|assets
+            # (go:embed'd). docs/* is dev-only: it is not embedded in the
+            # binary, not copied into the final image, and not served.
+            DEV_ONLY=(
+              '.github/*'
+              '.claude/*'
+              'CLAUDE.md'
+              'AGENTS.md'
+              '*/CLAUDE.md'
+              '*/AGENTS.md'
+              'CONTRIBUTING*'
+              'docs/*'
+              '*_test.go'
+              '*/testdata/*'
+              'scripts/e2e.sh'
+              'scripts/check-plugin-versions.sh'
+              'Makefile'
+              '.golangci*'
+              '.pre-commit-config.yaml'
+              '.editorconfig'
+              '.gitignore'
+            )
+            is_dev_only() {
+              local p
+              for p in "${DEV_ONLY[@]}"; do
+                # shellcheck disable=SC2053 # unquoted on purpose: $p is a glob
+                [[ $1 == $p ]] && return 0
+              done
+              return 1
+            }
+
+            # Look up the PR associated with this exact commit directly (a
+            # targeted commit->PR lookup, not a list+client-side-filter), so the
+            # merged PR can never fall outside a paginated window. The PR may not
+            # be indexed yet right after the push, so retry only while it is
+            # still missing; labels are read from the same response.
+            PR_NUMBER=""
             LABELS=""
             for attempt in 1 2 3; do
               # shellcheck disable=SC2016 # $ENV.GITHUB_SHA is jq's own env-var
               # syntax, not a bash variable -- must stay single-quoted so bash
               # doesn't expand it before jq sees it.
-              LABELS=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
-                --jq '.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA) | .labels[].name' 2>/dev/null || echo "")
-              if [ -n "$LABELS" ]; then break; fi
-              echo "Attempt ${attempt}: no labels for ${GITHUB_SHA} yet, retrying in 5s..."
+              PR_NUMBER=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
+                --jq '[.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA)] | first | .number // empty' 2>/dev/null || echo "")
+              if [ -n "$PR_NUMBER" ]; then
+                LABELS=$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name' 2>/dev/null || echo "")
+                break
+              fi
+              echo "Attempt ${attempt}: no PR for ${GITHUB_SHA} yet, retrying in 5s..."
               sleep 5
             done
-            echo "Labels for ${GITHUB_SHA}: ${LABELS:-<none>}"
+            echo "PR for ${GITHUB_SHA}: ${PR_NUMBER:-<none>}; labels: ${LABELS:-<none>}"
             DRY="false"
-            if echo "$LABELS" | grep -q 'semver:major'; then
+            if [ -z "$PR_NUMBER" ]; then
+              TYPE="none"; RELEASE="false"
+              echo "::warning::no merged PR found for ${GITHUB_SHA} (direct push, or the lookup failed) — skipping release. Run release.yml via workflow_dispatch if one is needed."
+            elif echo "$LABELS" | grep -qx 'semver:major'; then
               TYPE="major"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:minor'; then
+            elif echo "$LABELS" | grep -qx 'semver:minor'; then
               TYPE="minor"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:patch'; then
+            elif echo "$LABELS" | grep -qx 'semver:patch'; then
               TYPE="patch"; RELEASE="true"
-            elif echo "$LABELS" | grep -q 'semver:none'; then
+            elif echo "$LABELS" | grep -qx 'semver:none'; then
               # An explicit "no release" is a different fact from a missing
               # label, even though both skip. Distinguishing them means a
               # skipped run's log says whether that was intended.
               TYPE="none"; RELEASE="false"
-              echo "::notice::semver:none on the merged PR — no release, as declared"
-            else
+              echo "::notice::semver:none on PR #${PR_NUMBER} — no release, as declared"
+            elif ! FILES=$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" --paginate \
+                --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || [ -z "$FILES" ]; then
               TYPE="none"; RELEASE="false"
-              echo "::warning::no semver:* label on the merged PR — skipping release. The semver-label PR check should have prevented this; if it did not run, the branch ruleset may not require it."
+              echo "::warning::no semver:* label on PR #${PR_NUMBER} and its changed files could not be listed — skipping release rather than guessing."
+            else
+              # No label: the changed files decide. previous_filename is included
+              # above so a rename OUT of a product path still counts as product.
+              TOTAL=0
+              FIRST_PRODUCT=""
+              while IFS= read -r f; do
+                TOTAL=$((TOTAL + 1))
+                if [ -z "$FIRST_PRODUCT" ] && ! is_dev_only "$f"; then FIRST_PRODUCT="$f"; fi
+              done <<< "$FILES"
+              if [ -n "$FIRST_PRODUCT" ]; then
+                TYPE="patch"; RELEASE="true"
+                echo "::notice::no semver:* label on PR #${PR_NUMBER} — releasing as patch; first non-dev-only file: ${FIRST_PRODUCT}"
+              else
+                TYPE="none"; RELEASE="false"
+                echo "::notice::dev-only rule fired on PR #${PR_NUMBER} — no release (${TOTAL} changed path(s), all dev-only; first: $(printf '%s\n' "$FILES" | head -n 3 | paste -sd, -))"
+              fi
             fi
           fi
           # Defensive: make sure a future label-parsing bug can't silently

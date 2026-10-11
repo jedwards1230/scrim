@@ -61,32 +61,42 @@ the README and any affected docs in the same PR.
 
 - Open the PR against `main`.
 - Every PR runs CI. Resolve **all** review threads before the PR is merged.
-- **Every PR needs exactly one `semver:*` label** — see [Releases](#releases). The
-  `Semver label` check enforces it and re-runs when you add the label, so there's
-  no need to push another commit.
+- **A PR carries at most one `semver:*` label** — see [Releases](#releases). The
+  `Semver label` check enforces that and re-runs when you change labels. With no
+  label, the changed files decide whether the merge releases.
 - A PR can be merged once CI is green and all review threads are resolved.
 
 ## Releases
 
-Every PR must declare what it does to the version, using exactly one label:
+A PR may declare what it does to the version with one label:
 
 | Label | Effect on merge |
 |---|---|
 | `semver:major` | Cut `vX.0.0` |
 | `semver:minor` | Cut `v0.Y.0` |
 | `semver:patch` | Cut `v0.0.Z` |
-| `semver:none` | **No release** — docs, chore, CI-only |
+| `semver:none` | **No release** — even if the diff touches product code |
+| *(no label)* | Decided by the diff: **no release** if every changed file is dev-only, otherwise **patch** |
+
+An explicit label always wins. Without one, `release.yml` lists the merged PR's
+changed files (including the old path of a rename) and skips the release only
+when every one matches the dev-only list: `.github/`, `.claude/`, `CLAUDE.md` /
+`AGENTS.md`, `CONTRIBUTING*`, `docs/`, `*_test.go` and `testdata/`, `Makefile`,
+`scripts/e2e.sh`, `scripts/check-plugin-versions.sh`, and linter / formatter /
+git config. Everything else is product, including Go source, `go.mod` / `go.sum`,
+the `Dockerfile`, `deploy/` (the Helm chart), `api/`, `README.md`, and `plugins/`
+(the published Claude plugin). The list is the `DEV_ONLY` array in
+`release.yml`'s detect step, duplicated in `semver-label.yml` (keep them in
+sync). A PR with no associated merged PR (a direct push) or whose changed files
+can't be listed does not release and logs a `::warning::`.
+
+The `Semver label` check never requires a label; it fails only on more than one
+`semver:*` label, and warns (without failing) when a `semver:major|minor|patch`
+label sits on a dev-only diff.
 
 A release publishes a single immutable `vX.Y.Z` tag, cross-built binaries, a
 multi-arch image, and the Helm chart at
 `oci://ghcr.io/jedwards1230/charts/scrim`.
-
-`semver:none` is a real answer, not a way to opt out of the question. It exists
-because the alternative — inferring "no release" from a *missing* label — is
-indistinguishable from forgetting, and `release.yml` skips every job while still
-reporting **success**. A green run that published nothing looks exactly like one
-that published everything; that failure mode silently swallowed three releases
-before the check existed.
 
 If a release is missed anyway, recover it with a manual dispatch rather than a
 second merge:
