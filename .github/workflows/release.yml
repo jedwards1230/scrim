@@ -134,13 +134,18 @@ jobs:
             PR_NUMBER=""
             LABELS=""
             for attempt in 1 2 3; do
+              # One call yields both the PR number and its labels, so a failed
+              # second lookup can never leave a found PR looking label-less
+              # (which would let an explicit semver:none fall through to the
+              # files rule). Output: first line = number, rest = label names.
               # shellcheck disable=SC2016 # $ENV.GITHUB_SHA is jq's own env-var
               # syntax, not a bash variable -- must stay single-quoted so bash
               # doesn't expand it before jq sees it.
-              PR_NUMBER=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
-                --jq '[.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA)] | first | .number // empty' 2>/dev/null || echo "")
-              if [ -n "$PR_NUMBER" ]; then
-                LABELS=$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name' 2>/dev/null || echo "")
+              PR_INFO=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" \
+                --jq '[.[] | select(.merge_commit_sha == $ENV.GITHUB_SHA)] | first | select(. != null) | (.number | tostring), (.labels[].name)' 2>/dev/null || echo "")
+              if [ -n "$PR_INFO" ]; then
+                PR_NUMBER=$(printf '%s\n' "$PR_INFO" | head -n 1)
+                LABELS=$(printf '%s\n' "$PR_INFO" | tail -n +2)
                 break
               fi
               echo "Attempt ${attempt}: no PR for ${GITHUB_SHA} yet, retrying in 5s..."
