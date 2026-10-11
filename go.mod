@@ -1,6 +1,6 @@
 module github.com/jedwards1230/scrim
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
@@ -20,7 +20,7 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/mod v0.33.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect
