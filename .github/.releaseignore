@@ -5,7 +5,9 @@
 # .github/workflows/semver-label.yml.
 # NOTE git semantics: a file can't be re-included if a parent DIRECTORY is excluded.
 #   docs/**  +  !docs/user/**   does NOT work (docs/user/ itself is excluded);
-#   docs/**  +  !docs/user/  +  !docs/user/**   does. File-level `!docs/openapi.yaml` works.
+#   docs/**  +  !docs/user/  +  !docs/user/**   does.
+# A file-level `!docs/x.md` works only if its directory is not excluded: with the `/docs/`
+# rule below it does NOT; use `/docs/*` (or `/docs/**`) + `!/docs/x.md` instead.
 #
 # Product (deliberately NOT listed): Go source, go.mod/go.sum, Dockerfile + .dockerignore,
 # deploy/ (Helm chart), api/ (embedded OpenAPI), embedded templates/assets, README.md,
