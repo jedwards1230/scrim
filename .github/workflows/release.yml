@@ -166,7 +166,9 @@ jobs:
                     check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || CHECK_RC=$?
                 fi
                 # rc: 0 = some matched, 1 = none matched, anything else = error
-                if [ "$CHECK_RC" -le 1 ]; then mapfile -d '' MATCHED < "${SCRATCH}.matched"; fi
+                if [ "$CHECK_RC" -le 1 ]; then
+                  mapfile -d '' MATCHED < "${SCRATCH}.matched" || CHECK_RC=99
+                fi
               else
                 echo "::notice::.github/.releaseignore is missing or empty -- no path counts as dev-only"
               fi

@@ -100,19 +100,20 @@ jobs:
           # nothing is dev-only => no warning.
           RELEASEIGNORE="${GITHUB_WORKSPACE}/.github/.releaseignore"
           if [ ! -s "$RELEASEIGNORE" ]; then exit 0; fi
-          mapfile -t FILE_LIST < <(printf '%s\n' "$FILES" | sort -u)
-          SCRATCH=$(mktemp -d)
-          git init -q "$SCRATCH"
-          printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths"
+          # This warning is advisory: any setup failure skips it, never fails the job.
+          skip() { echo "::warning::dev-only check skipped: $1"; exit 0; }
+          mapfile -t FILE_LIST < <(printf '%s\n' "$FILES" | sort -u) || skip "could not read file list"
+          SCRATCH=$(mktemp -d) || skip "mktemp failed"
+          git init -q "$SCRATCH" || skip "git init failed"
+          printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths" || skip "could not write path list"
           rc=0
           git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
             check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || rc=$?
-          if [ "$rc" -gt 1 ]; then
-            echo "::warning::git check-ignore failed (rc=${rc}) -- skipped the dev-only check"
-            exit 0
-          fi
+          if [ "$rc" -gt 1 ]; then skip "git check-ignore failed (rc=${rc})"; fi
           MATCHED=()
-          if [ "$rc" -eq 0 ]; then mapfile -d '' MATCHED < "${SCRATCH}.matched"; fi
+          if [ "$rc" -eq 0 ]; then
+            mapfile -d '' MATCHED < "${SCRATCH}.matched" || skip "could not read matcher output"
+          fi
           [ "${#MATCHED[@]}" -eq "${#FILE_LIST[@]}" ] || exit 0
           msg="this diff is dev-only; semver:none (or no label) would skip the release (${matched} forces one)"
           echo "::warning::${msg}"
