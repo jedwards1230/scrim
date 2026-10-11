@@ -87,9 +87,11 @@ doesn't match is product, including Go source, `go.mod` / `go.sum`, the
 `Dockerfile`, `deploy/` (the Helm chart), `api/`, `README.md`, and `plugins/`
 (the published Claude plugin). Mind git's rule that a file can't be re-included
 once a parent *directory* is excluded (`docs/` + `!docs/x.md` does not work).
-A missing or empty file means nothing is dev-only. A PR with no associated
-merged PR (a direct push) or whose changed files can't be listed does not
-release and logs a `::warning::`.
+A missing or empty file means nothing is dev-only. If the diff can't be
+classified (no associated merged PR, e.g. a direct push; the changed-files list
+fails or is empty; or the matcher errors), the merge releases as patch with a
+`::warning::` -- a missed release is invisible, an extra one is harmless. A
+`semver:none` label is still honored whenever the PR's labels were read.
 
 The `Semver label` check never requires a label; it fails only on more than one
 `semver:*` label, and warns (without failing) when a `semver:major|minor|patch`

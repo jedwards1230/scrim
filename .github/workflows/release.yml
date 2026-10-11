@@ -8,8 +8,10 @@
 #      dev-only (CI, tests, linter config, docs, agent instructions -- see
 #      .github/.releaseignore, gitignore syntax) there is no release; otherwise
 #      patch.
-#   3. No associated PR (direct push) or the changed-files lookup fails: no
-#      release, with a ::warning:: -- never a silent skip.
+#   3. No usable file classification (no associated PR / direct push, the
+#      changed-files lookup fails or is empty, or the matcher errors): release
+#      as patch with a ::warning:: -- a missed release is invisible, an extra
+#      one is harmless. (semver:none still wins whenever labels were read.)
 #   4. workflow_dispatch always releases.
 # When a release is warranted it delegates version compute, tag
 # creation, and AI release notes to the shared
@@ -122,8 +124,8 @@ jobs:
             echo "PR for ${GITHUB_SHA}: ${PR_NUMBER:-<none>}; labels: ${LABELS:-<none>}"
             DRY="false"
             if [ -z "$PR_NUMBER" ]; then
-              TYPE="none"; RELEASE="false"
-              echo "::warning::no merged PR found for ${GITHUB_SHA} (direct push, or the lookup failed) — skipping release. Run release.yml via workflow_dispatch if one is needed."
+              TYPE="patch"; RELEASE="true"
+              echo "::warning::no merged PR found for ${GITHUB_SHA} (direct push, or the lookup failed) — cannot classify the diff, releasing as patch."
             elif echo "$LABELS" | grep -qx 'semver:major'; then
               TYPE="major"; RELEASE="true"
             elif echo "$LABELS" | grep -qx 'semver:minor'; then
@@ -138,8 +140,8 @@ jobs:
               echo "::notice::semver:none on PR #${PR_NUMBER} — no release, as declared"
             elif ! FILES=$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" --paginate \
                 --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || [ -z "$FILES" ]; then
-              TYPE="none"; RELEASE="false"
-              echo "::warning::no semver:* label on PR #${PR_NUMBER} and its changed files could not be listed — skipping release rather than guessing."
+              TYPE="patch"; RELEASE="true"
+              echo "::warning::no semver:* label on PR #${PR_NUMBER} and its changed files could not be listed (or the list is empty) — cannot classify the diff, releasing as patch."
             else
               # No label: the changed files decide (previous_filename is included
               # above so a rename OUT of a product path still counts as product).
@@ -151,19 +153,26 @@ jobs:
               MATCHED=()
               CHECK_RC=0
               if [ -s "$RELEASEIGNORE" ]; then
-                SCRATCH=$(mktemp -d)
-                git init -q "$SCRATCH"
-                printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths"
-                git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
-                  check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || CHECK_RC=$?
+                # Any setup failure counts as a matcher error (CHECK_RC > 1).
+                SCRATCH=$(mktemp -d) || CHECK_RC=99
+                if [ "$CHECK_RC" -le 1 ]; then
+                  git init -q "$SCRATCH" || CHECK_RC=99
+                fi
+                if [ "$CHECK_RC" -le 1 ]; then
+                  printf '%s\0' "${FILE_LIST[@]}" > "${SCRATCH}.paths" || CHECK_RC=99
+                fi
+                if [ "$CHECK_RC" -le 1 ]; then
+                  git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
+                    check-ignore --no-index -z --stdin < "${SCRATCH}.paths" > "${SCRATCH}.matched" || CHECK_RC=$?
+                fi
                 # rc: 0 = some matched, 1 = none matched, anything else = error
                 if [ "$CHECK_RC" -le 1 ]; then mapfile -d '' MATCHED < "${SCRATCH}.matched"; fi
               else
                 echo "::notice::.github/.releaseignore is missing or empty -- no path counts as dev-only"
               fi
               if [ "$CHECK_RC" -gt 1 ]; then
-                TYPE="none"; RELEASE="false"
-                echo "::warning::git check-ignore failed (rc=${CHECK_RC}) on PR #${PR_NUMBER} -- skipping release rather than guessing."
+                TYPE="patch"; RELEASE="true"
+                echo "::warning::git check-ignore failed (rc=${CHECK_RC}) on PR #${PR_NUMBER} -- cannot classify the diff, releasing as patch."
               else
                 declare -A IS_DEV=()
                 for f in "${MATCHED[@]}"; do IS_DEV["$f"]=1; done
