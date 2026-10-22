@@ -450,7 +450,8 @@ leave local mode at 17.
 | `list_comments` | read | Open threads on a canvas, each with the version it was written against. **(Not built)** — hub only, `#129` |
 | `resolve_comment` | write | Mark one comment resolved. **(Not built)** — hub only, `#129` |
 
-Transports: stdio by default; `--http ADDR` for streamable HTTP at `/mcp` (health at `/healthz`).
+Transports: stdio by default; `--http ADDR` for stateless streamable HTTP at `/mcp` (health at
+`/healthz`; POST only, no `Mcp-Session-Id`, serves MCP `2026-07-28` and the legacy handshake).
 HTTP binds loopback unless `--allow-lan` or OAuth is configured — it fails closed rather than
 silently exposing. There is deliberately **no `open` tool**.
 
