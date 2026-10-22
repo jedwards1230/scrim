@@ -84,6 +84,15 @@ is refused unless you pass `--allow-lan` or configure OAuth resource mode
 (below), which authenticates every request instead.
 `scrim mcp --http 127.0.0.1:9797` is the safe default.
 
+The HTTP handler is **stateless**: each POST to `/mcp` is served on its own
+temporary session, no `Mcp-Session-Id` is issued, and `GET`/`DELETE /mcp`
+answer `405`. That is what lets it serve MCP `2026-07-28` (the sessionless
+revision) alongside the legacy `initialize` handshake, and accept calls that
+carry the `io.modelcontextprotocol/protocolVersion` `_meta` key (a stateful
+go-sdk handler rejects those with `-32022`). Nothing is lost: scrim exposes
+tools only, with no resources, subscriptions, or server-to-client requests, and
+identity is resolved per request.
+
 Two identity layers apply to `--http`. They compose, but for per-user
 attribution a validated OAuth token wins (see precedence below):
 

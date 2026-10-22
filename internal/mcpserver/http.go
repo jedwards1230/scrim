@@ -65,12 +65,22 @@ func IsLoopbackAddr(addr string) bool {
 // In hub mode the OAuth gate additionally gets an agentRegistrar, so a client
 // whose token validates is registered with the hub AT CONNECT rather than on
 // its first tool call (agentreg.go). Local mode has no remote hub and gets none.
+//
+// The handler is stateless: every POST gets a temporary session, no
+// Mcp-Session-Id is issued, and GET/DELETE /mcp answer 405. go-sdk serves MCP
+// 2026-07-28 over HTTP only in this mode, and a stateful handler rejects any
+// call carrying the `_meta` io.modelcontextprotocol/protocolVersion key with
+// -32022 -- which a forwarding proxy that speaks 2026-07-28 upstream sends even
+// on a legacy session. Nothing here needs a session: scrim exposes tools only
+// (no resources, subscriptions, or server->client requests), and identity is
+// resolved per request from the bearer (oauth.go) or the signed headers
+// (identity.go).
 func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthValidator) http.Handler {
 	srv, b := newServerWithBackend(cfg, ver, hub)
 	mux := http.NewServeMux()
 	var mcpHandler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
-		nil,
+		&mcp.StreamableHTTPOptions{Stateless: true},
 	)
 	if oauth != nil {
 		// Hub mode only: let the OAuth gate register a newly-seen agent
@@ -101,9 +111,9 @@ func newHTTPHandler(cfg config.Config, ver string, hub *HubTarget, oauth *oauthV
 // Timeout rationale (satisfies gosec G112/G114 and blunts Slowloris):
 //   - ReadHeaderTimeout (10s): bounds slow-header (Slowloris) attacks.
 //   - ReadTimeout (60s): bounds the full request read. Streamable-HTTP MCP
-//     requests are small JSON-RPC POST bodies (and bodyless GETs for the
-//     server→client SSE listen stream), so 60s is generous headroom while
-//     still adding resource-exhaustion protection.
+//     requests are small JSON-RPC POST bodies (the handler is stateless, so
+//     there is no GET listen stream), so 60s is generous headroom while still
+//     adding resource-exhaustion protection.
 //   - IdleTimeout (120s): bounds idle keep-alive connection reuse.
 //   - WriteTimeout is intentionally LEFT AT 0 (unlimited): MCP streaming
 //     responses have no upper bound on duration, so any finite WriteTimeout
